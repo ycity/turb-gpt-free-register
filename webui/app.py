@@ -13,6 +13,7 @@ Flask 本地控制台。
 import logging
 import gzip
 import json
+import re
 import threading
 import time
 import uuid
@@ -29,6 +30,9 @@ from webui import config_editor, proxy_pool
 logger = logging.getLogger(__name__)
 
 _POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "cloudflare_domain"))
+
+# 云浏览器注册把 `skyvern:jp` 这类环境标签存进 proxy_used，这种值不含凭据，可直接展示。
+_ENV_PROXY_TAG_RE = re.compile(r"[a-z][a-z0-9_]*:[a-z0-9_-]{1,32}", re.IGNORECASE)
 
 
 def _pool_source_arg(default: str = "outlook") -> str:
@@ -78,14 +82,73 @@ def _paginate_items(items: list[dict], *, page: int, page_size: int) -> dict:
     }
 
 
-def _compact_account_for_list(row: dict) -> dict:
+def _proxy_identity(value: str) -> str:
+    """代理地址的规范形式；不是代理地址时返回原文。"""
+    from config.proxy import normalize_proxy_url
+
+    text = str(value or "").strip()
+    try:
+        return proxy_pool.canonical_proxy_url(normalize_proxy_url(text))
+    except ValueError:
+        return text
+
+
+def _is_proxy_address(value: str) -> bool:
+    from config.proxy import normalize_proxy_url
+
+    try:
+        proxy_pool.canonical_proxy_url(normalize_proxy_url(str(value or "").strip()))
+    except ValueError:
+        return False
+    return True
+
+
+def _proxy_name_map() -> dict[str, str]:
+    """代理池里「地址 -> 名称」的映射，只收录已命名的代理。"""
+    from config.proxy import proxy_pool_entries
+
+    out: dict[str, str] = {}
+    try:
+        lines = config_editor.get_field_value("PROXY_POOL") or []
+    except Exception:
+        logger.warning("读取代理池名称失败", exc_info=True)
+        return out
+    for entry in proxy_pool_entries(lines):
+        name = str(entry.get("name") or "").strip()
+        if name:
+            out[_proxy_identity(entry["url"])] = name
+    return out
+
+
+def _registration_proxy_name(row: dict, proxy_names: dict[str, str]) -> str:
+    """账号注册所用代理的展示名。
+
+    只返回名称，不返回代理地址：proxy_used 可能是带账号密码的代理地址，
+    也可能是 `1.2.3.4:1080:user:pass` 这类简写。代理已从代理池删除或未命名
+    时返回空，只有 `skyvern:jp` 这类云浏览器环境标签才按原文展示。
+    """
+    raw = str(row.get("proxy_used") or "").strip()
+    if not raw:
+        return ""
+    name = proxy_names.get(_proxy_identity(raw))
+    if name:
+        return name
+    if _is_proxy_address(raw) or not _ENV_PROXY_TAG_RE.fullmatch(raw):
+        return ""
+    return raw
+
+
+def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = None) -> dict:
     """账号列表轻量对象：只返回当前表格渲染和按钮判断必需字段。
 
     原则：
     - 不返回完整 Token / Token 预览 / TOTP Secret / Agent Token。
+    - 不返回注册代理地址，只返回代理池里的名称，避免下发代理账号密码。
     - 时间戳、错误原因、提链详情等只在前端确实要展示时返回；空值不返回。
     - 复制/下载敏感内容时再通过 /secret 接口按需读取。
     """
+    if proxy_names is None:
+        proxy_names = _proxy_name_map()
     out = {
         "id": row.get("id"),
         "email": row.get("email"),
@@ -110,6 +173,10 @@ def _compact_account_for_list(row: dict) -> dict:
     ).strip()
     if password:
         out["password"] = password
+
+    proxy_name = _registration_proxy_name(row, proxy_names)
+    if proxy_name:
+        out["register_proxy_name"] = proxy_name
 
     # 这些是列表固定列直接展示字段。
     for key in (
@@ -435,7 +502,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
             result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
-            result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
+            proxy_names = _proxy_name_map()
+            result["items"] = [_compact_account_for_list(r, proxy_names) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
         return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter))

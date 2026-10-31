@@ -371,13 +371,89 @@ def _page_warmup(driver, *, reason: str = "") -> None:
 
 
 _MISSING_PAGE_ELEMENT_REFRESH_RETRIES = 3
+# 人机验证最长等待时间；Turnstile 通常几秒内自动过，拖太久多半是真被拦了。
+_CHALLENGE_MAX_WAIT_SECONDS = 45.0
+_CHALLENGE_POLL_SECONDS = 1.5
+
+
+def detect_challenge(driver) -> dict:
+    """探测当前页面是否在跑 Cloudflare 人机验证。
+
+    返回 {active, kind, detail}。两种形态都要认：
+      - 整页拦截页（Just a moment / cf-chl 系列容器）；
+      - 嵌在登录表单里的 Turnstile widget（challenges.cloudflare.com 的 iframe）。
+    读取失败时按"没有挑战"处理，避免探测本身阻断注册。
+    """
+    try:
+        res = driver.execute_script(r"""
+        const title = (document.title || '').toLowerCase();
+        const url = location.href || '';
+        const interstitialTitle = ['just a moment', 'checking your browser', '请稍候', '正在验证']
+          .some(t => title.includes(t));
+        const interstitialNode = !!document.querySelector(
+          '#cf-challenge-running, #challenge-running, #challenge-form, #cf-please-wait, .cf-browser-verification');
+        const widget = [...document.querySelectorAll('iframe[src*="challenges.cloudflare.com"]')]
+          .some(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+        const widgetNode = !!document.querySelector('.cf-turnstile, #cf-chl-widget, [id^="cf-chl-widget"]');
+        const urlMark = url.includes('__cf_chl') || url.includes('/cdn-cgi/challenge-platform');
+        let kind = '';
+        if (interstitialTitle || interstitialNode || urlMark) kind = 'interstitial';
+        else if (widget || widgetNode) kind = 'widget';
+        return {active: !!kind, kind, title: document.title || '', url};
+        """) or {}
+    except Exception as exc:
+        return {"active": False, "kind": "", "detail": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(res, dict):
+        return {"active": False, "kind": "", "detail": ""}
+    return {
+        "active": bool(res.get("active")),
+        "kind": str(res.get("kind") or ""),
+        "detail": f"title={str(res.get('title') or '')[:60]} url={str(res.get('url') or '')[:120]}",
+    }
+
+
+def wait_out_challenge(driver, *, step: str = "", timeout: float = _CHALLENGE_MAX_WAIT_SECONDS,
+                       done: Callable[[], bool] | None = None) -> bool:
+    """检测到人机验证就安静等它跑完，期间不刷新也不重复提交。
+
+    返回 True 表示"确实等过一次挑战"。挑战消失、done() 为真或超时都会返回。
+    刷新会打断 Turnstile 并让它从头再来，所以这里只等待。
+    """
+    first = detect_challenge(driver)
+    if not first.get("active"):
+        return False
+    logger.info("%s 检测到 Cloudflare 人机验证（%s），安静等待通过，最长 %.0fs：%s%s",
+                _log_prefix(driver), first.get("kind") or "?", timeout,
+                f"{step} " if step else "", first.get("detail") or "")
+    started = time.time()
+    while time.time() - started < timeout:
+        _check_manual_stop()
+        time.sleep(_CHALLENGE_POLL_SECONDS)
+        if done is not None:
+            try:
+                if done():
+                    logger.info("%s 人机验证期间页面已就绪，用时 %.1fs", _log_prefix(driver), time.time() - started)
+                    return True
+            except Exception:
+                pass
+        if not detect_challenge(driver).get("active"):
+            logger.info("%s 人机验证已通过，用时 %.1fs", _log_prefix(driver), time.time() - started)
+            return True
+    logger.warning("%s 人机验证等待超时（%.0fs 仍未通过），继续按原流程重试", _log_prefix(driver), timeout)
+    return True
 
 
 def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> bool:
-    """元素缺失时刷新当前页面，避免把页面迟渲染误判成流程失败。"""
+    """元素缺失时刷新当前页面，避免把页面迟渲染误判成流程失败。
+
+    刷新前先确认不是卡在人机验证上：那种情况刷新只会让挑战重来，必须安静等。
+    """
     max_retries = _MISSING_PAGE_ELEMENT_REFRESH_RETRIES
     if retry_index >= max_retries:
         return False
+    # 正在过挑战：等它跑完就让调用方重新找元素，这一轮不刷新。
+    if wait_out_challenge(driver, step=step):
+        return True
     try:
         current_url = str(getattr(driver, "current_url", "") or "")
         logger.warning(
@@ -1124,6 +1200,19 @@ def _submit_email_and_wait_next(
         if state_name in ("password", "otp", "logged_in"):
             logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
+        # 提交后没反应时，先确认不是卡在人机验证上：挑战没过的时候反复重交只会
+        # 让风控更重，NextAuth 接口这时也多半直接 403。
+        if wait_out_challenge(
+            driver,
+            step="邮箱提交后",
+            done=lambda: bool(_current_email_submit_next_state(driver)),
+        ):
+            advanced_after_challenge = _current_email_submit_next_state(driver)
+            if advanced_after_challenge:
+                if advanced_after_challenge == "login_password":
+                    raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+                logger.info("%s 人机验证通过后页面已进入下一步：%s", _log_prefix(driver), advanced_after_challenge)
+                return advanced_after_challenge
         diagnostic_state = _email_input_value_state(driver)
         # Selenium 读取 DOM 时页面可能恰好完成慢跳转。诊断采样后必须再判断一次，
         # 否则会在已经出现验证码输入框时错误进入“重新填写邮箱”分支。
@@ -1154,7 +1243,10 @@ def _submit_email_and_wait_next(
                 raise
             logger.warning("%s NextAuth signin 兜底异常：%s", _log_prefix(driver), na_exc)
         time.sleep(1.0)
-    raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
+    # 失败原因要写清楚：被人机验证拦住和页面结构变化是完全不同的两件事。
+    blocked = detect_challenge(driver)
+    hint = f"（仍停留在 Cloudflare 人机验证：{blocked.get('kind')}）" if blocked.get("active") else ""
+    raise RuntimeError(f"邮箱提交后未进入密码页/验证码页{hint}，最后状态={last_state}")
 
 
 def _type_otp(driver, code: str) -> None:
