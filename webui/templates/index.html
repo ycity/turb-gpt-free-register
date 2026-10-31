@@ -1580,7 +1580,7 @@
     .outlook-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
 
     /* ---- 邮箱池导入弹窗 ---- */
-    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden) {
+    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -1688,6 +1688,21 @@
       color: #606266; font: inherit; font-size: 13px; box-sizing: border-box;
     }
     .outlook-import-result:empty { display: none; }
+    #promoImportModal textarea, #teamCheckoutModal input[type="text"], #teamCheckoutModal input[type="number"], #teamCheckoutModal textarea {
+      width: 100%; box-sizing: border-box; margin: 0; padding: 8px 10px;
+      border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px;
+    }
+    .team-checkout-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #303133; cursor: pointer; }
+    .team-checkout-check input { width: 16px; height: 16px; margin: 0; flex-shrink: 0; }
+    .team-checkout-grid { display: grid; grid-template-columns: minmax(0, 1fr) 80px 80px 80px; gap: 12px; }
+    #teamProvider { width: 100%; box-sizing: border-box; margin: 0; padding: 8px 10px; border: 1px solid #dcdfe6; border-radius: 6px; font-size: 13px; background: #fff; }
+    .team-checkout-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .team-checkout-actions a { text-decoration: none; }
+    .team-checkout-status { padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.6; word-break: break-all; }
+    .team-checkout-status--info { background: #eef4ff; color: #1d4ed8; }
+    .team-checkout-status--ok { background: #e9f7ef; color: #067647; }
+    .team-checkout-status--error { background: #fff0ef; color: #b42318; }
+    .team-checkout-meta { margin-top: 4px; font-size: 12px; opacity: .85; }
     .outlook-import-foot {
       display: flex; justify-content: flex-end; gap: 10px;
       padding: 14px 20px 18px; border-top: 1px solid #ebeef5; background: #fafbfc;
@@ -2064,7 +2079,13 @@
       </svg>
       <span class="sidebar-item-label">Codex 授权</span>
     </button>
-    <button type="button" data-tab="outlook" class="sidebar-item">
+        <button type="button" data-tab="promos" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+      </svg>
+      <span class="sidebar-item-label">优惠码池</span>
+    </button>
+<button type="button" data-tab="outlook" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/>
       </svg>
@@ -2452,6 +2473,44 @@
     </section>
   </div>
 
+  
+  <!-- ============ 优惠码池 ============ -->
+  <div id="tab-promos" class="hidden">
+    <h1 class="register-title">优惠码池</h1>
+    <section class="outlook-panel-v2" id="promosPanelV2" aria-label="优惠码池">
+      <div class="outlook-filter-v2">
+        <div class="outlook-filter-stats" style="display:flex; gap:16px; align-items:center; flex:1;">
+          <span style="font-weight:600; color:#303133;">优惠码池概览：</span>
+          <span class="pill status-available" id="promoStatUnused">未用: 0</span>
+          <span class="pill status-running" id="promoStatUsing">使用中: 0</span>
+          <span class="pill status-used" id="promoStatUsed">已用: 0</span>
+          <span class="pill status-failed" id="promoStatExpired">失效/过期: 0</span>
+          <span style="color:#909399; font-size:12px;">总计: <span id="promoStatTotal">0</span></span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnOpenPromoImport">批量导入优惠码</button>
+          <button type="button" class="jobs-tb-btn" id="btnRefreshPromos">刷新</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnClearExpiredPromos">清空已失效</button>
+        </div>
+      </div>
+      <div class="outlook-table-v2-wrap">
+        <table class="outlook-table-v2">
+          <thead>
+            <tr>
+              <th style="width:60px;">ID</th>
+              <th style="width:220px;">优惠码</th>
+              <th style="width:90px;">状态</th>
+              <th style="width:180px;">绑定账号</th>
+              <th style="width:160px;">导入时间</th>
+              <th>最后状态/错误</th>
+            </tr>
+          </thead>
+          <tbody id="promosBodyV2"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
   <!-- ============ 邮箱池 ============ -->
   <div id="tab-outlook" class="hidden">
     <h1 class="register-title">邮箱池</h1>
@@ -2626,6 +2685,82 @@
   <h3>支付二维码 <button class="btn" onclick="closeQrModal()">关闭</button></h3>
   <img id="qrImage" alt="支付二维码">
   <a id="qrOpenLink" class="qr-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+</div>
+
+<div id="promoImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="promoImportTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(560px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="promoImportTitle">批量导入优惠码</h3>
+        <p>每行一个：纯优惠码，或带 promo= / coupon= 参数的链接（自动提取优惠码）。重复的码会自动忽略。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnClosePromoImport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <label class="outlook-import-field">
+        <span>优惠码列表</span>
+        <textarea id="promoImportText" rows="10" class="mono" placeholder="TEAMPROMO01&#10;https://chatgpt.com/?promo=TEAMPROMO02"></textarea>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelPromoImport">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitPromoImport">立即导入</button>
+    </div>
+  </div>
+</div>
+<div id="teamCheckoutModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="teamCheckoutTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(600px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="teamCheckoutTitle">生成 Team 结账长链接</h3>
+        <p id="teamCheckoutHint"></p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseTeamCheckout" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <input type="hidden" id="teamCheckoutAccountId">
+      <label class="outlook-import-field">
+        <span>提链方式</span>
+        <select id="teamProvider">
+          <option value="native">本地直连 chatgpt.com（自研，token 不经过第三方）</option>
+          <option value="jinmotech">jinmotech 接口</option>
+        </select>
+      </label>
+      <label class="outlook-import-field">
+        <span>优惠码 <small class="muted" id="teamModalPromoPoolHint">池中可用: -</small></span>
+        <input type="text" id="teamPromoCode" placeholder="留空 = 自动使用优惠码池中下一个未使用的码" autocomplete="off">
+      </label>
+      <label class="team-checkout-check">
+        <input type="checkbox" id="teamUse1024Proxy" checked>
+        <span>自动从 1024proxy 拉取代理（填了自定义代理以自定义为准；本地直连两者都不用时走项目代理池）</span>
+      </label>
+      <label class="outlook-import-field">
+        <span>自定义代理（可选）</span>
+        <input type="text" id="teamProxyAddress" placeholder="host:port 或 host:port:user:pass" autocomplete="off">
+      </label>
+      <div class="team-checkout-grid">
+        <label class="outlook-import-field"><span>工作区名称</span><input type="text" id="teamWorkspace" value="MyTeam"></label>
+        <label class="outlook-import-field"><span>席位</span><input type="number" id="teamSeats" value="2" min="2" max="100"></label>
+        <label class="outlook-import-field"><span>国家</span><input type="text" id="teamCountry" value="EG" maxlength="2"></label>
+        <label class="outlook-import-field"><span>货币</span><input type="text" id="teamCurrency" placeholder="自动" maxlength="3"></label>
+      </div>
+      <div id="teamCheckoutStatus" class="hidden"></div>
+      <div id="teamCheckoutResultBox" class="hidden">
+        <label class="outlook-import-field">
+          <span>支付长链接</span>
+          <textarea id="teamResultUrlText" rows="4" class="mono" readonly></textarea>
+        </label>
+        <div class="team-checkout-actions">
+          <button type="button" class="jobs-tb-btn" id="btnCopyTeamUrl">复制链接</button>
+          <a class="jobs-tb-btn jobs-tb-btn--primary" id="btnOpenTeamUrl" href="#" target="_blank" rel="noopener noreferrer">打开支付页</a>
+        </div>
+      </div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelTeamCheckout">关闭</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitTeamCheckout">立即生成长链接</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -2864,18 +2999,32 @@ function debounce(fn, wait=250) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
-  if (!allowed.includes(tab)) tab = 'register';
-  $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
-  allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
+  const allowed = ['register','accounts','codex','promos','outlook','config'];
+  if (!tab || !allowed.includes(tab)) tab = 'register';
+  document.querySelectorAll('.sidebar-nav button.sidebar-item').forEach(x => {
+    x.classList.toggle('active', x.dataset.tab === tab);
+  });
+  allowed.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.toggle('hidden', t !== tab);
+  });
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') loadCodex();
+  if (tab === 'promos') {
+    loadPromoStats();
+    loadPromosList();
+  }
   if (tab === 'outlook') loadOutlook();
   if (tab === 'config') loadConfig();
   if (tab === 'register') refreshJobs();
 }
-$$('nav button').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
+document.querySelectorAll('.sidebar-nav button.sidebar-item').forEach(b => {
+  b.addEventListener('click', (e) => {
+    e.preventDefault();
+    activateTab(b.dataset.tab);
+  });
+});
 
 // ---------- 概览 ----------
 async function loadSummary() {
@@ -3105,6 +3254,8 @@ function updateModalScrollLock() {
     || !$('#emailChangeLogPanel').classList.contains('hidden')
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
+    || !$('#promoImportModal').classList.contains('hidden')
+    || !$('#teamCheckoutModal').classList.contains('hidden')
     || !$('#emailChangeModalV2').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
@@ -3677,6 +3828,185 @@ function _tokenCellV2(r) {
   }
   return `<span class="pill status-failed">无Token</span>${liveHtml}`;
 }
+
+
+
+/* ---- 优惠码池管理逻辑 ---- */
+async function loadPromoStats() {
+  try {
+    const res = await api('/api/promo-codes/stats');
+    if ($('#promoStatUnused')) $('#promoStatUnused').textContent = '未用: ' + (res.unused || 0);
+    if ($('#promoStatUsing')) $('#promoStatUsing').textContent = '使用中: ' + (res.using || 0);
+    if ($('#promoStatUsed')) $('#promoStatUsed').textContent = '已用: ' + (res.used || 0);
+    if ($('#promoStatExpired')) $('#promoStatExpired').textContent = '失效/过期: ' + (res.expired || 0);
+    if ($('#promoStatTotal')) $('#promoStatTotal').textContent = res.total || 0;
+    if ($('#teamModalPromoPoolHint')) $('#teamModalPromoPoolHint').textContent = '池中可用: ' + (res.unused || 0);
+  } catch(e) {}
+}
+
+async function loadPromosList() {
+  try {
+    const list = await api('/api/promo-codes?limit=150');
+    const tbody = $('#promosBodyV2');
+    if (!tbody) return;
+    if (!list || !list.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#909399; padding:24px;">优惠码池暂无数据，请点击上方批量导入</td></tr>';
+      return;
+    }
+    tbody.innerHTML = list.map(item => {
+      const stMap = {
+        unused: ['status-available', '未用'],
+        using: ['status-running', '使用中'],
+        used: ['status-used', '已用'],
+        expired: ['status-failed', '失效/过期'],
+      };
+      const [stCls, stTxt] = stMap[item.status] || ['status-used', item.status || '-'];
+      return `<tr>
+        <td>${esc(item.id)}</td>
+        <td><strong class="mono" style="color:#2563eb;">${esc(item.code)}</strong></td>
+        <td><span class="pill ${stCls}">${stTxt}</span></td>
+        <td>${esc(item.account_email || (item.account_id ? '#' + item.account_id : '-'))}</td>
+        <td style="font-size:12px; color:#64748b;">${esc((item.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+        <td style="font-size:12px; color:#ef4444;">${esc(item.last_error || '-')}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    showToast('加载优惠码列表失败: ' + e.message);
+  }
+}
+
+function openPromoImportModal() {
+  $('#promoImportText').value = '';
+  $('#promoImportModal').classList.remove('hidden');
+  updateModalScrollLock();
+}
+function closePromoImportModal() {
+  $('#promoImportModal').classList.add('hidden');
+  updateModalScrollLock();
+}
+
+async function submitPromoImport() {
+  const text = $('#promoImportText').value.trim();
+  if (!text) { showToast('请输入优惠码'); return; }
+  const btn = $('#btnSubmitPromoImport');
+  btn.disabled = true;
+  btn.textContent = '正在导入…';
+  try {
+    const res = await api('/api/promo-codes/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text })
+    });
+    if (res.ok) {
+      showToast(`成功导入 ${res.inserted} 个优惠码，忽略重复 ${res.duplicates} 个`);
+      closePromoImportModal();
+      loadPromoStats();
+      loadPromosList();
+    } else {
+      showToast('导入失败: ' + (res.error || '未知错误'));
+    }
+  } catch(err) {
+    showToast('请求失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即导入';
+  }
+}
+
+async function clearExpiredPromos() {
+  if (!confirm('确定清空所有标记为「失效/过期」的优惠码吗？')) return;
+  try {
+    const res = await api('/api/promo-codes/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ status: 'expired' })
+    });
+    showToast(`已清理 ${res.count} 个失效优惠码`);
+    loadPromoStats();
+    loadPromosList();
+  } catch(e) {
+    showToast('清理失败: ' + e.message);
+  }
+}
+
+function openTeamCheckoutModal(id) {
+  loadPromoStats();
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  $('#teamCheckoutAccountId').value = id;
+  $('#teamCheckoutHint').textContent = acc ? `为账号 ${acc.email} (#${id}) 生成 Team 结账长链接` : `为账号 #${id} 生成 Team 结账长链接`;
+  $('#teamPromoCode').value = '';
+  $('#teamProvider').value = localStorage.getItem('team_checkout_provider') || 'native';
+  $('#teamCheckoutResultBox').classList.add('hidden');
+  setTeamCheckoutStatus('', '');
+  $('#btnSubmitTeamCheckout').disabled = false;
+  $('#btnSubmitTeamCheckout').textContent = '立即生成长链接';
+  $('#teamCheckoutModal').classList.remove('hidden');
+  updateModalScrollLock();
+}
+
+function closeTeamCheckoutModal() {
+  $('#teamCheckoutModal').classList.add('hidden');
+  updateModalScrollLock();
+}
+
+function setTeamCheckoutStatus(kind, html) {
+  const el = $('#teamCheckoutStatus');
+  el.className = kind ? `team-checkout-status team-checkout-status--${kind}` : 'hidden';
+  el.innerHTML = html;
+}
+
+async function submitTeamCheckout() {
+  const id = $('#teamCheckoutAccountId').value;
+  if (!id) return;
+  const btn = $('#btnSubmitTeamCheckout');
+  btn.disabled = true;
+  btn.textContent = '正在生成…';
+  $('#teamCheckoutResultBox').classList.add('hidden');
+  setTeamCheckoutStatus('info', '正在拉取代理并向接口申请 Team 结账长链接，通常需要 10–40 秒…');
+  const payload = {
+    account_id: Number(id),
+    promo_code: $('#teamPromoCode').value.trim(),
+    use_1024proxy: $('#teamUse1024Proxy').checked,
+    provider: $('#teamProvider').value,
+    currency: $('#teamCurrency').value.trim().toUpperCase(),
+    workspace: $('#teamWorkspace').value.trim() || 'MyTeam',
+    seats: Number($('#teamSeats').value) || 2,
+    country: ($('#teamCountry').value.trim() || 'EG').toUpperCase(),
+    proxy_address: $('#teamProxyAddress').value.trim()
+  };
+  try {
+    const r = await fetch('/api/accounts/generate-team-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const res = await r.json().catch(() => ({ error: 'HTTP ' + r.status }));
+    const promoTxt = res.promo_used ? `${esc(res.promo_used)}${res.promo_from_pool ? '（来自优惠码池）' : ''}` : '未使用优惠码';
+    const providerTxt = res.provider === 'jinmotech' ? 'jinmotech' : '本地直连';
+    const regionTxt = res.country ? `${esc(res.country)}/${esc(res.currency || '-')}` : '-';
+    const metaHtml = `<div class="team-checkout-meta">方式：${providerTxt}　地区/货币：${regionTxt}　优惠码：${promoTxt}　代理：${esc(res.proxy_used || '-')}</div>`;
+    if (r.ok && res.ok && res.url) {
+      $('#teamResultUrlText').value = res.url;
+      $('#btnOpenTeamUrl').href = res.url;
+      $('#teamCheckoutResultBox').classList.remove('hidden');
+      setTeamCheckoutStatus('ok', '生成成功，链接已复制到剪贴板。' + metaHtml);
+      copyText(res.url);
+    } else {
+      setTeamCheckoutStatus('error', '生成失败：' + esc(res.error || ('HTTP ' + r.status)) + metaHtml);
+    }
+  } catch (err) {
+    setTeamCheckoutStatus('error', '请求失败：' + esc(err.message));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重新生成';
+    loadPromoStats();
+  }
+}
+
+function generateTeamLink(id, btn) {
+  openTeamCheckoutModal(id);
+}
+
 function _accountsV2MoreMenu(r) {
   const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
@@ -3688,6 +4018,7 @@ function _accountsV2MoreMenu(r) {
     `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,
     _planAction(r),
+    `<button type="button" onclick="generateTeamLink(${esc(r.id)}, this); return false;" title="提取该账号的 Team 订阅 Stripe 支付长链接">生成Team长链</button>`,
     _extractLinkAction(r),
     _codexAction(r),
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,
@@ -5217,6 +5548,26 @@ async function submitEmailChange() {
 $('#btnCloseEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnCancelEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnSubmitEmailChangeV2').addEventListener('click', submitEmailChange);
+
+
+$('#btnOpenPromoImport').addEventListener('click', openPromoImportModal);
+$('#btnClosePromoImport').addEventListener('click', closePromoImportModal);
+$('#btnCancelPromoImport').addEventListener('click', closePromoImportModal);
+$('#btnSubmitPromoImport').addEventListener('click', submitPromoImport);
+$('#btnRefreshPromos').addEventListener('click', () => { loadPromoStats(); loadPromosList(); });
+$('#btnClearExpiredPromos').addEventListener('click', clearExpiredPromos);
+$('#promoImportModal').addEventListener('click', e => { if (e.target.id === 'promoImportModal') closePromoImportModal(); });
+
+$('#btnCloseTeamCheckout').addEventListener('click', closeTeamCheckoutModal);
+$('#btnCancelTeamCheckout').addEventListener('click', closeTeamCheckoutModal);
+$('#btnSubmitTeamCheckout').addEventListener('click', submitTeamCheckout);
+$('#teamProvider').addEventListener('change', e => localStorage.setItem('team_checkout_provider', e.target.value));
+$('#btnCopyTeamUrl').addEventListener('click', () => {
+  copyText($('#teamResultUrlText').value);
+  showToast('长链接已复制！');
+});
+$('#teamCheckoutModal').addEventListener('click', e => { if (e.target.id === 'teamCheckoutModal') closeTeamCheckoutModal(); });
+
 $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'emailChangeModalV2') closeEmailChangeModal(); });
 (function bindAccountsToolbarV2() {
   const bind = (id, fn) => {

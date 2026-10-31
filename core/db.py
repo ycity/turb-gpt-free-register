@@ -3953,3 +3953,21 @@ def recover_interrupted_account_inspections(error: str = "WebUI 重启，巡检�
             run.update(status="interrupted", finished_at=_now(), error=error)
             conn.execute("UPDATE account_inspections SET status=?,payload=? WHERE id=?", (run["status"], _inspection_payload(run), run["id"]))
         return len(rows)
+
+
+def update_account_team_checkout(acc_id: int, result: dict | None = None) -> bool:
+    """更新账号 Team 结账长链接。"""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        if result.get("url"):
+            row["team_checkout_url"] = result.get("url")
+            row["team_checkout_created_at"] = _now()
+        if result.get("error"):
+            row["team_checkout_error"] = result.get("error")
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True

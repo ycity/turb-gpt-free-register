@@ -137,7 +137,8 @@ def _compact_account_for_list(row: dict) -> dict:
         "live_check_proxy_used", "live_check_fingerprint_text",
         # 提链成功/失败时才需要。
         "extract_link_status", "extract_link_type", "extract_link_message", "extract_link_error",
-        "extract_link_long_url", "extract_link_copy_paste", "extract_link_image_url_png",
+        "extract_link_long_url",
+        "team_checkout_url", "team_checkout_created_at", "team_checkout_error", "extract_link_copy_paste", "extract_link_image_url_png",
         "extract_link_image_url_svg", "extract_link_expires_at",
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
@@ -1086,6 +1087,55 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not queued.get("accepted"):
             return jsonify({"ok": False, **queued}), 503
         return jsonify({"ok": True, "started": True, **{k: v for k, v in queued.items() if k != "future"}}), 202
+
+
+    @app.post("/api/accounts/generate-team-link")
+    def api_account_generate_team_link():
+        """生成 Team 订阅 Stripe 结账长链接。"""
+        data = request.get_json(silent=True) or {}
+        acc_id = data.get("account_id") or data.get("id")
+        try:
+            acc = db.get_account(int(acc_id))
+        except Exception:
+            acc = None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        
+        token = (acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有有效的 access_token"}), 400
+
+        try:
+            from core.team_checkout_service import generate_team_checkout_link
+            workspace = data.get("workspace") or "MyTeam"
+            seats = int(data.get("seats") or 2)
+            country = data.get("country") or "EG"
+            promo_code = data.get("promo_code") or ""
+            proxy_address = data.get("proxy_address") or ""
+            
+            res = generate_team_checkout_link(
+                token=token,
+                proxy_address=proxy_address,
+                workspace=workspace,
+                seats=seats,
+                country=country,
+                currency=data.get("currency") or "",
+                promo_code=promo_code,
+                use_1024proxy=bool(data.get("use_1024proxy", True)),
+                provider=data.get("provider") or "native",
+                account_id=int(acc["id"]),
+                account_email=acc.get("email"),
+            )
+            meta = {k: res.get(k) for k in ("provider", "promo_used", "promo_from_pool", "proxy_used", "country", "currency")}
+            if not res.get("ok"):
+                return jsonify({"ok": False, "error": res.get("error") or "生成长链接失败", **meta}), 400
+
+            url = res.get("url")
+            db.update_account_team_checkout(int(acc["id"]), {"url": url})
+            return jsonify({"ok": True, "url": url, "result": res.get("data"), **meta})
+        except Exception as exc:
+            logger.exception("生成 Team 长链接异常")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
     @app.post("/api/accounts/extract-link-bulk")
     def api_accounts_extract_link_bulk():
@@ -3053,5 +3103,37 @@ def create_app(auth_code: str | None = None) -> Flask:
                 else f"⚠️ 已写入文件但热加载失败（{reload_err}），需重启 Web 服务才能生效"
             ),
         })
+
+
+
+
+    @app.route("/api/promo-codes/stats", methods=["GET"])
+    def api_promo_stats():
+        from core.team_checkout_service import get_promo_stats
+        return jsonify(get_promo_stats())
+
+    @app.route("/api/promo-codes", methods=["GET"])
+    def api_promo_list():
+        from core.team_checkout_service import list_promo_codes
+        status = request.args.get("status", "")
+        limit = int(request.args.get("limit", 100))
+        return jsonify(list_promo_codes(limit=limit, status=status))
+
+    @app.route("/api/promo-codes/import", methods=["POST"])
+    def api_promo_import():
+        from core.team_checkout_service import import_promo_codes
+        data = request.get_json(silent=True) or {}
+        text = data.get("text", "")
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        res = import_promo_codes(lines)
+        return jsonify({"ok": True, **res})
+
+    @app.route("/api/promo-codes/clear", methods=["POST"])
+    def api_promo_clear():
+        from core.team_checkout_service import clear_promo_codes
+        data = request.get_json(silent=True) or {}
+        status = data.get("status", "")
+        count = clear_promo_codes(status=status)
+        return jsonify({"ok": True, "count": count})
 
     return app
