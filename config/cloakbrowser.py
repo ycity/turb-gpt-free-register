@@ -41,6 +41,11 @@ CLOAK_PROFILE_ROOT: str = ""
 # 资料目录闲置多少天后自动清理；0 表示不清理。
 CLOAK_PROFILE_MAX_IDLE_DAYS: int = 14
 
+# 遇到 Cloudflare 人机验证时最长安静等待多少秒（期间不刷新、不重复提交）。
+# 整页拦截常常要 40 秒以上，等待期不够会白白多折腾一轮；设 0 表示不等待，直接按
+# 原流程刷新重试。该项同时作用于 Roxy 和 Cloak 注册流程。
+CHALLENGE_MAX_WAIT_SECONDS: float = 90.0
+
 # 额外 Chromium 参数，例如 ["--fingerprint=12345"]。CLOAK_FINGERPRINT_SEED 会自动追加。
 CLOAK_EXTRA_ARGS: list = []
 
@@ -51,4 +56,4 @@ CLOAK_SELENIUM_TIMEOUT: int = 90
 CLOAK_KEEP_BROWSER_OPEN: bool = False
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_PERSIST_PROFILE': 'bool', 'CLOAK_PROFILE_ROOT': 'str', 'CLOAK_PROFILE_MAX_IDLE_DAYS': 'int', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})
+apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_PERSIST_PROFILE': 'bool', 'CLOAK_PROFILE_ROOT': 'str', 'CLOAK_PROFILE_MAX_IDLE_DAYS': 'int', 'CHALLENGE_MAX_WAIT_SECONDS': 'float', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})

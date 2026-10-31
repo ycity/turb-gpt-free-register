@@ -147,6 +147,41 @@ class WaitOutChallengeTests(unittest.TestCase):
         self.assertLess(time.time() - started, 2.0)
         self.assertEqual(driver.refreshed, 0)
 
+    def test_timeout_comes_from_config_at_call_time(self):
+        from config import cloakbrowser as cloak_cfg
+
+        driver = _FakeDriver([_INTERSTITIAL])
+        with patch.object(cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", 0.05):
+            started = time.time()
+            self.assertTrue(rr.wait_out_challenge(driver))
+            short = time.time() - started
+        self.assertLess(short, 2.0)
+        self.assertEqual(rr._challenge_max_wait(), float(cloak_cfg.CHALLENGE_MAX_WAIT_SECONDS))
+
+    def test_zero_timeout_disables_waiting_entirely(self):
+        from config import cloakbrowser as cloak_cfg
+
+        driver = _FakeDriver([_INTERSTITIAL])
+        with patch.object(cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", 0):
+            self.assertFalse(rr.wait_out_challenge(driver))
+        self.assertEqual(driver.script_calls, 0, "关闭等待时不该再探测页面")
+
+    def test_bad_config_value_falls_back_to_default(self):
+        from config import cloakbrowser as cloak_cfg
+
+        with patch.object(cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", "慢一点"):
+            self.assertEqual(rr._challenge_max_wait(), rr._CHALLENGE_MAX_WAIT_SECONDS)
+        with patch.object(cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", -5):
+            self.assertEqual(rr._challenge_max_wait(), 0.0)
+
+    def test_zero_timeout_lets_the_refresh_happen(self):
+        from config import cloakbrowser as cloak_cfg
+
+        driver = _FakeDriver([_INTERSTITIAL])
+        with patch.object(cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", 0):
+            self.assertTrue(rr._refresh_after_missing_page_element(driver, "邮箱输入框", 0))
+        self.assertEqual(driver.refreshed, 1)
+
     def test_manual_stop_propagates(self):
         driver = _FakeDriver([_INTERSTITIAL])
         with patch.object(rr, "_check_manual_stop", side_effect=RuntimeError("用户已停止")):

@@ -371,9 +371,19 @@ def _page_warmup(driver, *, reason: str = "") -> None:
 
 
 _MISSING_PAGE_ELEMENT_REFRESH_RETRIES = 3
-# 人机验证最长等待时间；Turnstile 通常几秒内自动过，拖太久多半是真被拦了。
-_CHALLENGE_MAX_WAIT_SECONDS = 45.0
+# 人机验证等待时间的兜底默认值；实际取 config.cloakbrowser.CHALLENGE_MAX_WAIT_SECONDS。
+_CHALLENGE_MAX_WAIT_SECONDS = 90.0
 _CHALLENGE_POLL_SECONDS = 1.5
+
+
+def _challenge_max_wait() -> float:
+    """每次调用都重新读配置，WebUI 改完热加载即可生效。"""
+    from config import cloakbrowser as _cloak_cfg
+    try:
+        value = float(getattr(_cloak_cfg, "CHALLENGE_MAX_WAIT_SECONDS", _CHALLENGE_MAX_WAIT_SECONDS))
+    except (TypeError, ValueError):
+        return _CHALLENGE_MAX_WAIT_SECONDS
+    return max(0.0, value)
 
 
 def detect_challenge(driver) -> dict:
@@ -412,13 +422,17 @@ def detect_challenge(driver) -> dict:
     }
 
 
-def wait_out_challenge(driver, *, step: str = "", timeout: float = _CHALLENGE_MAX_WAIT_SECONDS,
+def wait_out_challenge(driver, *, step: str = "", timeout: float | None = None,
                        done: Callable[[], bool] | None = None) -> bool:
     """检测到人机验证就安静等它跑完，期间不刷新也不重复提交。
 
     返回 True 表示"确实等过一次挑战"。挑战消失、done() 为真或超时都会返回。
     刷新会打断 Turnstile 并让它从头再来，所以这里只等待。
+    timeout 为 0（或配置成 0）表示关闭等待，直接按原流程走。
     """
+    timeout = _challenge_max_wait() if timeout is None else max(0.0, float(timeout))
+    if timeout <= 0:
+        return False
     first = detect_challenge(driver)
     if not first.get("active"):
         return False

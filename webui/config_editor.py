@@ -129,6 +129,10 @@ EDITABLE_FIELDS = [
         "label": "资料目录闲置清理(天)", "help": "超过该天数未使用的资料目录会在服务启动时删除；0 表示不清理",
     },
     {
+        "key": "CHALLENGE_MAX_WAIT_SECONDS", "file": "cloakbrowser.py", "type": "float", "group": "CloakBrowser",
+        "label": "人机验证等待上限(秒)", "help": "遇到 Cloudflare 人机验证时安静等待的最长秒数，期间不刷新页面也不重复提交；整页拦截常需 40 秒以上，建议 90。设 0 表示不等待，直接刷新重试。Roxy 和 Cloak 流程都生效",
+    },
+    {
         "key": "CLOAK_SELENIUM_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
         "label": "Cloak超时", "help": "页面和元素等待超时时间，秒",
     },
