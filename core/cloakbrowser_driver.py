@@ -135,11 +135,13 @@ class _SwitchTo:
 class CloakSeleniumDriver:
     """只实现本项目 Roxy Selenium 流程实际用到的 WebDriver 子集。"""
 
-    def __init__(self, browser: Any, context: Any | None, page: Any, proxy_relay: Any | None = None):
+    def __init__(self, browser: Any, context: Any | None, page: Any, proxy_relay: Any | None = None,
+                 profile_lease: Any | None = None):
         self.browser = browser
         self.context = context
         self.page = page
         self._proxy_relay = proxy_relay
+        self._profile_lease = profile_lease
         self._page_load_timeout_ms = int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90) * 1000
         self.switch_to = _SwitchTo(self)
 
@@ -206,6 +208,10 @@ class CloakSeleniumDriver:
         relay, self._proxy_relay = self._proxy_relay, None
         if relay is not None:
             relay.close()
+        # 资料目录锁必须在浏览器真正退出后才释放，否则下一个任务会撞上 SingletonLock。
+        lease, self._profile_lease = self._profile_lease, None
+        if lease is not None:
+            lease.release()
 
     def proxy_transport_snapshot(self) -> dict | None:
         relay = self._proxy_relay
@@ -444,6 +450,13 @@ def _build_cloak_locale_options(proxy_url: str | None = None) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
+def _close_quietly(target) -> None:
+    try:
+        target.close()
+    except Exception:
+        logger.debug("[Cloak] 关闭浏览器上下文失败", exc_info=True)
+
+
 def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser 并返回 Selenium 风格 driver。
 
@@ -501,7 +514,17 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if license_key:
         opts["license_key"] = license_key
 
+    # 固定目录（调试用）优先；否则按代理出口复用资料目录，取不到锁就退回临时上下文。
     user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+    profile_lease = None
+    if not user_data_dir:
+        from core import cloak_profile
+        try:
+            profile_lease = cloak_profile.acquire(proxy_pool_target or proxy_url or "")
+        except Exception as exc:
+            logger.warning("[Cloak] 申请资料目录失败，本次使用临时上下文：%s: %s", type(exc).__name__, exc)
+        if profile_lease is not None:
+            user_data_dir = str(profile_lease.path)
     masked_target = proxy_pool_target.split("@")[-1] if proxy_pool_target else ""
     logger.info(
         "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy_node=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
@@ -518,17 +541,36 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if locale_opts.get("accept_language"):
         context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
-    if user_data_dir:
-        context = launch_persistent_context(user_data_dir, **opts)
-        page = context.new_page()
-        browser = getattr(context, "browser", None) or context
-        # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
-    else:
-        browser = launch(**opts)
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
+    try:
+        if user_data_dir:
+            context = launch_persistent_context(user_data_dir, **opts)
+            page = context.new_page()
+            browser = getattr(context, "browser", None) or context
+            # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
+            if profile_lease is not None:
+                # 复用目录只为留住 Cloudflare 放行 cookie；登录态必须清掉，
+                # 否则打开登录页会直接变成上一个账号的已登录状态。
+                from core import cloak_profile
+                if cloak_profile.keep_only_cloudflare_cookies(context).get("kept") == -1:
+                    # 清不干净就不能用这个目录：宁可放弃复用，也不能带着旧账号登录态注册。
+                    logger.warning("[Cloak] 资料目录登录态清理失败，放弃复用并改用临时上下文")
+                    _close_quietly(context)
+                    profile_lease.release()
+                    profile_lease = None
+                    browser = launch(**opts)
+                    context = browser.new_context(**context_kwargs)
+                    page = context.new_page()
+        else:
+            browser = launch(**opts)
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
+    except BaseException:
+        if profile_lease is not None:
+            profile_lease.release()
+        raise
 
-    driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+    driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay,
+                                 profile_lease=profile_lease)
     # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
     # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
     driver._registration_log_prefix = "[Cloak注册]"

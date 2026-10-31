@@ -49,6 +49,7 @@ __pycache__/
 .ruff_cache/
 cache/roxy-assets/
 cache/mailcode/
+cache/cloak-profiles/
 
 # 历史调试输出（_xxx.out / _xxx_dump.html）
 tools/_*.out

@@ -114,7 +114,19 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CLOAK_USER_DATA_DIR", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
-        "label": "Cloak用户目录", "help": "留空使用临时上下文；填写路径则持久化 cookies/cache",
+        "label": "Cloak用户目录", "help": "所有任务共用的单一目录，不区分代理也不清理登录态，仅适合单任务调试；批量注册请改用下面的「按代理复用资料目录」。留空则使用临时上下文",
+    },
+    {
+        "key": "CLOAK_PERSIST_PROFILE", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
+        "label": "按代理复用资料目录", "help": "每个代理一个资料目录，保留 Cloudflare 放行 cookie 和固定指纹，避免每次注册都重新过人机验证；启动时只保留 Cloudflare cookie，不会带入上个账号的登录态。上面填了固定用户目录时此项不生效",
+    },
+    {
+        "key": "CLOAK_PROFILE_ROOT", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
+        "label": "资料目录根路径", "help": "留空则使用项目下的 cache/cloak-profiles；Docker 部署需挂载该目录才能跨容器重启保留",
+    },
+    {
+        "key": "CLOAK_PROFILE_MAX_IDLE_DAYS", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
+        "label": "资料目录闲置清理(天)", "help": "超过该天数未使用的资料目录会在服务启动时删除；0 表示不清理",
     },
     {
         "key": "CLOAK_SELENIUM_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",

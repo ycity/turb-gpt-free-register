@@ -11,6 +11,8 @@ services:
       - ./logs:/app/logs
       - ./注册日志:/app/注册日志
       - ./data:/app/data
+      # Cloak 资料目录：保留 Cloudflare 放行 cookie，容器重启后仍然有效
+      - ./cache:/app/cache
       - ./.env:/app/.env
       - ./core:/app/core
       - ./config:/app/config

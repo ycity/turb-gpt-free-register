@@ -350,6 +350,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             recovered_email_changes = db.recover_interrupted_email_changes()
             if recovered_email_changes:
                 logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
+            try:
+                from core import cloak_profile
+                cloak_profile.cleanup_idle_profiles()
+            except Exception:
+                logger.exception("清理闲置 Cloak 资料目录失败")
 
     # ----------------------------------------------------------
     # 页面
