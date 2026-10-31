@@ -196,6 +196,14 @@ class CloakSeleniumDriver:
         self.page.reload(wait_until="domcontentloaded", timeout=self._page_load_timeout_ms)
 
     def quit(self) -> None:
+        # 退出前先抹掉本次账号的登录态，别把 session token 留在磁盘上。
+        # 启动时还会再清一次，所以这里失败也不影响下次注册的隔离。
+        if self._profile_lease is not None and self.context is not None:
+            try:
+                from core import cloak_profile
+                cloak_profile.keep_only_cloudflare_cookies(self.context)
+            except Exception:
+                logger.debug("[Cloak] 退出前清理登录态失败", exc_info=True)
         try:
             if self.context is not None:
                 self.context.close()

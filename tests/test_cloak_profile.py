@@ -223,7 +223,16 @@ class DriverIntegrationTests(_IsolatedProfileMixin, unittest.TestCase):
         self.assertEqual([c["name"] for c in context.add_cookies.call_args[0][0]], ["cf_clearance"])
         plain_browser.new_context.assert_not_called()
 
+        # 退出时再清一次：不把本次账号的 session token 留在磁盘上。
+        context.reset_mock()
+        context.cookies.return_value = [
+            {"name": "cf_clearance", "domain": ".chatgpt.com"},
+            {"name": "__Secure-next-auth.session-token.0", "domain": "chatgpt.com"},
+        ]
         driver.quit()
+        context.clear_cookies.assert_called_once()
+        self.assertEqual([c["name"] for c in context.add_cookies.call_args[0][0]], ["cf_clearance"])
+        context.close.assert_called_once()
         self.assertFalse((used_dir / cloak_profile._LOCK_NAME).exists())
         # 释放后同一代理可以再次取得。
         again = cloak_profile.acquire("")
