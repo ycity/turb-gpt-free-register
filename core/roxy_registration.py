@@ -1133,7 +1133,26 @@ def _submit_email_and_wait_next(
                 raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
             logger.info("%s 邮箱提交诊断期间页面已进入下一步：%s", _log_prefix(driver), advanced)
             return advanced
-        logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, diagnostic_state)
+        logger.warning("%s 邮箱提交后仍未进入下一步：%s，尝试浏览器内 NextAuth signin 跳转 state=%s", _log_prefix(driver), state_name, diagnostic_state)
+        try:
+            na_res = _submit_email_via_browser_nextauth(driver, current_email)
+            logger.info("%s 浏览器内 NextAuth signin 结果：%s", _log_prefix(driver), na_res)
+            if na_res.get("ok"):
+                state_name2 = _wait_email_submit_next_state(driver, current_email, timeout=22)
+                if state_name2 == "login_password":
+                    raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+                if state_name2 in ("password", "otp", "logged_in"):
+                    logger.info("%s NextAuth signin 后已进入下一步：%s", _log_prefix(driver), state_name2)
+                    return state_name2
+                advanced2 = _current_email_submit_next_state(driver)
+                if advanced2:
+                    if advanced2 == "login_password":
+                        raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
+                    return advanced2
+        except Exception as na_exc:
+            if "按已注册/不可用邮箱处理并停用" in str(na_exc):
+                raise
+            logger.warning("%s NextAuth signin 兜底异常：%s", _log_prefix(driver), na_exc)
         time.sleep(1.0)
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
@@ -1508,7 +1527,7 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
     };
     const ageInput = [...document.querySelectorAll('input[name="age"], input#age, input[id$="-age"], input[type="number"]')]
       .find(visible);
-    if (ageInput && setValue(ageInput, age)) return {ok:true, mode:'age'};
+    if (ageInput) return {ok:false, mode:'age_input_needed'};
 
     const dateInput = [...document.querySelectorAll('input[name="birthdate"], input[type="date"], input[name="birthday"]')]
       .find(el => visible(el) || String(el.getAttribute('type') || '').toLowerCase() === 'date');
@@ -1569,6 +1588,10 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
     """, birthday, y, m, d, str(age)) or {}
     if result.get('ok'):
         return str(result.get('mode') or 'birthday')
+    if result.get('mode') == 'age_input_needed':
+        if _select_or_type(driver, ['input[name="age"]', 'input#age', 'input[id$="-age"]', 'input[type="number"]'], str(age), timeout=3):
+            return 'age'
+        return None
     if result.get('mode') != 'spinbutton_needed':
         return None
 
@@ -2143,10 +2166,17 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
 
         _accept_profile_consents(driver)
         human_delay('form')
-        for _ in range(3):
+        for sub_try in range(3):
             if _click_if_enabled_submit(driver):
-                logger.info('%s 已点击资料页提交按钮，等待 OAuth 跳转', _log_prefix(driver))
-                return True
+                logger.info('%s 已点击资料页提交按钮 (第 %s/3 次)，等待离开资料页...', _log_prefix(driver), sub_try + 1)
+                wait_leave = time.time() + 10
+                while time.time() < wait_leave:
+                    time.sleep(1)
+                    cur_u = str(getattr(driver, 'current_url', '') or '')
+                    if 'about-you' not in cur_u:
+                        logger.info('%s 已离开资料页，当前 URL=%s', _log_prefix(driver), cur_u[:120])
+                        return True
+                logger.warning('%s 点击资料页提交后 10s 仍停留在 about-you，准备补填/重交 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
             time.sleep(1)
         logger.warning('%s 找不到可点击的资料页提交按钮 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
     raise RuntimeError(f'等待/填写资料页超时，最后页面：{last_snapshot}')
@@ -2238,17 +2268,14 @@ def _switch_to_chatgpt_window_if_any(driver) -> bool:
     return False
 
 
-def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) -> dict:
-    """等待页面完成跳转并从 ChatGPT 页面内读取登录 session/accessToken。
-
-    旧逻辑会在 auth.openai.com 上一直等到总超时，Cloak/部分 Chromium 场景下
-    实际账号已创建成功但当前句柄 URL 没及时更新，导致白等 120 秒。现在只给
-    自动跳转 `auto_jump_wait` 秒；超过后立即主动打开 chatgpt.com 读 session。
-    """
+def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 35) -> dict:
+    """等待页面完成跳转并从 ChatGPT 页面内读取登录 session/accessToken。"""
     end = time.time() + timeout
-    auto_jump_end = time.time() + max(3, int(auto_jump_wait or 15))
+    auto_jump_end = time.time() + max(20, int(auto_jump_wait or 35))
     last_data = None
     forced_chatgpt_open = False
+    empty_session_polls = 0
+    resubmitted_profile = False
 
     while time.time() < end:
         try:
@@ -2259,9 +2286,18 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
         if 'chatgpt.com' not in current:
             if _switch_to_chatgpt_window_if_any(driver):
                 current = str(getattr(driver, "current_url", "") or "")
+            elif "about-you" in current and not resubmitted_profile and time.time() >= auto_jump_end - 12:
+                resubmitted_profile = True
+                logger.info("%s 资料页提交后仍停留在 about-you (%s)，补点一次提交按钮", _log_prefix(driver), current[:120])
+                try:
+                    _click_if_enabled_submit(driver)
+                except Exception:
+                    pass
+                time.sleep(2)
+                continue
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
-                    logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
+                    logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com (当前=%s)，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 35), current[:120])
                     _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
                     forced_chatgpt_open = True
                     time.sleep(3)
@@ -2277,7 +2313,27 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 data = _read_chatgpt_session_once(driver)
                 if data:
                     return data
-                last_data = "session 暂无 accessToken"
+                empty_session_polls += 1
+                last_data = f"session 暂无 accessToken (url={current[:120]})"
+                # 如果已经连续 8 次（~16s）返回空 session `{}`，说明 OAuth 回调未建立登录态，
+                # 触发一次前端静默 OAuth 登录重定向以利用 auth.openai.com 已完成的会话补写 Cookie。
+                if empty_session_polls == 8:
+                    logger.warning("%s chatgpt.com 连续返回空 session，尝试触发 OAuth callback 恢复登录态", _log_prefix(driver))
+                    try:
+                        driver.execute_script("""
+                        fetch('/api/auth/csrf', {credentials:'include'}).then(r=>r.json()).then(d=>{
+                          if (!d || !d.csrfToken) return;
+                          const body = new URLSearchParams({callbackUrl: 'https://chatgpt.com/', csrfToken: d.csrfToken, json: 'true'});
+                          fetch('/api/auth/signin/openai?prompt=none', {
+                            method:'POST', credentials:'include',
+                            headers:{'content-type':'application/x-www-form-urlencoded'},
+                            body: body.toString()
+                          }).then(r=>r.json()).then(j=>{ if (j && j.url) location.assign(j.url); });
+                        });
+                        """)
+                        time.sleep(5)
+                    except Exception:
+                        pass
             except Exception as exc:
                 last_data = f"{type(exc).__name__}: {exc}"
         time.sleep(2)

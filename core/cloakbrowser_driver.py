@@ -84,27 +84,36 @@ class CloakElement:
             return ""
 
     def send_keys(self, *values: str) -> None:
-        # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')。
+        # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')、Keys.BACKSPACE 及逐字符追加输入。
         text = "".join(str(v or "") for v in values)
+        if not text:
+            return
         lower = text.lower()
         try:
-            self.click()
+            self._eval("el => { if (document.activeElement !== el) el.focus(); }")
         except Exception:
-            pass
+            try:
+                self.click()
+            except Exception:
+                pass
         if "\ue03d" in text or "\ue009" in text or "command" in lower or "control" in lower:
             # Selenium Keys.CONTROL/COMMAND 编码可能传入私有区字符；这里按全选处理。
             try:
-                self.page.keyboard.press("Meta+A")
-            except Exception:
                 self.page.keyboard.press("Control+A")
+            except Exception:
+                self.page.keyboard.press("Meta+A")
             return
-        try:
-            if self.locator is not None:
-                self.locator.fill(text, timeout=10000)
-            else:
-                self.handle.fill(text, timeout=10000)
-        except Exception:
-            self.page.keyboard.type(text, delay=35)
+        if text == "\ue003":
+            self.page.keyboard.press("Backspace")
+            return
+        if text in ("\ue006", "\ue007"):
+            self.page.keyboard.press("Enter")
+            return
+        if text == "\ue004":
+            self.page.keyboard.press("Tab")
+            return
+        # Selenium send_keys 是追加输入，不能用 locator.fill() 覆盖已有内容。
+        self.page.keyboard.insert_text(text)
 
     def get_attribute(self, name: str) -> str | None:
         try:
@@ -268,6 +277,38 @@ class CloakSeleniumDriver:
             element = None
         if element is not None:
             return CloakElement(page, handle=element)
+        # 兼容返回 {ok: true, button/target: <Element>} 的复合字典对象
+        try:
+            props = handle.get_properties()
+        except Exception:
+            props = None
+        if props:
+            has_element_prop = False
+            out_dict = {}
+            for k, prop_handle in props.items():
+                try:
+                    el = prop_handle.as_element()
+                except Exception:
+                    el = None
+                if el is not None:
+                    has_element_prop = True
+                    out_dict[k] = CloakElement(page, handle=el)
+                else:
+                    try:
+                        out_dict[k] = prop_handle.json_value()
+                    except Exception:
+                        out_dict[k] = None
+                    finally:
+                        try:
+                            prop_handle.dispose()
+                        except Exception:
+                            pass
+            if has_element_prop:
+                try:
+                    handle.dispose()
+                except Exception:
+                    pass
+                return out_dict
         try:
             return handle.json_value()
         except Exception as exc:
@@ -461,9 +502,11 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
         opts["license_key"] = license_key
 
     user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+    masked_target = proxy_pool_target.split("@")[-1] if proxy_pool_target else ""
     logger.info(
-        "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
+        "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy_node=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
         opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
+        masked_target or proxy_url or "无(直连)",
         proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
         locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
     )

@@ -1189,15 +1189,12 @@ class PlaywrightTrafficTracker(_TrafficAccumulator):
                 )
                 continue
 
-            values = self._request_size_values(request) or {}
-            if values:
-                upload = (values.get("requestBodySize") or 0) + (values.get("requestHeadersSize") or 0)
-                download = (values.get("responseBodySize") or 0) + (values.get("responseHeadersSize") or 0)
-                include_response = True
-            else:
-                upload = self._request_fallback_upload(request)
-                download = 0
-                include_response = False
+            # 未完成请求（如 SSE/长轮询）不能调用 request.sizes()，因为 sizes() 内部会调用
+            # request.response() 同步阻塞等待响应完成，导致关闭浏览器前永久卡死。
+            upload = self._request_fallback_upload(request)
+            download = 0
+            include_response = False
+            values = {}
             self._record_playwright_detail(
                 request,
                 request_id=key,
