@@ -79,12 +79,31 @@ def _run_plan_check(
         if not db.mark_account_plan_check_running(account_id, run_id=run_id, expected_account=expected_account):
             return {"ok": False, "error": "账号已删除、邮箱/AT 已变更或套餐任务已被重置"}
         session_options = {"session": session} if session is not None else {}
+        saved_proxy = None
+        if proxy is None and session is None:
+            try:
+                acc_row = db.get_account(account_id) or {}
+                raw_saved = str(acc_row.get("proxy_used") or "").strip()
+                if raw_saved.lower().startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
+                    saved_proxy = raw_saved
+            except Exception:
+                saved_proxy = None
+        effective_proxy = proxy if proxy is not None else saved_proxy
         result = check_account_plan(
             access_token,
-            proxy=proxy,
+            proxy=effective_proxy,
             timezone_offset_min=timezone_offset_min,
             **session_options,
         )
+        # 若优先使用了注册时的 saved_proxy 但遇到网络/403 可重试错误，回退代理池再查一次
+        if not result.get("ok") and saved_proxy and proxy is None and session is None and result.get("retryable", True):
+            logger.warning("[Plan] 账号固定注册代理查询失败 (%s)，回退代理池重试一次: %s", result.get("error"), email)
+            result = check_account_plan(
+                access_token,
+                proxy=None,
+                timezone_offset_min=timezone_offset_min,
+                **session_options,
+            )
 
         recheck_delay = _registration_recheck_delay()
         should_recheck = (

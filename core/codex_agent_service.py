@@ -122,14 +122,22 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         from core.chatgpt_plan import open_plan_check_proxy, resolve_plan_check_route
         from core.session import BrowserSession
 
-        # 和查套餐一致解析网络路径；每个账号独立创建 BrowserSession，
-        # 从而得到独立 oai-did / oai-session-id / Datadog trace / 浏览器画像 / 代理出口。
-        route = resolve_plan_check_route(None)
+        # 优先固定使用账号注册时的代理（proxy_used），若第 1 次失败再回退代理池。
+        acc_row = db.get_account(account_id) or {}
+        saved_proxy = str(acc_row.get("proxy_used") or "").strip()
+        if not saved_proxy.lower().startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
+            saved_proxy = ""
+        route = resolve_plan_check_route(saved_proxy or None)
+        if saved_proxy:
+            route["proxy_mode"] = "saved_registration_proxy"
         route_meta = {k: v for k, v in route.items() if k not in {"proxy", "upstream_proxy"}}
         timeout_seconds, attempts, retry_delay = _agent_request_settings()
         last_exc: Exception | None = None
         auth_json = None
         for attempt in range(1, attempts + 1):
+            if attempt > 1 and saved_proxy:
+                route = resolve_plan_check_route(None)
+                route_meta = {k: v for k, v in route.items() if k not in {"proxy", "upstream_proxy"}}
             attempt_count = attempt
             _wait_for_rate_slot()
             try:

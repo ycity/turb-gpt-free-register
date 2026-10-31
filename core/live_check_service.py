@@ -125,18 +125,21 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             _safe_append_log(email, "[查活] 账号已删除或查活状态已被重置，取消执行")
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         from config import proxy as proxy_cfg
+        account = db.get_account(account_id) or {}
+        saved_proxy = str(account.get("proxy_used") or "").strip()
+        if not saved_proxy.lower().startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
+            saved_proxy = ""
         candidates = _configured_live_check_proxies(proxy_cfg)
-        route = resolve_plan_check_route(explicit_proxy=proxy)
+        effective_explicit_proxy = proxy if proxy is not None else (saved_proxy or None)
+        route = resolve_plan_check_route(explicit_proxy=effective_explicit_proxy)
+        if saved_proxy and proxy is None:
+            route["proxy_mode"] = "saved_registration_proxy"
         # 查活规则独立于套餐查询的 direct/auto 选择：只要任一代理池有数据，
         # 就禁止直连，并从池中随机选择一个出口。
         if candidates and not str(route.get("proxy") or "").strip():
             route = _live_proxy_route(random.choice(candidates), proxy_cfg)
         selected_proxy = str(route.get("proxy") or "").strip()
         timeout = float(getattr(proxy_cfg, "PLAN_CHECK_TIMEOUT", 15.0) or 15.0)
-        # 查活必须沿用账号注册时记录的邮箱来源。不能只调用
-        # resolve_email_source(email)：Remail 等临时邮箱的上下文只在领取进程
-        # 内存中存在，服务重启后按当前 EMAIL_SOURCE 推断会把来源判错。
-        account = db.get_account(account_id) or {}
         if not account or str(account.get("email") or "").strip().lower() != email.strip().lower():
             result = {"ok": False, "status": "failed", "error": "账号已删除或邮箱已变更，丢弃旧查活任务"}
             db.update_account_liveness(account_id, result, expected_account=expected_account, expected_run_id=run_id)

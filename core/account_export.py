@@ -520,17 +520,78 @@ def _exchange_new_token(session: BrowserSession, continue_url: str) -> str:
     """
     步骤5: 跟随 continue_url 完成回调，再次拉 /api/auth/session 拿到新 accessToken
     （此时 token 内嵌的 pwd_auth_time 是新鲜的，2FA enroll 才会接受）。
+    若重认证返回的是 Workspace 选择页（如已开通 Team 账号的 /workspace），先自动跟随选中第一个 workspace。
     """
     headers = session.get_auth_navigate_headers(referer="https://auth.openai.com/email-verification")
-    logger.info("[2FA] 跟随 continue_url，刷新 session-token cookie...")
+    logger.info("[2FA] 跟随 continue_url (%s)，刷新 session-token cookie...", continue_url[:100])
     callback = session.get(continue_url, headers=headers, allow_redirects=True)
     callback.raise_for_status()
+    final_url = str(getattr(callback, "url", "") or "")
+    logger.info("[2FA] continue_url 最终落点: %s", final_url[:140])
 
-    # 拿新的 accessToken
-    new_session = fetch_session(session)
-    new_token = new_session["accessToken"]
-    logger.info("[2FA] 已获取重认证后的新 accessToken")
-    return new_token
+    # 如果落点仍在 auth.openai.com（例如 Team 账号的 /workspace 选择页），自动完成 workspace/select 回调
+    if "chatgpt.com" not in final_url and "auth.openai.com" in final_url:
+        import re as _re
+        from core.openai_auth import build_sentinel_header, request_sentinel_token
+        html = callback.text or ""
+        ws_id = None
+        try:
+            from core.codex_oauth import _get_workspace_id
+            ws_id = _get_workspace_id(session)
+        except Exception:
+            pass
+        if not ws_id:
+            # 从页面或已有缓存提取 UUID
+            ws_match = _re.search(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})", html)
+            if ws_match:
+                ws_id = ws_match.group(1)
+        if not ws_id:
+            # 从当前 session 预热过的 /accounts/check 或 token_claims 提取 account_id
+            ws_id = getattr(session, "_default_workspace_id", None)
+        if ws_id:
+            logger.info("[2FA] 检测到 Workspace 选择页 (%s)，自动选择 workspace_id=%s 继续回调...", final_url[:80], ws_id)
+            post_headers = session.get_auth_headers(referer=final_url)
+            try:
+                sentinel_resp = request_sentinel_token(session, "authorize_continue")
+                sh, soh = build_sentinel_header(session, sentinel_resp, "authorize_continue")
+                if sh:
+                    post_headers["openai-sentinel-token"] = sh
+                if soh:
+                    post_headers["openai-sentinel-so-token"] = soh
+            except Exception:
+                pass
+            post_resp = session.post(
+                "https://auth.openai.com/api/accounts/workspace/select",
+                headers=post_headers,
+                data=json.dumps({"workspace_id": ws_id}),
+                allow_redirects=False,
+            )
+            next_u = post_resp.headers.get("location") or post_resp.headers.get("Location")
+            if not next_u:
+                try:
+                    p_data = post_resp.json()
+                    next_u = p_data.get("continue_url") or p_data.get("redirect_url") or p_data.get("url") or p_data.get("location")
+                except Exception:
+                    next_u = None
+            if next_u:
+                if next_u.startswith("/"):
+                    next_u = "https://auth.openai.com" + next_u
+                logger.info("[2FA] Workspace 选择成功，继续跟随回调: %s", next_u[:120])
+                callback = session.get(next_u, headers=session.get_auth_navigate_headers(referer=final_url), allow_redirects=True)
+                final_url = str(getattr(callback, "url", "") or "")
+                logger.info("[2FA] Workspace 回调最终落点: %s", final_url[:140])
+
+    last_err = None
+    for _attempt in range(3):
+        try:
+            new_session = fetch_session(session)
+            new_token = new_session["accessToken"]
+            logger.info("[2FA] 已获取重认证后的新 accessToken")
+            return new_token
+        except Exception as exc:
+            last_err = exc
+            time.sleep(1.5)
+    raise last_err
 
 
 def _enroll_totp(session: BrowserSession, access_token: str) -> tuple[str, str]:
@@ -621,6 +682,11 @@ def setup_2fa(
     logger.info("=" * 60)
 
     if access_token:
+        try:
+            from core.chatgpt_plan import token_claims as _tc
+            session._default_workspace_id = (_tc(access_token) or {}).get("account_id")
+        except Exception:
+            pass
         try:
             logger.info("[2FA] 使用现有 accessToken 预热登录态...")
             authenticated_bootstrap(session, access_token, strict=False)

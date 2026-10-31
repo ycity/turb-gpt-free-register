@@ -186,8 +186,19 @@ class BrowserSession:
         from config import browser as browser_cfg
         self.http_client = str(browser_cfg.PROTOCOL_HTTP_CLIENT).strip().lower()
         from core.protocol_profiles import validate_protocol_profile, align_browser_profile
-        self.impersonate = (browser_cfg.CURL_CFFI_IMPERSONATE if self.http_client == "curl_cffi"
-                            else browser_cfg.WREQ_EMULATION)
+        # 现代主流真实浏览器指纹候选池（支持各版本 Chrome、Edge、Safari）
+        RANDOM_IMPERSONATE_POOL = [
+            "chrome146", "chrome145", "chrome142", "chrome136", "chrome131",
+            "chrome124", "chrome120", "edge101", "safari180", "safari184"
+        ]
+        configured_impersonate = (browser_cfg.CURL_CFFI_IMPERSONATE if self.http_client == "curl_cffi"
+                                  else browser_cfg.WREQ_EMULATION)
+        configured_impersonate = str(configured_impersonate or "").strip()
+        # 如果配置为 random 或 auto，或者开启了随机模式，则从候选池中随机选择
+        if configured_impersonate.lower() in ("random", "auto", "pool", "") or getattr(browser_cfg, "RANDOM_BROWSER_FINGERPRINT", True):
+            self.impersonate = random.choice(RANDOM_IMPERSONATE_POOL)
+        else:
+            self.impersonate = configured_impersonate
         self.impersonate = validate_protocol_profile(self.http_client, str(self.impersonate).strip())
         if self.http_client == "curl_cffi":
             self.session = Session(impersonate=self.impersonate)
