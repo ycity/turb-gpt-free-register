@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
 _LOADED = False
+# 各入口（通用配置保存、代理池、CloudMail 等）都是“读整个 .env → 改几行 → 整体写回”，
+# 并发时必须串行，否则后写入者会用旧快照覆盖别人刚保存的值。
+_WRITE_LOCK = threading.RLock()
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
@@ -134,7 +138,11 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
     """更新 .env 中的若干 key；不存在则追加。返回实际写入的 key 列表。"""
     if not updates:
         return []
+    with _WRITE_LOCK:
+        return _write_env_values_locked(updates)
 
+
+def _write_env_values_locked(updates: dict[str, str]) -> list[str]:
     existing_lines: list[str] = []
     if _ENV_PATH.exists():
         existing_lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()

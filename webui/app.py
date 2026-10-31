@@ -24,7 +24,7 @@ import pyotp
 from core import account_inspection_service, codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
-from webui import config_editor
+from webui import config_editor, proxy_pool
 
 logger = logging.getLogger(__name__)
 
@@ -3103,6 +3103,47 @@ def create_app(auth_code: str | None = None) -> Flask:
                 else f"⚠️ 已写入文件但热加载失败（{reload_err}），需重启 Web 服务才能生效"
             ),
         })
+
+    # ----------------------------------------------------------
+    # 代理池管理（命名 / 启停 / 导入 / 连接测试）
+    # ----------------------------------------------------------
+    @app.get("/api/proxy-pool")
+    def api_proxy_pool_list():
+        return jsonify(proxy_pool.list_pool())
+
+    @app.post("/api/proxy-pool")
+    def api_proxy_pool_save():
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(proxy_pool.save_pool(data.get("items"), version=data.get("version")))
+        except proxy_pool.ProxyPoolConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/proxy-pool/import")
+    def api_proxy_pool_import():
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify(proxy_pool.import_lines(
+                data.get("text") or "",
+                default_scheme=data.get("default_scheme") or "http",
+                name_prefix=data.get("name_prefix") or "",
+                version=data.get("version"),
+                dry_run=bool(data.get("dry_run")),
+            ))
+        except proxy_pool.ProxyPoolConflict as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/proxy-pool/test")
+    def api_proxy_pool_test():
+        data = request.get_json(silent=True) or {}
+        try:
+            return jsonify({"ok": True, **proxy_pool.check_proxy(data.get("url") or "")})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
 
 

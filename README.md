@@ -542,7 +542,7 @@ CLOAK_USER_DATA_DIR = ""        # 留空临时环境；填路径可持久化 pro
 说明：
 
 - `CLOAK_GEOIP=True` 会按当前出口 IP 自动生成 `locale / timezone / Accept-Language`，并传给 CloakBrowser 与 Playwright context。
-- 如果你通过项目代理池使用代理，请在 `config/proxy.py` 的 `PROXY_POOL` 填写代理；如果你使用系统代理/VPN，也会按当前实际出口 IP 自动定位。
+- 如果你通过项目代理池使用代理，请在 WebUI「代理池」或 `config/proxy.py` 的 `PROXY_POOL` 填写代理；如果你使用系统代理/VPN，也会按当前实际出口 IP 自动定位。
 - 免费版没有在项目侧限制窗口数；本项目每个注册任务会启动一个 CloakBrowser 实例，即一个实例一套指纹。
 - WebUI 中，`Codex授权驱动` 位于「CPA / Codex」分组，对应 `config/codex.py` 的 `CODEX_OAUTH_DRIVER`。
 
@@ -605,13 +605,21 @@ pip install playwright
 
 ### 3. 配置代理
 
-编辑 `config/proxy.py`：
+推荐在 WebUI「配置 → 代理池」中管理：可以给每个代理命名、启用/停用、批量导入，并测试连接。测试按注册时的真实链路（含「代理池上游代理」）访问 chatgpt.com，显示延迟、出口 IP 和归属地；改动立即写入 `.env` 的 `PROXY_POOL`。
+
+也可以编辑 `config/proxy.py` 的默认值，每行一个代理：
 
 ```python
 PROXY_POOL = [
+    "socks5h://user:pass@1.2.3.4:1080#美国家宽 1",
     "http://user:pass@host:port",
+    "# http://5.6.7.8:8080#备用",
 ]
 ```
+
+- 行尾 `#名称` 是代理的备注名，只对带协议的完整 URL 生效；
+- 行首 `#` 表示停用：保留在列表里，但注册时不会被抽到；
+- 也支持 `host:port`、`host:port:user:pass` 简写，默认按 `http://` 补全。
 
 Roxy 一号一环境开启 `ROXY_CREATE_USE_PROXY_POOL=True` 时，会从这里随机取代理写入 Roxy Profile。
 

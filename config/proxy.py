@@ -8,6 +8,10 @@
     - http:// / https://   HTTP(S) 代理
     - socks5://            SOCKS5（DNS 本地解析，可能泄漏）
     - socks5h://           SOCKS5（DNS 在代理端解析，推荐，避免 DNS-IP 错配）
+
+代理池每行格式：``[# ]代理URL[#名称]``
+    - 行尾 ``#名称`` 是代理的备注名，例如 socks5h://user:pass@1.2.3.4:1080#美国家宽1
+    - 行首 ``#`` 表示停用：保留在列表里，但不参与随机抽取
 """
 import random
 from urllib.parse import quote, urlparse
@@ -73,11 +77,12 @@ def normalize_proxy_url(value: str, default_scheme: str = "http") -> str:
     if len(parts) == 4 and parts[0] and parts[1] and parts[2] and _valid_port(parts[3]):
         username, password, host, port = parts
         return f"{default_scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
-    parsed = urlparse(f"//{text}")
+    # urlparse 遇到不成对的 IPv6 方括号会直接抛错；无法识别的写法原样返回，交给调用方校验。
     try:
+        parsed = urlparse(f"//{text}")
         port = parsed.port
     except ValueError:
-        port = None
+        return text
     if parsed.hostname and port:
         return f"{default_scheme}://{text}"
     return text
@@ -94,6 +99,53 @@ def normalize_proxy_list(values, default_scheme: str = "http") -> list[str]:
         for value in values
         if (normalized := normalize_proxy_url(value, default_scheme=default_scheme))
     ]
+
+
+def split_proxy_pool_line(line: str) -> tuple[str, str, bool]:
+    """拆出代理池单行的 (代理地址, 名称, 是否启用)。
+
+    带协议的 URL 自身不会含未编码的 ``#``，因此第一个 ``#`` 之后就是名称；
+    host:port:user:pass 等简写不解析名称，密码里的 ``#`` 保持原有兼容行为。
+    """
+    text = str(line or "").strip()
+    enabled = not text.startswith("#")
+    if not enabled:
+        text = text[1:].strip()
+    name = ""
+    if "://" in text and "#" in text:
+        text, name = (part.strip() for part in text.split("#", 1))
+    return text, name, enabled
+
+
+def format_proxy_pool_line(url: str, name: str = "", enabled: bool = True) -> str:
+    """按 split_proxy_pool_line 的格式写回一行；名称压成单行文本。"""
+    text = normalize_proxy_url(url)
+    if "://" not in text:
+        raise ValueError("代理地址缺少协议或端口")
+    name = " ".join(str(name or "").split())
+    line = f"{text}#{name}" if name else text
+    return line if enabled else f"# {line}"
+
+
+def proxy_pool_entries(values, default_scheme: str = "http") -> list[dict]:
+    """解析代理池配置，返回 [{url, name, enabled, raw}]，包含停用项。"""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = values.splitlines()
+    entries = []
+    for value in values:
+        raw = str(value or "").strip()
+        url, name, enabled = split_proxy_pool_line(raw)
+        if not url:
+            continue
+        entries.append({
+            "url": normalize_proxy_url(url, default_scheme=default_scheme),
+            "name": name,
+            "enabled": enabled,
+            "raw": raw,
+        })
+    return entries
 
 
 def pick_proxy() -> str:
@@ -120,6 +172,7 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
 })
-PROXY_POOL = normalize_proxy_list(PROXY_POOL)
+# 运行时只保留启用项的纯 URL（去掉名称），调用方无需感知行格式。
+PROXY_POOL = [entry["url"] for entry in proxy_pool_entries(PROXY_POOL) if entry["enabled"]]
 PLAN_CHECK_PROXY = normalize_proxy_list(PLAN_CHECK_PROXY)
 PROXY = pick_proxy()

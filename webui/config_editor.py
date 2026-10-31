@@ -613,7 +613,8 @@ EDITABLE_FIELDS = [
     # ---- 代理池 ----
     {
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
+        "label": "代理池(每行一个)", "help": "每行一个代理 URL，行尾 #名称 为备注名，行首 # 表示停用；留空行会被忽略；为空则不使用代理",
+        "widget": "proxy_pool",
         "recommended_links": [
             {
                 "label": "IPWO 家宽",
@@ -986,6 +987,43 @@ def _coerce_raw_value(raw: str, fallback, vtype: str):
         return fallback
 
 
+def _field_current_value(field: dict, env_file_values: dict):
+    """按 `.env` → 环境变量 → `config/*.py` 默认值的顺序取单个字段的当前值。"""
+    key = field["key"]
+    path = _config_path(field["file"])
+    source = path.read_text(encoding="utf-8") if path.exists() else ""
+    fallback = _parse_value_from_source(source, key, field["type"])
+
+    if key in env_file_values:
+        raw_env_value = env_file_values[key]
+        if field["type"] == "list_str_multiline" and key in EXPLICIT_EMPTY_LIST_KEYS and str(raw_env_value).strip() == "":
+            value = []
+        elif field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+            value = ""
+        else:
+            value = _coerce_raw_value(raw_env_value, fallback, field["type"])
+    elif os.getenv(key) is not None:
+        raw_env_value = os.getenv(key, "")
+        if field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+            value = ""
+        else:
+            value = _coerce_raw_value(raw_env_value, fallback, field["type"])
+    else:
+        value = fallback
+
+    if field["type"] in ("str", "list_str_multiline"):
+        value = _normalize_config_value(value, field["type"])
+    return value
+
+
+def get_field_value(key: str):
+    """读取单个可编辑项的当前值，取值规则与 get_config() 相同。"""
+    from config.env_loader import load_env, read_env_file
+    field = _FIELD_BY_KEY[key]
+    load_env(override=True)
+    return _field_current_value(field, read_env_file())
+
+
 def get_config() -> list[dict]:
     """返回所有可编辑项的当前值 + 元信息，供前端渲染表单。
 
@@ -998,29 +1036,7 @@ def get_config() -> list[dict]:
     out = []
     for field in EDITABLE_FIELDS:
         key = field["key"]
-        path = _config_path(field["file"])
-        source = path.read_text(encoding="utf-8") if path.exists() else ""
-        fallback = _parse_value_from_source(source, key, field["type"])
-
-        if key in env_file_values:
-            raw_env_value = env_file_values[key]
-            if field["type"] == "list_str_multiline" and key in EXPLICIT_EMPTY_LIST_KEYS and str(raw_env_value).strip() == "":
-                value = []
-            elif field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
-                value = ""
-            else:
-                value = _coerce_raw_value(raw_env_value, fallback, field["type"])
-        elif os.getenv(key) is not None:
-            raw_env_value = os.getenv(key, "")
-            if field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
-                value = ""
-            else:
-                value = _coerce_raw_value(raw_env_value, fallback, field["type"])
-        else:
-            value = fallback
-
-        if field["type"] in ("str", "list_str_multiline"):
-            value = _normalize_config_value(value, field["type"])
+        value = _field_current_value(field, env_file_values)
         item = dict(field)
         from core.protocol_profiles import PROFILE_FIELDS, profile_choices
         if key in PROFILE_FIELDS:

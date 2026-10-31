@@ -1580,7 +1580,8 @@
     .outlook-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
 
     /* ---- 邮箱池导入弹窗 ---- */
-    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden) {
+    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
+    #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -1726,6 +1727,189 @@
     .outlook-import-foot .jobs-tb-btn:disabled {
       opacity: .7; cursor: not-allowed;
     }
+
+    /* ---- 代理池管理 ---- */
+    /* 代理表格较宽：允许配置区的网格项收缩，表格在自身容器内横向滚动，而不是撑宽整页被裁掉。 */
+    .config-sections-v2, .config-section-v2 { min-width: 0; }
+    .proxy-pool-v2 {
+      margin-top: 18px; border: 1px solid #ebeef5; border-radius: 10px;
+      background: #fff; overflow: hidden;
+    }
+    .proxy-pool-v2-toolbar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 12px 14px; background: #fafbfc; border-bottom: 1px solid #ebeef5;
+    }
+    .proxy-pool-v2-toolbar input[type="search"],
+    .proxy-pool-v2-toolbar select {
+      height: 34px; min-height: 34px; margin: 0; padding: 0 10px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; box-sizing: border-box;
+    }
+    .proxy-pool-v2-toolbar input[type="search"] { flex: 1 1 200px; width: auto; max-width: 280px; }
+    .proxy-pool-v2-toolbar select { width: auto; }
+    .proxy-pool-v2-toolbar input:focus,
+    .proxy-pool-v2-toolbar select:focus { outline: none; border-color: #377DFF; }
+    .proxy-pool-v2-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+    .proxy-pool-v2-btn {
+      min-height: 34px; padding: 0 12px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; font: inherit; font-size: 13px; line-height: 1;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    }
+    .proxy-pool-v2-btn:hover:not(:disabled) { color: #377DFF; border-color: #c6e2ff; background: #ecf5ff; }
+    .proxy-pool-v2-btn:disabled { color: #c0c4cc; background: #fff; border-color: #e4e7ed; cursor: not-allowed; }
+    .proxy-pool-v2-btn--primary { color: #fff; background: #377DFF; border-color: #377DFF; }
+    .proxy-pool-v2-btn--primary:hover:not(:disabled) { color: #fff; background: #5a94ff; border-color: #5a94ff; }
+    .proxy-pool-v2-btn--danger { color: #e64545; background: #fff5f5; border-color: #f89898; }
+    .proxy-pool-v2-btn--danger:hover:not(:disabled) { color: #fff; background: #f56c6c; border-color: #f56c6c; }
+    .proxy-pool-v2-meta {
+      display: flex; align-items: center; gap: 6px 16px; flex-wrap: wrap;
+      padding: 9px 14px; border-bottom: 1px solid #ebeef5; font-size: 12px; color: #909399;
+    }
+    .proxy-pool-v2-meta b { color: #303133; font-weight: 600; }
+    .proxy-pool-v2-meta b.pp-good { color: #16803c; }
+    .proxy-pool-v2-meta b.pp-bad { color: #e64545; }
+    .proxy-pool-v2-meta .pp-meta-note { margin-left: auto; }
+    .proxy-pool-v2-warn {
+      padding: 9px 14px; border-bottom: 1px solid #f3d99b;
+      background: #fff7e6; color: #92600a; font-size: 13px;
+    }
+    .proxy-pool-v2-table-wrap { overflow-x: auto; }
+    .proxy-pool-v2-table {
+      width: 100%; min-width: 860px; border-collapse: collapse; table-layout: fixed; font-size: 13px;
+    }
+    .proxy-pool-v2-table th, .proxy-pool-v2-table td {
+      padding: 10px; border-bottom: 1px solid #ebeef5; text-align: left; vertical-align: middle;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #606266;
+    }
+    .proxy-pool-v2-table thead th {
+      position: static; background: #f5f7fa; color: #808093; font-size: 12px; font-weight: 600;
+    }
+    .proxy-pool-v2-table tbody tr:last-child td { border-bottom: none; }
+    .proxy-pool-v2-table tbody tr:hover td { background: #fbfdff; }
+    .proxy-pool-v2-table tbody tr.is-selected td { background: #f4f8ff; }
+    .proxy-pool-v2-table tbody tr.is-disabled .pp-name,
+    .proxy-pool-v2-table tbody tr.is-disabled .pp-proxy { opacity: .55; }
+    .proxy-pool-v2-table .pp-col-check { width: 38px; padding-right: 2px; }
+    .proxy-pool-v2-table .pp-col-proxy { width: 205px; }
+    .proxy-pool-v2-table .pp-col-exit { width: 190px; }
+    .proxy-pool-v2-table .pp-col-latency { width: 92px; }
+    .proxy-pool-v2-table .pp-col-enabled { width: 64px; }
+    .proxy-pool-v2-table .pp-col-actions { width: 160px; }
+    /* 开关、按钮所在的格子不做省略号截断：宽度不够时按钮换行，而不是在控件后面补“…”。 */
+    .proxy-pool-v2-table td.pp-cell-ctl { overflow: visible; text-overflow: clip; }
+    .proxy-pool-v2-table input[type="checkbox"]:not(.config-switch-v2-toggle) {
+      width: 16px; height: 16px; min-height: 16px; margin: 0; padding: 0;
+      accent-color: #377DFF; cursor: pointer; vertical-align: middle;
+    }
+    .proxy-pool-v2-table .pp-name { font-weight: 600; color: #303133; overflow: hidden; text-overflow: ellipsis; }
+    .proxy-pool-v2-table .pp-sub {
+      margin-top: 3px; font-size: 12px; color: #909399; line-height: 1.35;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .proxy-pool-v2-table .pp-muted { color: #a8abb2; font-weight: 400; }
+    .proxy-pool-v2-table .pp-error { color: #e64545; }
+    .proxy-pool-v2-table .pp-wrap {
+      white-space: normal; overflow-wrap: anywhere; line-height: 1.4; font-size: 12px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .proxy-pool-v2-table .pp-proxy, .proxy-pool-v2-table .pp-exit {
+      display: flex; align-items: center; gap: 6px; min-width: 0;
+    }
+    .proxy-pool-v2-table .pp-auth { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .proxy-pool-v2-table .pp-auth .pp-user { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .proxy-pool-v2-table .pp-auth .mono { flex-shrink: 0; color: #909399; }
+    .proxy-pool-v2-table .pp-auth .pp-icon-btn { width: 18px; height: 18px; min-height: 18px; }
+    .proxy-pool-v2-table .pp-proxy .mono, .proxy-pool-v2-table .pp-exit .mono {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #303133;
+    }
+    .pp-scheme {
+      flex-shrink: 0; padding: 1px 5px; border-radius: 4px; font-size: 10.5px; font-weight: 700;
+      letter-spacing: .02em; line-height: 1.4; color: #475467; background: #f2f4f7;
+    }
+    .pp-scheme--socks5, .pp-scheme--socks5h { color: #6d28d9; background: #f3efff; }
+    .pp-scheme--https { color: #0e7490; background: #ecfeff; }
+    .pp-cc {
+      flex-shrink: 0; padding: 1px 5px; border-radius: 4px; font-size: 11px; font-weight: 700;
+      color: #1d4ed8; background: #eef4ff;
+    }
+    .pp-flag {
+      flex-shrink: 0; width: 20px; height: 15px; border-radius: 2px; object-fit: cover;
+      box-shadow: 0 0 0 1px rgba(15,23,42,.12);
+    }
+    .pp-tag { flex-shrink: 0; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .pp-tag--warn { color: #92600a; background: #fff7e6; border: 1px solid #f3d99b; }
+    .pp-icon-btn {
+      flex-shrink: 0; width: 22px; height: 22px; min-height: 22px; margin: 0; padding: 0;
+      border: none; border-radius: 4px; background: transparent; color: #a8abb2; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; vertical-align: middle;
+    }
+    .pp-icon-btn:hover { color: #377DFF; background: #ecf5ff; }
+    .pp-icon-btn svg {
+      width: 14px; height: 14px; stroke: currentColor; fill: none;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .pp-pill {
+      display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px;
+      border-radius: 4px; font-size: 12px; font-weight: 600; white-space: nowrap; border: 1px solid transparent;
+    }
+    .pp-pill--good { color: #16803c; background: #e9f7ef; border-color: #b9dfc9; }
+    .pp-pill--warn { color: #92600a; background: #fff7e6; border-color: #f3d99b; }
+    .pp-pill--slow { color: #c2410c; background: #fff1e8; border-color: #fdc9a8; }
+    .pp-pill--bad { color: #e64545; background: #fef0f0; border-color: #fbc4c4; }
+    .pp-pill--testing { color: #377DFF; background: #ecf5ff; border-color: #c6e2ff; }
+    .pp-spinner {
+      width: 10px; height: 10px; border-radius: 50%;
+      border: 2px solid currentColor; border-right-color: transparent;
+      animation: pp-spin .8s linear infinite;
+    }
+    @keyframes pp-spin { to { transform: rotate(360deg); } }
+    .proxy-pool-v2-table .pp-actions { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+    .proxy-pool-v2-table .pp-actions button {
+      min-height: 28px; padding: 0 8px; border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; color: #606266; font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+    }
+    .proxy-pool-v2-table .pp-actions button:hover:not(:disabled) { color: #377DFF; border-color: #c6e2ff; background: #ecf5ff; }
+    .proxy-pool-v2-table .pp-actions button.danger { color: #e64545; border-color: #f89898; background: #fff5f5; }
+    .proxy-pool-v2-table .pp-actions button.danger:hover:not(:disabled) { color: #fff; background: #f56c6c; border-color: #f56c6c; }
+    .proxy-pool-v2-table .pp-actions button:disabled { color: #c0c4cc; border-color: #e4e7ed; background: #fff; cursor: not-allowed; }
+    .proxy-pool-v2-empty {
+      padding: 28px 16px !important; text-align: center !important; white-space: normal !important;
+      color: #909399; font-size: 13px; line-height: 1.6;
+    }
+    .proxy-pool-v2-settings-title {
+      margin-top: 22px; padding-top: 18px; border-top: 1px solid #ebeef5;
+      font-size: 14px; font-weight: 600; color: #303133;
+    }
+    .proxy-pool-v2-settings-title span { margin-left: 8px; font-size: 12px; font-weight: 400; color: #909399; }
+    .proxy-pool-v2-settings-title + .config-section-v2-body { margin-top: 12px; }
+    .proxy-edit-grid { display: grid; grid-template-columns: 150px minmax(0, 1fr) 110px; gap: 12px; }
+    .proxy-edit-grid--auth { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .proxy-edit-grid--import { grid-template-columns: 180px minmax(0, 1fr); }
+    .outlook-import-field > span small { margin-left: 6px; font-weight: 400; font-size: 12px; }
+    .proxy-edit-password { position: relative; }
+    #proxyPoolEditModal .proxy-edit-password input {
+      width: 100%; height: 40px; min-height: 40px; margin: 0; padding: 0 40px 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 8px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; box-sizing: border-box;
+    }
+    .proxy-edit-password .pp-icon-btn { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); }
+    #proxyPoolEditModal input:focus, #proxyPoolEditModal select:focus,
+    #proxyPoolImportModal input:focus, #proxyPoolImportModal select:focus { outline: none; border-color: #377DFF; }
+    .proxy-edit-paste-hint { font-size: 12px; color: #909399; }
+    .proxy-edit-paste-hint.is-ok { color: #16803c; }
+    .proxy-edit-paste-hint.is-bad { color: #e64545; }
+    .proxy-edit-result, .proxy-import-summary {
+      padding: 10px 12px; border-radius: 8px; font-size: 13px; line-height: 1.55;
+      border: 1px solid #ebeef5; background: #fafbfc; color: #606266; overflow-wrap: anywhere;
+    }
+    .proxy-edit-result { white-space: pre-line; }
+    .proxy-edit-result.is-ok { border-color: #b9dfc9; background: #f0fbf5; color: #166534; }
+    .proxy-edit-result.is-bad { border-color: #fbc4c4; background: #fef0f0; color: #b3261e; }
+    .proxy-edit-result.is-testing { border-color: #c6e2ff; background: #ecf5ff; color: #1d4ed8; }
+    .proxy-import-summary ul { margin: 6px 0 0; padding-left: 18px; }
+    .proxy-import-summary li { margin-top: 2px; }
+    .proxy-import-summary .pp-error { color: #e64545; }
+    #proxyImportText { min-height: 200px; }
 
 
     /* ---- 新版配置布局（追加在概览下方） ---- */
@@ -2762,6 +2946,111 @@
     </div>
   </div>
 </div>
+<div id="proxyPoolEditModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="proxyPoolEditTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(620px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="proxyPoolEditTitle">添加代理</h3>
+        <p>名称只用于在列表里区分代理。保存后立即写入 .env，注册时从已启用的代理中随机抽取。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseProxyEdit" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <label class="outlook-import-field">
+        <span>名称</span>
+        <input type="text" id="proxyEditName" maxlength="64" placeholder="例如：美国家宽 1" autocomplete="off">
+      </label>
+      <label class="outlook-import-field">
+        <span>快速填写 <small class="muted">粘贴代理地址，自动拆分到下方各项</small></span>
+        <input type="text" id="proxyEditPaste" placeholder="socks5h://user:pass@host:port、http://host:port 或 host:port:user:pass" autocomplete="off" spellcheck="false">
+        <span class="proxy-edit-paste-hint" id="proxyEditPasteHint"></span>
+      </label>
+      <div class="proxy-edit-grid">
+        <label class="outlook-import-field">
+          <span>协议</span>
+          <select id="proxyEditScheme">
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+            <option value="socks5">SOCKS5</option>
+            <option value="socks5h">SOCKS5H（代理端解析 DNS）</option>
+          </select>
+        </label>
+        <label class="outlook-import-field">
+          <span>主机</span>
+          <input type="text" id="proxyEditHost" placeholder="1.2.3.4 或 proxy.example.com" autocomplete="off" spellcheck="false">
+        </label>
+        <label class="outlook-import-field">
+          <span>端口</span>
+          <input type="number" id="proxyEditPort" min="1" max="65535" placeholder="1080">
+        </label>
+      </div>
+      <div class="proxy-edit-grid proxy-edit-grid--auth">
+        <label class="outlook-import-field">
+          <span>用户名 <small class="muted">可选</small></span>
+          <input type="text" id="proxyEditUser" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="outlook-import-field">
+          <span>密码 <small class="muted">可选</small></span>
+          <div class="proxy-edit-password">
+            <input type="password" id="proxyEditPass" autocomplete="new-password" spellcheck="false" aria-label="密码">
+            <button type="button" class="pp-icon-btn" id="btnToggleProxyPass" title="显示密码" aria-label="显示密码"></button>
+          </div>
+        </div>
+      </div>
+      <label class="outlook-import-check">
+        <input type="checkbox" id="proxyEditEnabled" checked>
+        <span>启用：参与注册时的随机抽取。停用后保留在列表里，可随时重新启用。</span>
+      </label>
+      <div id="proxyEditTestResult" class="proxy-edit-result hidden" role="status"></div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnTestProxyEdit" style="margin-right:auto;">测试连接</button>
+      <button type="button" class="jobs-tb-btn" id="btnCancelProxyEdit">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSaveProxyEdit">保存</button>
+    </div>
+  </div>
+</div>
+<div id="proxyPoolImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="proxyPoolImportTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(660px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="proxyPoolImportTitle">批量导入代理</h3>
+        <p>每行一个代理。完整 URL 可在行尾加 #名称，例如 socks5h://user:pass@1.2.3.4:1080#美国家宽 1；host:port 和 host:port:user:pass 简写按下方默认协议补全，简写不支持 #名称，可用名称前缀统一命名。已在代理池里的代理会自动跳过。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseProxyImport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <label class="outlook-import-field">
+        <span>代理列表</span>
+        <textarea id="proxyImportText" placeholder="socks5h://user:pass@1.2.3.4:1080#美国家宽 1&#10;http://5.6.7.8:8080&#10;9.9.9.9:3128:user:pass" spellcheck="false"></textarea>
+      </label>
+      <div class="proxy-edit-grid proxy-edit-grid--import">
+        <label class="outlook-import-field">
+          <span>简写默认协议</span>
+          <select id="proxyImportScheme">
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+            <option value="socks5">SOCKS5</option>
+            <option value="socks5h">SOCKS5H</option>
+          </select>
+        </label>
+        <label class="outlook-import-field">
+          <span>名称前缀 <small class="muted">可选，未命名的代理按「前缀 序号」命名</small></span>
+          <input type="text" id="proxyImportPrefix" maxlength="58" placeholder="例如：美国家宽" autocomplete="off">
+        </label>
+      </div>
+      <label class="outlook-import-check">
+        <input type="checkbox" id="proxyImportTestAfter" checked>
+        <span>导入后立即测试新增的代理</span>
+      </label>
+      <div id="proxyImportSummary" class="proxy-import-summary hidden" role="status"></div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelProxyImport">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitProxyImport" disabled>导入</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = (s) => document.querySelector(s);
@@ -2973,7 +3262,7 @@ function jobsV2OpIcons() {
     del: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
   };
 }
-function showToast(t) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),1400); }
+function showToast(t, ms=1400) { const el=$('#toast'); el.textContent=t; el.classList.add('show'); clearTimeout(showToast.t); showToast.t=setTimeout(()=>el.classList.remove('show'),ms); }
 async function copyText(text) {
   if (!text) return;
   try {
@@ -2989,7 +3278,11 @@ async function api(url, opts) {
     if (opts?.signal?.aborted || error?.name === 'AbortError') throw error;
     return {};
   });
-  if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  if (!r.ok) {
+    const err = new Error(j.error || ('HTTP '+r.status));
+    err.status = r.status;
+    throw err;
+  }
   return j;
 }
 function debounce(fn, wait=250) {
@@ -3256,7 +3549,9 @@ function updateModalScrollLock() {
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#promoImportModal').classList.contains('hidden')
     || !$('#teamCheckoutModal').classList.contains('hidden')
-    || !$('#emailChangeModalV2').classList.contains('hidden');
+    || !$('#emailChangeModalV2').classList.contains('hidden')
+    || !$('#proxyPoolEditModal').classList.contains('hidden')
+    || !$('#proxyPoolImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -6556,7 +6851,7 @@ function configSectionIntro(name) {
   if (name === '接码平台') return '接码通道、国家代码与本地取号服务参数。';
   if (name === '人工节奏') return '注册流程中的随机停顿节奏。';
   if (name === '浏览器画像') return '浏览器语言、时区、出口 IP 画像与注册省流量设置。';
-  if (name === '代理池') return '代理列表与套餐/Agent 网络模式。';
+  if (name === '代理池') return '代理可命名、启停和测试连接，改动立即生效；注册时从已启用的代理中随机抽取。';
   if (name === '提链') return '提链服务地址、CDK 与并发参数。';
   return '';
 }
@@ -7106,6 +7401,9 @@ function renderConfigSectionV2(name, fields) {
   if (name === 'Codex') {
     return renderCodexSectionV2(fields);
   }
+  if (name === '代理池') {
+    return renderProxyPoolSectionV2(name, fields);
+  }
   if (name === '邮箱 / OTP') {
     return renderSectionedConfigSectionV2(
       name,
@@ -7146,6 +7444,7 @@ function renderConfigLayoutV2() {
     </button>
   `).join('');
   sections.innerHTML = names.map(name => renderConfigSectionV2(name, groups[name] || [])).join('');
+  renderProxyPoolManagerV2();
   renderRegistrationDriverCard();
   const sectionMount = document.getElementById('configRegistrationSelectV2');
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
@@ -7249,6 +7548,7 @@ async function loadConfig() {
   } catch(e) {
     showToast('加载配置失败: ' + e.message);
   }
+  loadProxyPool();
 }
 
 async function loadRoxyWorkspaces() {
@@ -7363,6 +7663,851 @@ $('#tab-config').addEventListener('click', (e) => {
   if (!btn) return;
   saveConfigUpdates(btn);
 });
+
+// ---------- 代理池管理 ----------
+// 列表来自 /api/proxy-pool。每次增删改都整表提交：未改动的行原样传 raw，
+// 改动的行传 {name, url, enabled}；后端按版本号拒绝覆盖其他页面或手动编辑 .env 的改动。
+const PROXY_POOL_STATE = {
+  loaded: false, loading: false, saving: false, batchTesting: false,
+  version: '', items: [], upstream: '',
+  search: '', filter: 'all',
+  selected: new Set(), revealed: new Set(), testing: new Set(),
+};
+const PP_TEST_CONCURRENCY = 4;
+const PP_SCHEMES = ['http', 'https', 'socks5', 'socks5h'];
+const PP_FILTERS = [
+  ['all', '全部状态'], ['enabled', '已启用'], ['disabled', '已停用'],
+  ['ok', '测试正常'], ['failed', '测试失败'], ['untested', '未测试'], ['invalid', '格式错误'],
+];
+const PP_ICONS = {
+  copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  eye: '<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+  eyeOff: '<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><path d="M1 1l22 22"/></svg>',
+};
+const PP_REGION_NAMES = (() => {
+  try { return new Intl.DisplayNames(['zh-CN'], { type: 'region' }); } catch (e) { return null; }
+})();
+// 正在编辑的代理按原始行定位，而不是行号：冲突刷新后行号可能已指向别的代理。
+let PP_EDIT_RAW = null;
+// 弹窗内测试的序号；表单改动、重新打开或关闭都会让还在路上的测试结论作废。
+let PP_EDIT_SEQ = 0;
+let PP_IMPORT_SEQ = 0;
+
+// 每行一个独立标识（勾选、显示密码用）；同一地址出现多行时按出现顺序区分。
+function ppAssignUids(items) {
+  const seen = new Map();
+  items.forEach(item => {
+    const base = item.key || ('raw:' + String(item.raw || '').replace(/^#\s*/, ''));
+    const n = seen.get(base) || 0;
+    seen.set(base, n + 1);
+    item.uid = `${base}#${n}`;
+  });
+}
+function ppIdentity(item) { return item.uid || item.key || ('raw:' + item.raw); }
+function ppTestTime(t) {
+  const v = Date.parse((t && t.tested_at) || '');
+  return Number.isFinite(v) ? v : 0;
+}
+// 与 sub2api 相同，国旗用 flag-icons 的 SVG（固定版本，经 unpkg CDN 加载）；
+// 加载失败的国家代码记下来，之后直接显示文字，避免每次重绘都重复请求。
+const PP_FLAG_BASE = 'https://unpkg.com/flag-icons@7.6.0/flags/4x3/';
+const PP_FLAG_FAILED = new Set();
+function ppFlagHtml(code) {
+  const cc = String(code || '').toUpperCase();
+  if (!cc) return '';
+  if (!/^[A-Z]{2}$/.test(cc) || PP_FLAG_FAILED.has(cc)) return `<span class="pp-cc">${esc(cc)}</span>`;
+  const name = ppRegionName(cc);
+  const title = name && name !== cc ? `${name}（${cc}）` : cc;
+  return `<img class="pp-flag" src="${PP_FLAG_BASE}${cc.toLowerCase()}.svg" alt="${attrEsc(cc)}" title="${attrEsc(title)}" loading="lazy" referrerpolicy="no-referrer" onerror="ppFlagFallback(this)">`;
+}
+function ppFlagFallback(img) {
+  PP_FLAG_FAILED.add(img.alt);
+  const badge = document.createElement('span');
+  badge.className = 'pp-cc';
+  badge.textContent = img.alt;
+  badge.title = img.title;
+  img.replaceWith(badge);
+}
+function ppRegionName(code) {
+  const c = String(code || '').toUpperCase();
+  if (!PP_REGION_NAMES || !/^[A-Z]{2}$/.test(c)) return c;
+  try { return PP_REGION_NAMES.of(c) || c; } catch (e) { return c; }
+}
+function ppRelativeTime(value) {
+  const t = Date.parse(value || '');
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+function ppTestState(item) {
+  if (!item.valid) return 'invalid';
+  if (PROXY_POOL_STATE.testing.has(item.key)) return 'testing';
+  if (!item.test) return 'untested';
+  return item.test.ok ? 'ok' : 'failed';
+}
+function ppHostPort(item) {
+  return String(item.host || '').includes(':') ? `[${item.host}]:${item.port}` : `${item.host}:${item.port}`;
+}
+function ppLabel(item) {
+  return item.name || (item.valid ? ppHostPort(item) : item.raw);
+}
+function ppLocation(t) {
+  const parts = [ppRegionName(t.country), t.region, t.city].filter(Boolean);
+  return parts.filter((v, i) => parts.indexOf(v) === i).join(' · ');
+}
+function ppDescribeResult(t) {
+  if (!t) return '';
+  if (!t.ok) return [t.message || '测试失败', t.detail].filter(Boolean).join('\n');
+  const loc = ppLocation(t);
+  return `连接正常 · 延迟 ${t.latency_ms} ms · 出口 ${t.ip}${loc ? `（${loc}）` : ''}${t.org ? ` · ${t.org}` : ''}`;
+}
+function ppFilteredItems() {
+  const st = PROXY_POOL_STATE;
+  const q = st.search.trim().toLowerCase();
+  return st.items.filter(item => {
+    const state = ppTestState(item);
+    if (st.filter === 'enabled' && !(item.enabled && item.valid)) return false;
+    if (st.filter === 'disabled' && item.enabled) return false;
+    if (['ok', 'failed', 'untested', 'invalid'].includes(st.filter) && state !== st.filter) return false;
+    if (!q) return true;
+    const t = item.test || {};
+    return [item.name, item.scheme, item.host, item.port, item.username, t.ip, t.country,
+      ppRegionName(t.country), t.region, t.city, t.org, item.valid ? '' : item.raw]
+      .some(v => String(v ?? '').toLowerCase().includes(q));
+  });
+}
+
+function renderProxyPoolSectionV2(name, fields) {
+  const slug = configGroupSlug(name);
+  const poolField = fields.find(f => f.widget === 'proxy_pool');
+  const others = fields.filter(f => f !== poolField);
+  const switches = others.filter(f => f.type === 'bool');
+  const inputs = others.filter(f => f.type !== 'bool');
+  return `
+    <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
+      ${renderConfigSectionHead(name, configSectionIntro(name))}
+      <div class="proxy-pool-v2" id="proxyPoolManagerV2"></div>
+      ${poolField ? renderConfigRecommendedLinks(poolField) : ''}
+      ${others.length ? `
+        <div class="proxy-pool-v2-settings-title">代理链与套餐 / Agent 网络<span>修改后点击「保存」生效</span></div>
+        ${switches.length ? `<div class="config-switches-v2">${switches.map(f => renderFeatureSwitchField(f, { withIcon: false })).join('')}</div>` : ''}
+        ${inputs.length ? `<div class="config-section-v2-body">${inputs.map(renderConfigPlainFieldV2).join('')}</div>` : ''}
+        <div class="config-section-v2-actions">
+          <button type="button" class="btn primary" data-save-config-v2>保存</button>
+        </div>` : ''}
+    </section>
+  `;
+}
+
+function renderProxyPoolManagerV2() {
+  const mount = document.getElementById('proxyPoolManagerV2');
+  if (!mount) return;
+  const st = PROXY_POOL_STATE;
+  if (!st.loaded) {
+    mount.dataset.ppReady = '';
+    mount.innerHTML = `<div class="proxy-pool-v2-empty">${st.loading ? '正在加载代理池…' : '代理池加载失败，请刷新页面重试'}</div>`;
+    return;
+  }
+  // 工具栏只建一次，后续只刷新表格，避免输入搜索词时丢失焦点。
+  if (mount.dataset.ppReady !== '1') {
+    mount.dataset.ppReady = '1';
+    mount.innerHTML = `
+      <div class="proxy-pool-v2-toolbar">
+        <input type="search" data-pp-search placeholder="搜索名称、地址、出口 IP 或地区" value="${attrEsc(st.search)}" autocomplete="off" spellcheck="false" aria-label="搜索代理">
+        <select data-pp-filter aria-label="按状态筛选">${PP_FILTERS.map(([v, l]) => `<option value="${v}"${st.filter === v ? ' selected' : ''}>${l}</option>`).join('')}</select>
+        <div class="proxy-pool-v2-actions">
+          <button type="button" class="proxy-pool-v2-btn" data-pp-action="test-batch">测试全部</button>
+          <button type="button" class="proxy-pool-v2-btn" data-pp-action="enable-selected">启用</button>
+          <button type="button" class="proxy-pool-v2-btn" data-pp-action="disable-selected">停用</button>
+          <button type="button" class="proxy-pool-v2-btn proxy-pool-v2-btn--danger" data-pp-action="delete-selected">删除</button>
+          <button type="button" class="proxy-pool-v2-btn" data-pp-action="import">批量导入</button>
+          <button type="button" class="proxy-pool-v2-btn proxy-pool-v2-btn--primary" data-pp-action="add">添加代理</button>
+        </div>
+      </div>
+      <div class="proxy-pool-v2-meta" data-pp-meta></div>
+      <div data-pp-warn></div>
+      <div class="proxy-pool-v2-table-wrap">
+        <table class="proxy-pool-v2-table">
+          <thead><tr>
+            <th class="pp-col-check"><input type="checkbox" data-pp-select-all aria-label="全选当前列表"></th>
+            <th>名称</th>
+            <th class="pp-col-proxy">代理</th>
+            <th class="pp-col-exit">出口 IP / 位置</th>
+            <th class="pp-col-latency">延迟</th>
+            <th class="pp-col-enabled">启用</th>
+            <th class="pp-col-actions">操作</th>
+          </tr></thead>
+          <tbody data-pp-body></tbody>
+        </table>
+      </div>`;
+  }
+  renderProxyPoolBody();
+}
+
+function renderProxyPoolBody() {
+  const mount = document.getElementById('proxyPoolManagerV2');
+  if (!mount || mount.dataset.ppReady !== '1') return;
+  const st = PROXY_POOL_STATE;
+  const rows = ppFilteredItems();
+  const body = mount.querySelector('[data-pp-body]');
+  if (body) {
+    body.innerHTML = rows.length ? rows.map(ppRowHtml).join('') : `<tr><td colspan="7" class="proxy-pool-v2-empty">${
+      st.items.length ? '没有符合条件的代理' : '代理池为空，注册时不使用代理（直连）。点击「添加代理」或「批量导入」开始配置。'
+    }</td></tr>`;
+  }
+  const counts = { ok: 0, failed: 0, untested: 0, invalid: 0 };
+  let enabled = 0;
+  st.items.forEach(item => {
+    const state = ppTestState(item);
+    if (state in counts) counts[state] += 1;
+    if (item.valid && item.enabled) enabled += 1;
+  });
+  const meta = mount.querySelector('[data-pp-meta]');
+  if (meta) {
+    meta.innerHTML = `
+      <span>共 <b>${st.items.length}</b> 个</span>
+      <span>启用 <b>${enabled}</b></span>
+      <span>测试正常 <b class="pp-good">${counts.ok}</b></span>
+      <span>失败 <b class="pp-bad">${counts.failed}</b></span>
+      <span>未测试 <b>${counts.untested}</b></span>
+      ${counts.invalid ? `<span>格式错误 <b class="pp-bad">${counts.invalid}</b></span>` : ''}
+      <span class="pp-meta-note">${st.upstream ? `经上游代理 <span class="mono">${esc(st.upstream)}</span> 连接 · ` : ''}改动立即写入 .env</span>`;
+  }
+  const warn = mount.querySelector('[data-pp-warn]');
+  if (warn) {
+    warn.innerHTML = st.items.length && !enabled
+      ? '<div class="proxy-pool-v2-warn">没有可用的启用代理，注册时将不使用代理（直连）。</div>' : '';
+  }
+  const selectedCount = st.items.filter(item => st.selected.has(ppIdentity(item))).length;
+  const testBtn = mount.querySelector('[data-pp-action="test-batch"]');
+  if (testBtn) {
+    testBtn.textContent = st.batchTesting ? '测试中…' : (selectedCount ? `测试所选 (${selectedCount})` : '测试全部');
+    testBtn.disabled = st.batchTesting || !st.items.some(item => item.valid);
+  }
+  ['enable-selected', 'disable-selected', 'delete-selected'].forEach(action => {
+    const btn = mount.querySelector(`[data-pp-action="${action}"]`);
+    if (btn) btn.disabled = !selectedCount || st.saving;
+  });
+  const all = mount.querySelector('[data-pp-select-all]');
+  if (all) {
+    const visible = rows.map(ppIdentity);
+    const picked = visible.filter(id => st.selected.has(id)).length;
+    all.checked = visible.length > 0 && picked === visible.length;
+    all.indeterminate = picked > 0 && picked < visible.length;
+  }
+}
+
+function ppRowHtml(item) {
+  const st = PROXY_POOL_STATE;
+  const state = ppTestState(item);
+  const t = item.test || {};
+  const ident = ppIdentity(item);
+  const selected = st.selected.has(ident);
+
+  const nameHtml = item.name
+    ? `<div class="pp-name" title="${attrEsc(item.name)}">${esc(item.name)}</div>`
+    : '<div class="pp-name pp-muted">未命名</div>';
+  let nameSub = '';
+  if (!item.valid) nameSub = `<div class="pp-sub pp-error" title="${attrEsc(item.error)}">格式错误：${esc(item.error)}</div>`;
+  else if (!item.enabled) nameSub = '<div class="pp-sub">已停用，不参与抽取</div>';
+
+  let proxyHtml;
+  if (item.valid) {
+    const revealed = st.revealed.has(ident);
+    const hasAuth = item.username || item.password;
+    const revealBtn = item.password
+      ? `<button type="button" class="pp-icon-btn" data-pp-action="reveal" data-pp-id="${item.id}" title="${revealed ? '隐藏密码' : '显示密码'}" aria-label="${revealed ? '隐藏密码' : '显示密码'}">${revealed ? PP_ICONS.eyeOff : PP_ICONS.eye}</button>`
+      : '';
+    const auth = hasAuth
+      ? `<span class="pp-user" title="${attrEsc(item.username)}">${esc(item.username || '(无用户名)')}</span>${item.password ? `<span>·</span><span class="mono">${revealed ? esc(item.password) : '••••••'}</span>${revealBtn}` : ''}`
+      : '<span class="pp-muted">无认证</span>';
+    proxyHtml = `
+      <div class="pp-proxy">
+        <span class="mono" title="${attrEsc(ppHostPort(item))}">${esc(ppHostPort(item))}</span>
+        <button type="button" class="pp-icon-btn" data-pp-action="copy" data-pp-id="${item.id}" title="复制代理地址（含账号密码）" aria-label="复制代理地址">${PP_ICONS.copy}</button>
+      </div>
+      <div class="pp-sub pp-auth"><span class="pp-scheme pp-scheme--${attrEsc(item.scheme)}">${esc(String(item.scheme).toUpperCase())}</span>${auth}</div>`;
+  } else {
+    proxyHtml = `<div class="pp-proxy pp-error"><span class="mono" title="${attrEsc(item.raw)}">${esc(item.raw)}</span></div>`;
+  }
+
+  let exitHtml = '<span class="pp-muted">—</span>';
+  if (state === 'ok') {
+    const loc = ppLocation(t);
+    const tip = [
+      `出口 IP：${t.ip}`,
+      loc && `位置：${loc}`,
+      t.org && `运营商：${t.org}`,
+      t.colo && `Cloudflare 节点：${t.colo}`,
+      t.via_upstream && '经代理池上游代理测试',
+    ].filter(Boolean).join('\n');
+    exitHtml = `
+      <div class="pp-exit" title="${attrEsc(tip)}">
+        <span class="mono">${esc(t.ip)}</span>
+        ${ppFlagHtml(t.country)}
+        ${t.datacenter ? `<span class="pp-tag pp-tag--warn" title="${attrEsc('运营商命中机房关键词：' + t.datacenter)}">疑似机房</span>` : ''}
+      </div>
+      <div class="pp-sub" title="${attrEsc(tip)}">${esc(loc || t.org || '未查到归属地')}</div>`;
+  } else if (state === 'failed') {
+    const tip = [t.message, t.detail].filter(Boolean).join('\n');
+    exitHtml = `<div class="pp-error pp-wrap" title="${attrEsc(tip)}">${esc(t.message || '测试失败')}</div>`;
+  } else if (state === 'testing') {
+    exitHtml = '<span class="pp-muted">正在连接 chatgpt.com…</span>';
+  } else if (state === 'untested') {
+    exitHtml = '<span class="pp-muted">未测试</span>';
+  }
+
+  let latencyHtml = '<span class="pp-muted">—</span>';
+  if (state === 'testing') {
+    latencyHtml = '<span class="pp-pill pp-pill--testing"><span class="pp-spinner"></span>测试中</span>';
+  } else if (state === 'ok') {
+    const ms = Number(t.latency_ms) || 0;
+    const level = ms < 800 ? 'good' : ms < 2000 ? 'warn' : 'slow';
+    latencyHtml = `<span class="pp-pill pp-pill--${level}">${ms} ms</span>`;
+  } else if (state === 'failed') {
+    latencyHtml = '<span class="pp-pill pp-pill--bad">失败</span>';
+  }
+  const when = (state === 'ok' || state === 'failed') && t.tested_at
+    ? `<div class="pp-sub" title="${attrEsc('测试时间：' + formatDateTime(t.tested_at))}">${esc(ppRelativeTime(t.tested_at))}</div>`
+    : '';
+
+  return `
+    <tr data-pp-row="${item.id}" class="${item.enabled ? '' : 'is-disabled'}${selected ? ' is-selected' : ''}">
+      <td class="pp-col-check"><input type="checkbox" data-pp-select="${item.id}"${selected ? ' checked' : ''} aria-label="选择"></td>
+      <td>${nameHtml}${nameSub}</td>
+      <td>${proxyHtml}</td>
+      <td>${exitHtml}</td>
+      <td>${latencyHtml}${when}</td>
+      <td class="pp-cell-ctl"><input type="checkbox" class="config-switch-v2-toggle" data-pp-toggle="${item.id}"${item.enabled ? ' checked' : ''}${(item.valid || item.enabled) && !st.saving ? '' : ' disabled'} aria-label="启用"></td>
+      <td class="pp-cell-ctl"><div class="pp-actions">
+        <button type="button" data-pp-action="test" data-pp-id="${item.id}"${item.valid && state !== 'testing' ? '' : ' disabled'}>测试</button>
+        <button type="button" data-pp-action="edit" data-pp-id="${item.id}"${st.saving ? ' disabled' : ''}>编辑</button>
+        <button type="button" class="danger" data-pp-action="delete" data-pp-id="${item.id}"${st.saving ? ' disabled' : ''}>删除</button>
+      </div></td>
+    </tr>`;
+}
+
+function applyProxyPoolResponse(r) {
+  const st = PROXY_POOL_STATE;
+  const items = Array.isArray(r.items) ? r.items : [];
+  // 列表响应可能比页面上刚收到的测试结果更旧：同一代理保留测试时间更新的那份。
+  const local = new Map();
+  st.items.forEach(item => {
+    if (item.key && item.test && ppTestTime(item.test) > ppTestTime(local.get(item.key))) local.set(item.key, item.test);
+  });
+  items.forEach(item => {
+    const mine = item.key && local.get(item.key);
+    if (mine && ppTestTime(mine) > ppTestTime(item.test)) item.test = mine;
+  });
+  ppAssignUids(items);
+  st.items = items;
+  st.version = r.version || '';
+  st.upstream = r.upstream || '';
+  st.loaded = true;
+  const idents = new Set(st.items.map(ppIdentity));
+  st.selected = new Set([...st.selected].filter(id => idents.has(id)));
+  st.revealed = new Set([...st.revealed].filter(id => idents.has(id)));
+}
+
+async function loadProxyPool() {
+  const st = PROXY_POOL_STATE;
+  if (st.loading) return;
+  st.loading = true;
+  if (!st.loaded) renderProxyPoolManagerV2();
+  try {
+    applyProxyPoolResponse(await api('/api/proxy-pool'));
+  } catch (e) {
+    showToast('加载代理池失败：' + e.message, 4000);
+  } finally {
+    st.loading = false;
+    renderProxyPoolManagerV2();
+  }
+}
+
+async function saveProxyPoolItems(items, okMessage) {
+  const st = PROXY_POOL_STATE;
+  if (st.saving) return { ok: false, error: '正在保存，请稍候' };
+  st.saving = true;
+  renderProxyPoolBody();
+  try {
+    const r = await api('/api/proxy-pool', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: st.version, items }),
+    });
+    applyProxyPoolResponse(r);
+    showToast(r.reloaded === false ? `${okMessage}，但热加载失败，需重启服务后生效` : okMessage, r.reloaded === false ? 4000 : 1400);
+    return { ok: true };
+  } catch (e) {
+    showToast('保存失败：' + e.message, 4000);
+    if (e.status === 409) loadProxyPool();
+    return { ok: false, error: e.message };
+  } finally {
+    st.saving = false;
+    renderProxyPoolBody();
+  }
+}
+
+function ppRawItems() {
+  return PROXY_POOL_STATE.items.map(item => ({ raw: item.raw }));
+}
+
+async function setProxyPoolEnabled(ids, enabled) {
+  const wanted = new Set(ids);
+  // 格式错误的行只允许停用，不能启用，避免把坏地址放进随机抽取。
+  const targets = new Set(PROXY_POOL_STATE.items
+    .filter(item => wanted.has(item.id) && item.enabled !== enabled && (item.valid || !enabled))
+    .map(item => item.id));
+  if (!targets.size) { renderProxyPoolBody(); return; }
+  const items = PROXY_POOL_STATE.items.map(item => targets.has(item.id)
+    ? { raw: item.raw, enabled }
+    : { raw: item.raw });
+  await saveProxyPoolItems(items, `已${enabled ? '启用' : '停用'} ${targets.size} 个代理`);
+}
+
+async function deleteProxyPoolItems(ids) {
+  const wanted = new Set(ids);
+  const targets = PROXY_POOL_STATE.items.filter(item => wanted.has(item.id));
+  if (!targets.length) return;
+  const label = targets.length === 1 ? `「${ppLabel(targets[0])}」` : ` ${targets.length} 个代理`;
+  if (!confirm(`确定删除${label}吗？删除后立即写入 .env。`)) return;
+  const items = PROXY_POOL_STATE.items.filter(item => !wanted.has(item.id)).map(item => ({ raw: item.raw }));
+  const result = await saveProxyPoolItems(items, `已删除 ${targets.length} 个代理`);
+  if (result.ok) targets.forEach(item => PROXY_POOL_STATE.selected.delete(ppIdentity(item)));
+}
+
+function ppApplyTestResult(key, result) {
+  if (!key || !result) return;
+  PROXY_POOL_STATE.items.forEach(item => { if (item.key === key) item.test = result; });
+}
+
+async function runProxyPoolTests(targets) {
+  const st = PROXY_POOL_STATE;
+  const seen = new Set();
+  const queue = targets.filter(item => item.valid && !st.testing.has(item.key) && !seen.has(item.key) && seen.add(item.key));
+  queue.forEach(item => st.testing.add(item.key));
+  renderProxyPoolBody();
+  const summary = { ok: 0, failed: 0, last: null };
+  const worker = async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      let result;
+      try {
+        const r = await api('/api/proxy-pool/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: item.url }),
+        });
+        result = r.result;
+      } catch (e) {
+        result = { ok: false, message: e.message, tested_at: new Date().toISOString() };
+      }
+      ppApplyTestResult(item.key, result);
+      st.testing.delete(item.key);
+      summary[result && result.ok ? 'ok' : 'failed'] += 1;
+      summary.last = result;
+      renderProxyPoolBody();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PP_TEST_CONCURRENCY, queue.length) }, worker));
+  return summary;
+}
+
+async function testProxyPoolItem(item) {
+  const s = await runProxyPoolTests([item]);
+  const r = s.last;
+  if (!r) return;
+  showToast(r.ok ? `「${ppLabel(item)}」连接正常，延迟 ${r.latency_ms} ms` : `「${ppLabel(item)}」测试失败：${r.message || ''}`, r.ok ? 2400 : 4000);
+}
+
+async function testProxyPoolBatch() {
+  const st = PROXY_POOL_STATE;
+  if (st.batchTesting) return;
+  const valid = st.items.filter(item => item.valid);
+  const selected = valid.filter(item => st.selected.has(ppIdentity(item)));
+  const targets = selected.length ? selected : valid;
+  if (!targets.length) { showToast('没有可测试的代理'); return; }
+  st.batchTesting = true;
+  renderProxyPoolBody();
+  try {
+    const s = await runProxyPoolTests(targets);
+    showToast(`测试完成：正常 ${s.ok} 个，失败 ${s.failed} 个`, 3000);
+  } finally {
+    st.batchTesting = false;
+    renderProxyPoolBody();
+  }
+}
+
+// ---- 添加 / 编辑弹窗 ----
+function openProxyEditModal(item) {
+  PP_EDIT_RAW = item ? item.raw : null;
+  PP_EDIT_SEQ += 1;
+  const valid = !!(item && item.valid);
+  $('#proxyPoolEditTitle').textContent = item ? '编辑代理' : '添加代理';
+  $('#proxyEditName').value = item ? (item.name || '') : '';
+  $('#proxyEditPaste').value = '';
+  ppSetPasteHint('', '');
+  $('#proxyEditScheme').value = valid ? item.scheme : 'http';
+  $('#proxyEditHost').value = valid ? item.host : '';
+  $('#proxyEditPort').value = valid ? item.port : '';
+  $('#proxyEditUser').value = valid ? (item.username || '') : '';
+  $('#proxyEditPass').value = valid ? (item.password || '') : '';
+  ppSetPasswordVisible(false);
+  $('#proxyEditEnabled').checked = item ? !!item.enabled : true;
+  if (item && !valid) {
+    // 格式错误的行：把原文放进快速填写框，尽量拆出能识别的部分让用户修正。
+    $('#proxyEditPaste').value = String(item.raw || '').replace(/^#\s*/, '');
+    ppApplyPasteText();
+  }
+  ppSetEditResult('', '');
+  $('#proxyPoolEditModal').classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => $('#proxyEditName').focus(), 0);
+}
+function closeProxyEditModal() {
+  PP_EDIT_SEQ += 1;
+  $('#proxyPoolEditModal').classList.add('hidden');
+  ppSetPasswordVisible(false);
+  updateModalScrollLock();
+}
+function ppInvalidateEditResult() {
+  PP_EDIT_SEQ += 1;
+  ppSetEditResult('', '');
+}
+function ppSetPasswordVisible(show) {
+  const input = $('#proxyEditPass');
+  const btn = $('#btnToggleProxyPass');
+  input.type = show ? 'text' : 'password';
+  btn.innerHTML = show ? PP_ICONS.eyeOff : PP_ICONS.eye;
+  btn.title = show ? '隐藏密码' : '显示密码';
+  btn.setAttribute('aria-label', btn.title);
+}
+function ppSetPasteHint(kind, text) {
+  const el = $('#proxyEditPasteHint');
+  el.className = 'proxy-edit-paste-hint' + (kind ? ` is-${kind}` : '');
+  el.textContent = text;
+}
+function ppSetEditResult(kind, text) {
+  const el = $('#proxyEditTestResult');
+  el.className = 'proxy-edit-result' + (kind ? ` is-${kind}` : '') + (text ? '' : ' hidden');
+  el.textContent = text;
+}
+// 与 config.proxy.normalize_proxy_url 的识别规则保持一致：完整 URL（可带 #名称）、
+// host:port、host:port:user:pass、user:pass:host:port。
+function ppParseProxyText(text) {
+  let s = String(text || '').trim();
+  if (!s) return null;
+  const isPort = v => /^\d{1,5}$/.test(v) && Number(v) >= 1 && Number(v) <= 65535;
+  if (s.includes('://')) {
+    let name = '';
+    const hash = s.indexOf('#');
+    if (hash >= 0) { name = s.slice(hash + 1).trim(); s = s.slice(0, hash).trim(); }
+    const m = s.match(/^([a-z][a-z0-9+.-]*):\/\/([^/?]*)/i);
+    if (!m) return null;
+    let rest = m[2];
+    let username = '', password = '';
+    const at = rest.lastIndexOf('@');
+    if (at >= 0) {
+      const cred = rest.slice(0, at);
+      rest = rest.slice(at + 1);
+      const colon = cred.indexOf(':');
+      username = colon >= 0 ? cred.slice(0, colon) : cred;
+      password = colon >= 0 ? cred.slice(colon + 1) : '';
+      try { username = decodeURIComponent(username); password = decodeURIComponent(password); } catch (e) {}
+    }
+    const hp = rest.match(/^\[([^\]]+)\]:(\d+)$/) || rest.match(/^([^:]+):(\d+)$/);
+    if (!hp || !isPort(hp[2])) return null;
+    return { scheme: m[1].toLowerCase(), host: hp[1], port: hp[2], username, password, name };
+  }
+  const parts = s.split(':');
+  const four = parts.length > 4 ? [parts[0], parts[1], parts[2], parts.slice(3).join(':')] : parts;
+  if (four.length === 4) {
+    const [a, b, c, d] = four;
+    if (a && isPort(b) && c && d) return { scheme: '', host: a, port: b, username: c, password: d, name: '' };
+    if (a && b && c && isPort(d)) return { scheme: '', host: c, port: d, username: a, password: b, name: '' };
+  }
+  if (parts.length === 2 && parts[0] && isPort(parts[1])) {
+    return { scheme: '', host: parts[0], port: parts[1], username: '', password: '', name: '' };
+  }
+  return null;
+}
+function ppApplyPasteText() {
+  const text = $('#proxyEditPaste').value;
+  if (!text.trim()) { ppSetPasteHint('', ''); return; }
+  const parsed = ppParseProxyText(text);
+  if (!parsed) { ppSetPasteHint('bad', '无法识别，请检查格式或直接填写下方各项'); return; }
+  if (parsed.scheme && !PP_SCHEMES.includes(parsed.scheme)) {
+    ppSetPasteHint('bad', `不支持的协议：${parsed.scheme}，仅支持 http / https / socks5 / socks5h`);
+    return;
+  }
+  if (parsed.scheme) $('#proxyEditScheme').value = parsed.scheme;
+  $('#proxyEditHost').value = parsed.host;
+  $('#proxyEditPort').value = parsed.port;
+  $('#proxyEditUser').value = parsed.username;
+  $('#proxyEditPass').value = parsed.password;
+  if (parsed.name && !$('#proxyEditName').value.trim()) $('#proxyEditName').value = parsed.name;
+  ppSetPasteHint('ok', parsed.scheme ? '已识别并填入下方各项' : '已识别简写格式，请在下方确认协议');
+}
+function ppEditFormUrl() {
+  const scheme = $('#proxyEditScheme').value;
+  const host = $('#proxyEditHost').value.trim().replace(/^\[|\]$/g, '');
+  const port = $('#proxyEditPort').value.trim();
+  // 账号密码按原样使用：首尾空格也可能是凭据的一部分。
+  const user = $('#proxyEditUser').value;
+  const pass = $('#proxyEditPass').value;
+  if (!host || /[\s/@#?]/.test(host)) {
+    ppSetEditResult('bad', '请填写有效的主机地址');
+    $('#proxyEditHost').focus();
+    return '';
+  }
+  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+    ppSetEditResult('bad', '端口需为 1-65535 的整数');
+    $('#proxyEditPort').focus();
+    return '';
+  }
+  const hostPart = host.includes(':') ? `[${host}]` : host;
+  const auth = user || pass ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : '';
+  return `${scheme}://${auth}${hostPart}:${Number(port)}`;
+}
+async function testProxyEditForm() {
+  const url = ppEditFormUrl();
+  if (!url) return;
+  const seq = ++PP_EDIT_SEQ;
+  const btn = $('#btnTestProxyEdit');
+  btn.disabled = true;
+  ppSetEditResult('testing', '正在通过该代理连接 chatgpt.com…');
+  try {
+    const r = await api('/api/proxy-pool/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    // 结果按地址关联：代理已在列表中时，同步刷新那一行。
+    ppApplyTestResult(r.key, r.result);
+    renderProxyPoolBody();
+    if (seq === PP_EDIT_SEQ) ppSetEditResult(r.result && r.result.ok ? 'ok' : 'bad', ppDescribeResult(r.result));
+  } catch (e) {
+    if (seq === PP_EDIT_SEQ) ppSetEditResult('bad', '测试失败：' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function saveProxyEditForm() {
+  const url = ppEditFormUrl();
+  if (!url) return;
+  const entry = { name: $('#proxyEditName').value.trim(), url, enabled: $('#proxyEditEnabled').checked };
+  const items = ppRawItems();
+  const adding = PP_EDIT_RAW === null;
+  if (adding) {
+    items.push(entry);
+  } else {
+    const index = PROXY_POOL_STATE.items.findIndex(item => item.raw === PP_EDIT_RAW);
+    if (index < 0) { ppSetEditResult('bad', '这个代理已在其他地方被修改或删除，请关闭弹窗后重新编辑'); return; }
+    items[index] = entry;
+  }
+  const btn = $('#btnSaveProxyEdit');
+  btn.disabled = true;
+  try {
+    const result = await saveProxyPoolItems(items, adding ? '代理已添加' : '代理已保存');
+    if (result.ok) closeProxyEditModal();
+    else ppSetEditResult('bad', '保存失败：' + result.error);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- 批量导入弹窗 ----
+function openProxyImportModal() {
+  $('#proxyImportText').value = '';
+  $('#proxyImportPrefix').value = '';
+  $('#proxyImportSummary').innerHTML = '';
+  $('#proxyImportSummary').classList.add('hidden');
+  $('#btnSubmitProxyImport').disabled = true;
+  $('#proxyPoolImportModal').classList.remove('hidden');
+  updateModalScrollLock();
+  setTimeout(() => $('#proxyImportText').focus(), 0);
+}
+function closeProxyImportModal() {
+  PP_IMPORT_SEQ += 1;  // 丢弃还在路上的预览结果
+  $('#proxyPoolImportModal').classList.add('hidden');
+  updateModalScrollLock();
+}
+function ppImportPayload(dryRun) {
+  return {
+    text: $('#proxyImportText').value,
+    default_scheme: $('#proxyImportScheme').value,
+    name_prefix: $('#proxyImportPrefix').value.trim(),
+    version: PROXY_POOL_STATE.version,
+    dry_run: dryRun,
+  };
+}
+function ppRenderImportSummary(r) {
+  const el = $('#proxyImportSummary');
+  const invalid = Array.isArray(r.invalid) ? r.invalid : [];
+  const preview = Array.isArray(r.preview) ? r.preview : [];
+  el.classList.remove('hidden');
+  el.innerHTML = `
+    <div>可导入 <b>${r.added}</b> 个 · 已存在或重复 <b>${r.duplicates}</b> 个 · 格式错误 <b${invalid.length ? ' class="pp-error"' : ''}>${invalid.length}</b> 个</div>
+    ${preview.length ? `<ul>${preview.map(p => `<li>${esc(p.name || '未命名')} — <span class="mono">${esc(p.address)}</span>${p.enabled ? '' : '（停用）'}</li>`).join('')}${
+      r.added > preview.length ? `<li class="muted">…另有 ${r.added - preview.length} 个</li>` : ''}</ul>` : ''}
+    ${invalid.length ? `<ul>${invalid.slice(0, 5).map(x => `<li class="pp-error">第 ${x.line} 行：${esc(x.error)}（${esc(x.text)}）</li>`).join('')}${
+      invalid.length > 5 ? `<li class="pp-error">…另有 ${invalid.length - 5} 行格式错误</li>` : ''}</ul>` : ''}`;
+}
+const ppPreviewImport = debounce(async () => {
+  const seq = ++PP_IMPORT_SEQ;
+  const btn = $('#btnSubmitProxyImport');
+  if (!$('#proxyImportText').value.trim()) {
+    $('#proxyImportSummary').classList.add('hidden');
+    btn.disabled = true;
+    return;
+  }
+  try {
+    const r = await api('/api/proxy-pool/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ppImportPayload(true)),
+    });
+    if (seq !== PP_IMPORT_SEQ) return;
+    ppRenderImportSummary(r);
+    btn.disabled = !r.added;
+  } catch (e) {
+    if (seq !== PP_IMPORT_SEQ) return;
+    const el = $('#proxyImportSummary');
+    el.classList.remove('hidden');
+    el.innerHTML = `<span class="pp-error">${esc(e.message)}</span>`;
+    btn.disabled = true;
+  }
+}, 350);
+async function submitProxyImport() {
+  const btn = $('#btnSubmitProxyImport');
+  btn.disabled = true;
+  PP_IMPORT_SEQ += 1;
+  try {
+    const r = await api('/api/proxy-pool/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ppImportPayload(false)),
+    });
+    if (!r.added) {
+      ppRenderImportSummary(r);
+      showToast('没有可导入的新代理');
+      return;
+    }
+    applyProxyPoolResponse(r);
+    renderProxyPoolBody();
+    closeProxyImportModal();
+    const skipped = r.duplicates + (r.invalid || []).length;
+    showToast(`已导入 ${r.added} 个代理${skipped ? `，跳过 ${skipped} 行` : ''}`, 2600);
+    if ($('#proxyImportTestAfter').checked && Array.isArray(r.added_keys) && r.added_keys.length) {
+      const keys = new Set(r.added_keys);
+      PROXY_POOL_STATE.batchTesting = true;
+      try {
+        const s = await runProxyPoolTests(PROXY_POOL_STATE.items.filter(item => keys.has(item.key)));
+        showToast(`新增代理测试完成：正常 ${s.ok} 个，失败 ${s.failed} 个`, 3000);
+      } finally {
+        PROXY_POOL_STATE.batchTesting = false;
+        renderProxyPoolBody();
+      }
+    }
+  } catch (e) {
+    showToast('导入失败：' + e.message, 4000);
+    const el = $('#proxyImportSummary');
+    el.classList.remove('hidden');
+    el.innerHTML = `<span class="pp-error">导入失败：${esc(e.message)}</span>`;
+    if (e.status === 409) loadProxyPool();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function onProxyPoolClick(e) {
+  const btn = e.target.closest('[data-pp-action]');
+  if (!btn) return;
+  const st = PROXY_POOL_STATE;
+  const id = btn.dataset.ppId !== undefined ? Number(btn.dataset.ppId) : null;
+  const item = id === null ? null : st.items.find(x => x.id === id);
+  const selectedIds = () => st.items.filter(x => st.selected.has(ppIdentity(x))).map(x => x.id);
+  switch (btn.dataset.ppAction) {
+    case 'add': openProxyEditModal(null); break;
+    case 'import': openProxyImportModal(); break;
+    case 'test-batch': testProxyPoolBatch(); break;
+    case 'enable-selected': setProxyPoolEnabled(selectedIds(), true); break;
+    case 'disable-selected': setProxyPoolEnabled(selectedIds(), false); break;
+    case 'delete-selected': deleteProxyPoolItems(selectedIds()); break;
+    case 'edit': if (item) openProxyEditModal(item); break;
+    case 'delete': if (item) deleteProxyPoolItems([item.id]); break;
+    case 'test': if (item) testProxyPoolItem(item); break;
+    case 'copy': if (item) copyText(item.url); break;
+    case 'reveal':
+      if (item) {
+        const ident = ppIdentity(item);
+        if (st.revealed.has(ident)) st.revealed.delete(ident); else st.revealed.add(ident);
+        renderProxyPoolBody();
+      }
+      break;
+  }
+}
+function onProxyPoolChange(e) {
+  const el = e.target;
+  if (!el || !el.matches) return;
+  const st = PROXY_POOL_STATE;
+  if (el.matches('[data-pp-filter]')) {
+    st.filter = el.value;
+  } else if (el.matches('[data-pp-select-all]')) {
+    ppFilteredItems().forEach(item => {
+      if (el.checked) st.selected.add(ppIdentity(item)); else st.selected.delete(ppIdentity(item));
+    });
+  } else if (el.matches('[data-pp-select]')) {
+    const item = st.items.find(x => x.id === Number(el.dataset.ppSelect));
+    if (item) { if (el.checked) st.selected.add(ppIdentity(item)); else st.selected.delete(ppIdentity(item)); }
+  } else if (el.matches('[data-pp-toggle]')) {
+    setProxyPoolEnabled([Number(el.dataset.ppToggle)], el.checked);
+    return;
+  } else {
+    return;
+  }
+  renderProxyPoolBody();
+}
+(function bindProxyPoolV2() {
+  const root = $('#tab-config');
+  root.addEventListener('click', onProxyPoolClick);
+  root.addEventListener('change', onProxyPoolChange);
+  root.addEventListener('input', (e) => {
+    if (!e.target.matches || !e.target.matches('[data-pp-search]')) return;
+    PROXY_POOL_STATE.search = e.target.value;
+    renderProxyPoolBody();
+  });
+  $('#btnCloseProxyEdit').addEventListener('click', closeProxyEditModal);
+  $('#btnCancelProxyEdit').addEventListener('click', closeProxyEditModal);
+  $('#btnSaveProxyEdit').addEventListener('click', saveProxyEditForm);
+  $('#btnTestProxyEdit').addEventListener('click', testProxyEditForm);
+  $('#btnToggleProxyPass').addEventListener('click', () => ppSetPasswordVisible($('#proxyEditPass').type === 'password'));
+  $('#proxyEditPaste').addEventListener('input', () => { ppInvalidateEditResult(); ppApplyPasteText(); });
+  ['#proxyEditScheme', '#proxyEditHost', '#proxyEditPort', '#proxyEditUser', '#proxyEditPass'].forEach(sel => {
+    $(sel).addEventListener('input', ppInvalidateEditResult);
+    $(sel).addEventListener('change', ppInvalidateEditResult);
+  });
+  $('#proxyPoolEditModal').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.matches('input:not([type="checkbox"]):not(#proxyEditPaste)')) {
+      e.preventDefault();
+      saveProxyEditForm();
+    }
+  });
+  $('#btnCloseProxyImport').addEventListener('click', closeProxyImportModal);
+  $('#btnCancelProxyImport').addEventListener('click', closeProxyImportModal);
+  $('#btnSubmitProxyImport').addEventListener('click', submitProxyImport);
+  $('#proxyImportText').addEventListener('input', ppPreviewImport);
+  $('#proxyImportPrefix').addEventListener('input', ppPreviewImport);
+  $('#proxyImportScheme').addEventListener('change', ppPreviewImport);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('#proxyPoolEditModal').classList.contains('hidden')) closeProxyEditModal();
+    else if (!$('#proxyPoolImportModal').classList.contains('hidden')) closeProxyImportModal();
+  });
+})();
 
 // ---------- 全局复制委托 ----------
 document.addEventListener('click', (e) => {

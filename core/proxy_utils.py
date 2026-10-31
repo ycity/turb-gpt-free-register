@@ -28,8 +28,10 @@ def parse_proxy_url(value: str, *, allow_bare: bool = False) -> ProxySpec:
         text = f"socks5://{text}"
     parsed = urlsplit(text)
     scheme = (parsed.scheme or "").lower()
+    if not scheme:
+        raise ValueError("无法识别的代理格式，应为 协议://[用户名:密码@]主机:端口")
     if scheme not in SUPPORTED_PROXY_SCHEMES:
-        raise ValueError(f"不支持的代理协议: {scheme or '-'}")
+        raise ValueError(f"不支持的代理协议: {scheme}")
     if not parsed.hostname:
         raise ValueError("代理格式缺少 host")
     try:
