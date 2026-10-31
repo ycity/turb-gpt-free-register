@@ -1,0 +1,20 @@
+services:
+  turb-gpt:
+    build: .
+    image: turb-gpt-free-register:latest
+    container_name: turb-gpt-free-register
+    restart: unless-stopped
+    ports:
+      - "5002:5000"
+    volumes:
+      - ./turb.sqlite3:/app/turb.sqlite3
+      - ./logs:/app/logs
+      - ./注册日志:/app/注册日志
+      - ./data:/app/data
+      - ./.env:/app/.env
+      - ./core:/app/core
+      - ./config:/app/config
+      - ./webui:/app/webui
+      - ./main.py:/app/main.py
+    environment:
+      - PYTHONUNBUFFERED=1
