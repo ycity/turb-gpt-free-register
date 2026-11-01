@@ -1554,6 +1554,13 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
             row["plus_trial_duration_period"] = result.get("plus_trial_duration_period")
             row["eligible_offer_ids"] = result.get("eligible_offer_ids") or []
             row["eligible_promo_campaigns"] = result.get("eligible_promo_campaigns") or {}
+            row["workspace_plans"] = result.get("workspace_plans") or []
+            row["personal_plan_type"] = result.get("personal_plan_type") or ""
+            row["paid_workspace_account_id"] = result.get("paid_workspace_account_id")
+            row["paid_workspace_name"] = result.get("paid_workspace_name")
+            row["limit_windows"] = result.get("limit_windows") or []
+            row["limit_features"] = result.get("limit_features") or []
+            row["limit_checked_at"] = result.get("limit_checked_at")
             row["plan_last_success_at"] = result.get("checked_at") or _now()
             row["plan_last_success_result_json"] = json.dumps(result, ensure_ascii=False)
         row["plan_check_proxy_mode"] = result.get("proxy_mode")
@@ -1798,6 +1805,9 @@ def list_account_plan_check_statuses(
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "workspace_plans", "personal_plan_type", "paid_workspace_account_id",
+        "paid_workspace_name", "account_id", "limit_windows", "limit_checked_at",
+        "limit_features",
         "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",

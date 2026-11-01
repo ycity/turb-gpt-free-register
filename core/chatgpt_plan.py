@@ -223,8 +223,71 @@ def _common_headers(env: BrowserSession, token: str, claims: dict | None = None)
     return headers
 
 
+def _workspace_entries(accounts: dict, claim_account_id: str | None) -> list[dict]:
+    """按 account_id 去重后的 workspace 列表。
+
+    accounts 里 `default` 和某个 account_id 常指向同一个 workspace，去重时保留
+    带真实 key 的那条，避免同一个 workspace 被统计两次。
+    """
+    seen: dict[str, dict] = {}
+    order: list[str] = []
+    for key, value in accounts.items():
+        if not isinstance(value, dict):
+            continue
+        account = value.get("account") or {}
+        entitlement = value.get("entitlement") or {}
+        account_id = str(account.get("account_id") or "").strip() or f"key:{key}"
+        plan = str(account.get("plan_type") or "").strip()
+        info = {
+            "key": key,
+            "item": value,
+            "account_id": account_id,
+            "plan_type": plan,
+            "structure": str(account.get("structure") or "").strip(),
+            "name": account.get("name"),
+            "is_deactivated": bool(account.get("is_deactivated")),
+            "subscription_plan": str(entitlement.get("subscription_plan") or "").strip(),
+            "has_active_subscription": bool(entitlement.get("has_active_subscription")),
+            "expires_at": entitlement.get("expires_at"),
+            "is_token_workspace": bool(claim_account_id) and account_id == claim_account_id,
+        }
+        if account_id in seen:
+            # 同一个 workspace 的 default 别名：保留信息更完整的真实 key。
+            if seen[account_id]["key"] == "default" and key != "default":
+                seen[account_id] = info
+            continue
+        seen[account_id] = info
+        order.append(account_id)
+    return [seen[a] for a in order]
+
+
+def _paid_workspace(workspaces: list[dict]) -> dict | None:
+    """挑出代表账号真实权益的付费 workspace。
+
+    Team 成员的 token 通常指向个人 free workspace，团队套餐挂在另一个
+    workspace 上。只按 token 的 account_id 取值会把 team 订阅整个丢掉。
+    """
+    paid = [
+        w for w in workspaces
+        if not w["is_deactivated"]
+        and w["has_active_subscription"]
+        and str(w["plan_type"]).lower() not in ("", "free", "guest")
+    ]
+    if not paid:
+        return None
+    # token 指向的 workspace 自身付费时优先，否则取第一个付费 workspace。
+    for w in paid:
+        if w["is_token_workspace"]:
+            return w
+    return paid[0]
+
+
 def parse_accounts_check(data: dict, *, token: str = "") -> dict:
-    """从 accounts/check 响应提取套餐和 Plus 试用资格。"""
+    """从 accounts/check 提取套餐和 Plus 试用资格。
+
+    响应可能包含多个 workspace（个人 + 团队）。付费套餐所在的 workspace 决定
+    账号的实际权益，试用资格仍以 token 指向的个人 workspace 为准。
+    """
     claims = token_claims(token) if token else {}
     claim_account_id = claims.get("account_id")
     accounts = data.get("accounts") if isinstance(data, dict) else None
@@ -249,19 +312,29 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
     if not isinstance(item, dict):
         raise ValueError("未找到可解析的账号条目")
 
+    workspaces = _workspace_entries(accounts, claim_account_id)
+    paid = _paid_workspace(workspaces)
+    # 付费 workspace 的套餐代表账号实际权益；试用资格仍看 token 所在的个人 workspace。
+    plan_item = paid["item"] if paid else item
+
     account = item.get("account") or {}
-    entitlement = item.get("entitlement") or {}
-    last_sub = item.get("last_active_subscription") or {}
+    # 套餐字段取付费 workspace，促销/试用字段仍取 token 所在的个人 workspace。
+    plan_account = plan_item.get("account") or {}
+    entitlement = plan_item.get("entitlement") or {}
+    last_sub = plan_item.get("last_active_subscription") or {}
     eligible_promo_campaigns = item.get("eligible_promo_campaigns") or {}
     plus_campaign = eligible_promo_campaigns.get("plus") if isinstance(eligible_promo_campaigns, dict) else None
     plus_meta = (plus_campaign or {}).get("metadata") or {}
     discount = plus_meta.get("discount") or {}
     duration = plus_meta.get("duration") or {}
 
-    plan_type = account.get("plan_type") or claims.get("claim_plan_type") or ""
+    plan_type = plan_account.get("plan_type") or claims.get("claim_plan_type") or ""
     subscription_plan = entitlement.get("subscription_plan") or ""
     has_active_subscription = bool(entitlement.get("has_active_subscription"))
-    is_free = str(plan_type).lower() == "free" or str(subscription_plan).lower() == "chatgptfreeplan"
+    # 试用资格看个人 workspace 自身，不受团队付费 workspace 影响。
+    personal_plan = str((item.get("account") or {}).get("plan_type") or "").lower()
+    personal_sub = str((item.get("entitlement") or {}).get("subscription_plan") or "").lower()
+    is_free = personal_plan == "free" or personal_sub == "chatgptfreeplan"
     plus_trial_eligible = bool(is_free and plus_campaign)
 
     # 保留 Free 账号返回的全部促销活动，供前端查看详情；Plus 资格判定仍然
@@ -311,6 +384,23 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         "features_count": len(item.get("features") or []),
         "can_access_with_session": bool(item.get("can_access_with_session")),
         "raw_account_plan_type": account.get("plan_type"),
+        # 账号名下全部 workspace，供列表同时展示个人与团队套餐标签。
+        "workspace_plans": [
+            {
+                "account_id": w["account_id"],
+                "plan_type": w["plan_type"],
+                "structure": w["structure"],
+                "name": w["name"],
+                "subscription_plan": w["subscription_plan"],
+                "has_active_subscription": w["has_active_subscription"],
+                "expires_at": w["expires_at"],
+                "is_token_workspace": w["is_token_workspace"],
+            }
+            for w in workspaces
+        ],
+        "personal_plan_type": (item.get("account") or {}).get("plan_type") or "",
+        "paid_workspace_account_id": paid["account_id"] if paid else None,
+        "paid_workspace_name": paid["name"] if paid else None,
     }
     result.update({k: v for k, v in claims.items() if k != "payload" and v is not None})
     return result
@@ -375,6 +465,112 @@ def _retry_wait_seconds(resp: Any, base_delay: float, attempt: int) -> float:
     except (TypeError, ValueError):
         pass
     return max(0.0, min(30.0, base_delay * attempt))
+
+
+def _limit_window(hours: float) -> str:
+    """把重置间隔归类成限额窗口。实测间隔非常规整：5.00 / 24.00 / 720.00 小时。"""
+    if hours <= 0:
+        return ""
+    if hours <= 6:
+        return "5h"
+    if hours <= 36:
+        return "daily"
+    if hours <= 200:
+        return "weekly"
+    return "monthly"
+
+
+def fetch_limit_windows(
+    env: BrowserSession,
+    token: str,
+    claims: dict,
+    *,
+    account_id: str | None = None,
+    timeout: float = 20.0,
+) -> dict:
+    """探测账号的限额窗口类型。
+
+    accounts/check 不含限额信息；Web 端打开会话时调用的 conversation/init 才会
+    返回 limits_progress。这里只取窗口类型（5h/daily/weekly/monthly），不保存
+    剩余量——余量每次请求都在变，存下来会立刻过期。
+    """
+    path = "/backend-api/conversation/init"
+    headers = env.get_chatgpt_headers(referer="https://chatgpt.com/")
+    headers.update({
+        "authorization": f"Bearer {normalize_token(token)}",
+        "content-type": "application/json",
+        "x-openai-target-path": path,
+        "x-openai-target-route": path,
+    })
+    workspace = str(account_id or (claims or {}).get("account_id") or "").strip()
+    if workspace:
+        headers["chatgpt-account-id"] = workspace
+
+    resp = env.post(
+        f"https://chatgpt.com{path}",
+        headers=headers,
+        data=json.dumps({"conversation_mode_kind": "primary_assistant"}),
+        allow_redirects=False,
+        timeout=timeout,
+    )
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if not (200 <= status < 300):
+        return {"limit_check_ok": False, "limit_check_error": f"HTTP {status}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"limit_check_ok": False, "limit_check_error": "响应不是 JSON"}
+    if not isinstance(data, dict):
+        return {"limit_check_ok": False, "limit_check_error": "响应不是 JSON 对象"}
+
+    now = datetime.now(tz=timezone.utc)
+    features: list[dict] = []
+    windows: list[str] = []
+    for entry in data.get("limits_progress") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("feature_name") or "").strip()
+        reset_at = str(entry.get("reset_after") or "").strip()
+        if not name or not reset_at:
+            continue
+        try:
+            hours = (datetime.fromisoformat(reset_at) - now).total_seconds() / 3600
+        except ValueError:
+            continue
+        window = _limit_window(hours)
+        if not window:
+            continue
+        features.append({"feature": name, "window": window})
+        if window not in windows:
+            windows.append(window)
+
+    # 已触顶的功能同样带重置时间，窗口类型照样可以算出来。
+    for entry in data.get("blocked_features") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        reset_at = str(entry.get("resets_after") or "").strip()
+        if not name or not reset_at:
+            continue
+        try:
+            hours = (datetime.fromisoformat(reset_at) - now).total_seconds() / 3600
+        except ValueError:
+            continue
+        window = _limit_window(hours)
+        if not window:
+            continue
+        features.append({"feature": name, "window": window, "blocked": True})
+        if window not in windows:
+            windows.append(window)
+
+    order = {"5h": 0, "daily": 1, "weekly": 2, "monthly": 3}
+    windows.sort(key=lambda w: order.get(w, 9))
+    return {
+        "limit_check_ok": True,
+        "limit_windows": windows,
+        "limit_features": features,
+        "limit_checked_at": now_iso(),
+    }
 
 
 def check_account_plan(
@@ -512,6 +708,21 @@ def check_account_plan(
                         parsed["retryable"] = False
                         parsed["timezone_offset_min"] = effective_tz
                         parsed.update(route_meta)
+                        # 限额窗口只对付费账号有意义；探测失败不影响套餐结果本身。
+                        if parsed.get("has_active_subscription"):
+                            try:
+                                parsed.update(fetch_limit_windows(
+                                    env, token, claims,
+                                    account_id=parsed.get("paid_workspace_account_id"),
+                                    timeout=timeout_seconds,
+                                ))
+                            except Exception as exc:
+                                logger.info(
+                                    "[Plan] 限额窗口探测失败，保留套餐结果：%s: %s",
+                                    type(exc).__name__, str(exc)[:160],
+                                )
+                                parsed["limit_check_ok"] = False
+                                parsed["limit_check_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
                         return parsed
             except Exception as exc:
                 logger.debug("套餐查询失败: %s: %s", type(exc).__name__, exc, exc_info=True)

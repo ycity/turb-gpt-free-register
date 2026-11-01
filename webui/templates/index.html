@@ -3989,6 +3989,33 @@ function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') 
   const lines = summaries.map(item => `<span class="pill status-success" title="${esc(item)}">${esc(item)}</span>`).join('');
   return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
 }
+const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '月'};
+function _limitWindowText(r) {
+  const w = Array.isArray(r.limit_windows) ? r.limit_windows : [];
+  return w.map(x => LIMIT_WINDOW_LABEL[x] || x).join('/');
+}
+function _teamPlanTag(r, excludeAccountId = '') {
+  // 账号名下的付费 workspace 各挂一个标签；主标签已展示的那个 workspace 不再重复。
+  const list = Array.isArray(r.workspace_plans) ? r.workspace_plans : [];
+  const limitText = _limitWindowText(r);
+  return list.filter(w => w && w.has_active_subscription &&
+      !['', 'free', 'guest'].includes(String(w.plan_type || '').toLowerCase()) &&
+      String(w.account_id || '') !== String(excludeAccountId || ''))
+    .map(w => {
+      const plan = String(w.plan_type || '').toUpperCase();
+      const name = w.name ? `（${w.name}）` : '';
+      // esc() 会把空串渲染成 '-'，没有限额数据时不能走 esc。
+      const limit = limitText ? ` · ${esc(limitText)}限额` : '';
+      const expire = _fmtPlanTime(w.expires_at, true);
+      const features = (r.limit_features || [])
+        .map(f => `${f.feature}: ${LIMIT_WINDOW_LABEL[f.window] || f.window}`).join('；');
+      const tip = [`workspace: ${w.name || w.account_id || '-'}`,
+                   `套餐: ${w.plan_type || '-'}`,
+                   expire ? `到期 ${expire}` : '',
+                   features ? `限额窗口 → ${features}` : ''].filter(Boolean).join('；');
+      return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}${esc(name)}${limit}</span>`;
+    }).join('');
+}
 function _planCell(r) {
   const ok = r.plan_check_ok;
   const err = r.plan_check_error || '';
@@ -4018,8 +4045,12 @@ function _planCell(r) {
     return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
   }
   const lower = plan.toLowerCase();
+  // 个人 workspace 免费、团队 workspace 付费时，主标签回到 free，付费 workspace 另挂标签。
+  const personal = String(r.personal_plan_type || '').toLowerCase();
+  const paidTags = _teamPlanTag(r);
+  const baseLower = (paidTags && personal) ? personal : lower;
 
-  if (lower === 'free') {
+  if (baseLower === 'free') {
     const checkedOk = ok === true || r.plan_check_status === 'success';
     if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
@@ -4028,7 +4059,7 @@ function _planCell(r) {
     const t = promoSummaries.length ? `${title}；可用套餐优惠：${promoSummaries.join('；')}` : title;
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
-    return _promoStackHtml('free', cls, promoSummaries, t, detailBtn);
+    return _promoStackHtml('free', cls, promoSummaries, t, `${detailBtn}${paidTags}`);
   }
 
   const cls = 'status-success';
@@ -4047,7 +4078,8 @@ function _planCell(r) {
   if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
-  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'));
+  const otherTags = _teamPlanTag(r, r.paid_workspace_account_id || r.account_id || '');
+  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'), otherTags);
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {
