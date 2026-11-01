@@ -2261,17 +2261,23 @@
       </svg>
       <span class="sidebar-item-label">Codex 授权</span>
     </button>
-        <button type="button" data-tab="promos" class="sidebar-item">
-      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-      </svg>
-      <span class="sidebar-item-label">优惠码池</span>
-    </button>
 <button type="button" data-tab="outlook" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><path d="M22 6l-10 7L2 6"/>
       </svg>
       <span class="sidebar-item-label">邮箱池</span>
+    </button>
+    <button type="button" data-tab="proxies" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="3"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/>
+      </svg>
+      <span class="sidebar-item-label">代理池</span>
+    </button>
+    <button type="button" data-tab="promos" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+      </svg>
+      <span class="sidebar-item-label">优惠码池</span>
     </button>
     <button type="button" data-tab="config" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -2656,6 +2662,14 @@
   </div>
 
   
+  <!-- ============ 代理池 ============ -->
+  <div id="tab-proxies" class="hidden">
+    <h1 class="register-title">代理池</h1>
+    <p class="config-overview-v2-desc" style="margin:-8px 0 16px;">代理可命名、启停和测试连接，改动立即写入 .env 并生效；注册时从已启用的代理中随机抽取。</p>
+    <div class="proxy-pool-v2" id="proxyPoolManagerV2"></div>
+    <div id="proxyPoolSettingsV2"></div>
+  </div>
+
   <!-- ============ 优惠码池 ============ -->
   <div id="tab-promos" class="hidden">
     <h1 class="register-title">优惠码池</h1>
@@ -3290,7 +3304,7 @@ function debounce(fn, wait=250) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','promos','outlook','config'];
+  const allowed = ['register','accounts','codex','outlook','proxies','promos','config'];
   if (!tab || !allowed.includes(tab)) tab = 'register';
   document.querySelectorAll('.sidebar-nav button.sidebar-item').forEach(x => {
     x.classList.toggle('active', x.dataset.tab === tab);
@@ -3302,6 +3316,7 @@ function activateTab(tab, persist=true) {
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') loadCodex();
+  if (tab === 'proxies') loadProxyPoolPage();
   if (tab === 'promos') {
     loadPromoStats();
     loadPromosList();
@@ -6749,8 +6764,16 @@ const CONFIG_PENDING_UPDATES = {};
 
 function configGroups() {
   const groups = {};
-  CONFIG.forEach(f => { (groups[f.group || '其他'] = groups[f.group || '其他'] || []).push(f); });
+  // 代理池已经是左侧栏一级页面，不再出现在配置页里。
+  CONFIG.forEach(f => {
+    if ((f.group || '其他') === '代理池') return;
+    (groups[f.group || '其他'] = groups[f.group || '其他'] || []).push(f);
+  });
   return groups;
+}
+
+function proxyPoolConfigFields() {
+  return CONFIG.filter(f => (f.group || '其他') === '代理池');
 }
 
 function emailConfigSectionForKey(key) {
@@ -7427,9 +7450,6 @@ function renderConfigSectionV2(name, fields) {
   if (name === 'Codex') {
     return renderCodexSectionV2(fields);
   }
-  if (name === '代理池') {
-    return renderProxyPoolSectionV2(name, fields);
-  }
   if (name === '邮箱 / OTP') {
     return renderSectionedConfigSectionV2(
       name,
@@ -7470,7 +7490,6 @@ function renderConfigLayoutV2() {
     </button>
   `).join('');
   sections.innerHTML = names.map(name => renderConfigSectionV2(name, groups[name] || [])).join('');
-  renderProxyPoolManagerV2();
   renderRegistrationDriverCard();
   const sectionMount = document.getElementById('configRegistrationSelectV2');
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
@@ -7574,6 +7593,17 @@ async function loadConfig() {
   } catch(e) {
     showToast('加载配置失败: ' + e.message);
   }
+}
+
+async function loadProxyPoolPage() {
+  // 代理链等字段来自 /api/config；代理池页面可能先于配置页被打开。
+  try {
+    if (!Array.isArray(CONFIG) || !CONFIG.length) CONFIG = await api('/api/config');
+    renderProxyPoolSettingsV2();
+    bindProxyPoolSettingsV2();
+  } catch(e) {
+    showToast('加载代理池设置失败: ' + e.message);
+  }
   loadProxyPool();
 }
 
@@ -7656,7 +7686,8 @@ function readConfigElementValue(el, f) {
 
 function trackConfigFieldChange(e) {
   const el = e.target.closest('[data-key]');
-  if (!el || !el.closest('#tab-config')) return;
+  // 代理链等字段现在渲染在代理池页面上，两个容器都要跟踪。
+  if (!el || !el.closest('#tab-config, #tab-proxies')) return;
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
@@ -7668,18 +7699,20 @@ $('#tab-config').addEventListener('change', trackConfigFieldChange);
 async function saveConfigUpdates(triggerBtn) {
   const updates = {...CONFIG_PENDING_UPDATES};
   const seen = new Set();
-  $$('#configCardsV2 [data-key], #configSectionsV2 [data-key]').forEach(el => {
+  $$('#configCardsV2 [data-key], #configSectionsV2 [data-key], #proxyPoolSettingsV2 [data-key]').forEach(el => {
     const f = CONFIG.find(x => x.key === el.dataset.key);
     if (!f || seen.has(f.key)) return;
     seen.add(f.key);
     updates[f.key] = readConfigElementValue(el, f);
   });
-  const buttons = [triggerBtn, ...$$('#tab-config [data-save-config-v2]')].filter(Boolean);
+  const buttons = [triggerBtn, ...$$('#tab-config [data-save-config-v2]'),
+                   ...$$('#tab-proxies [data-save-config-v2]')].filter(Boolean);
   buttons.forEach(btn => { btn.disabled = true; });
   try {
     const r = await api('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({updates}) });
     for (const [k, v] of Object.entries(updates)) { const f = CONFIG.find(x => x.key === k); if (f) f.value = v; delete CONFIG_PENDING_UPDATES[k]; }
-    renderConfigLayoutV2();
+    if (!$('#tab-config').classList.contains('hidden')) renderConfigLayoutV2();
+    else renderProxyPoolSettingsV2();
     showToast(r.reloaded ? '配置已生效' : '配置已保存（需重启）');
   } catch(e) { showToast('保存失败: ' + e.message); }
   finally { buttons.forEach(btn => { btn.disabled = false; }); }
@@ -7689,6 +7722,18 @@ $('#tab-config').addEventListener('click', (e) => {
   if (!btn) return;
   saveConfigUpdates(btn);
 });
+
+function bindProxyPoolSettingsV2() {
+  const root = $('#tab-proxies');
+  if (!root || root.dataset.configBound) return;
+  root.dataset.configBound = '1';
+  root.addEventListener('input', trackConfigFieldChange);
+  root.addEventListener('change', trackConfigFieldChange);
+  root.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-save-config-v2]');
+    if (btn) saveConfigUpdates(btn);
+  });
+}
 
 // ---------- 代理池管理 ----------
 // 列表来自 /api/proxy-pool。每次增删改都整表提交：未改动的行原样传 raw，
@@ -7806,25 +7851,26 @@ function ppFilteredItems() {
   });
 }
 
-function renderProxyPoolSectionV2(name, fields) {
-  const slug = configGroupSlug(name);
+function renderProxyPoolSettingsV2() {
+  // 代理链、套餐/Agent 网络这些字段仍属于 config 表单，只是挪到代理池页面上。
+  const fields = proxyPoolConfigFields();
   const poolField = fields.find(f => f.widget === 'proxy_pool');
   const others = fields.filter(f => f !== poolField);
   const switches = others.filter(f => f.type === 'bool');
   const inputs = others.filter(f => f.type !== 'bool');
-  return `
-    <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
-      ${renderConfigSectionHead(name, configSectionIntro(name))}
-      <div class="proxy-pool-v2" id="proxyPoolManagerV2"></div>
-      ${poolField ? renderConfigRecommendedLinks(poolField) : ''}
-      ${others.length ? `
+  const mount = document.getElementById('proxyPoolSettingsV2');
+  if (!mount) return;
+  mount.innerHTML = `
+    ${poolField ? renderConfigRecommendedLinks(poolField) : ''}
+    ${others.length ? `
+      <section class="config-section-v2" id="${esc(configGroupSlug('代理池'))}" data-config-section="代理池">
         <div class="proxy-pool-v2-settings-title">代理链与套餐 / Agent 网络<span>修改后点击「保存」生效</span></div>
         ${switches.length ? `<div class="config-switches-v2">${switches.map(f => renderFeatureSwitchField(f, { withIcon: false })).join('')}</div>` : ''}
         ${inputs.length ? `<div class="config-section-v2-body">${inputs.map(renderConfigPlainFieldV2).join('')}</div>` : ''}
         <div class="config-section-v2-actions">
           <button type="button" class="btn primary" data-save-config-v2>保存</button>
-        </div>` : ''}
-    </section>
+        </div>
+      </section>` : ''}
   `;
 }
 
@@ -8498,7 +8544,8 @@ function onProxyPoolChange(e) {
   renderProxyPoolBody();
 }
 (function bindProxyPoolV2() {
-  const root = $('#tab-config');
+  // 代理池表格现在渲染在 #tab-proxies 里，事件要绑在它自己的容器上。
+  const root = $('#tab-proxies');
   root.addEventListener('click', onProxyPoolClick);
   root.addEventListener('change', onProxyPoolChange);
   root.addEventListener('input', (e) => {
