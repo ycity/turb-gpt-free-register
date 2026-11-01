@@ -259,12 +259,34 @@ def _jinmotech_checkout(token: str, proxy: str, workspace: str, seats: int, coun
     return url, data, "" if url else _error_message(body, "接口未返回链接")
 
 
+def _registration_exit_geo(proxy: str, account_proxy: str = "") -> dict:
+    """取本次提链出口的地理信息，用于决定结账页语言。
+
+    代理池在加入时已经测过出口 IP 归属地，直接复用那份结果，不再发 geo 请求。
+    优先用本次实际使用的代理；没测过时退回账号注册时用的代理。
+    """
+    from webui import proxy_pool as _pool
+
+    for candidate in (proxy, account_proxy):
+        if not str(candidate or "").strip():
+            continue
+        try:
+            geo = _pool.tested_geo(candidate)
+        except Exception:
+            logger.debug("[Team] 读取代理出口地理失败: %s", candidate, exc_info=True)
+            continue
+        if geo:
+            return geo
+    return {}
+
+
 def _native_checkout(token: str, proxy: str, workspace: str, seats: int, country: str,
-                     currency: str, promo: str, timeout: int) -> tuple[str | None, dict | None, str]:
+                     currency: str, promo: str, timeout: int,
+                     account_proxy: str = "") -> tuple[str | None, dict | None, str]:
     """本地直连 chatgpt.com 创建 Team 订阅的 Stripe hosted checkout。proxy 为空时用项目代理池。"""
     from config.proxy import normalize_proxy_url
     from core.chatgpt_plan import token_claims, _warm_plan_session
-    from core.session import BrowserSession
+    from core.session import BrowserSession, _seeded_browser_profile
 
     claims = token_claims(token)
     if claims.get("token_expired") is True:
@@ -281,8 +303,16 @@ def _native_checkout(token: str, proxy: str, workspace: str, seats: int, country
         payload["promo_code"] = promo
 
     seed = f"team-checkout:{claims.get('email') or token[:24]}:{uuid.uuid4()}"
+    # 结账页按 Accept-Language / oai-locale 渲染。不带地理信息时会落到全局默认
+    # 画像（日语），所以用代理池测好的出口地区生成画像，让页面语言跟随出口。
+    geo = _registration_exit_geo(proxy, account_proxy)
+    profile = _seeded_browser_profile(seed, geo) if geo else None
+    if geo:
+        logger.info("[Team] 结账语言跟随出口地区：country=%s city=%s",
+                    geo.get("country"), geo.get("city") or "-")
     env = BrowserSession(proxy=normalize_proxy_url(proxy) if proxy else None,
-                         detect_exit_geo=False, fingerprint_seed=seed)
+                         detect_exit_geo=False, fingerprint_seed=seed,
+                         browser_profile=profile)
     try:
         resp_warm = env.get(
             "https://chatgpt.com/",
@@ -329,6 +359,7 @@ def generate_team_checkout_link(
     provider: str = "native",
     account_id: int | None = None,
     account_email: str | None = None,
+    account_proxy: str = "",
     timeout: int = 45,
 ) -> dict:
     token = (token or "").strip()
@@ -376,7 +407,7 @@ def generate_team_checkout_link(
         used_proxy = cand
         try:
             if provider == "native":
-                url, data, err_msg = _native_checkout(token, cand, workspace, seats, country, currency, promo, per_attempt_timeout)
+                url, data, err_msg = _native_checkout(token, cand, workspace, seats, country, currency, promo, per_attempt_timeout, account_proxy)
             else:
                 url, data, err_msg = _jinmotech_checkout(token, cand, workspace, seats, country, promo, per_attempt_timeout)
         except Exception as e:

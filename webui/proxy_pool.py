@@ -267,6 +267,34 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def tested_geo(url: str) -> dict:
+    """返回代理池里这个代理最近一次测试拿到的出口地理信息。
+
+    代理在加入池子时就测过出口 IP 和归属地，提链等场景可以直接复用，不必
+    再做一次 geo 查询。没测过、测试失败或已不在池中时返回空 dict。
+    """
+    text = str(url or "").strip()
+    if not text:
+        return {}
+    try:
+        key = proxy_key(text)
+    except Exception:
+        return {}
+    result = _load_results().get(key)
+    if not isinstance(result, dict) or not result.get("ok"):
+        return {}
+    country = str(result.get("country") or "").strip()
+    if not country:
+        return {}
+    return {
+        "ip": str(result.get("ip") or ""),
+        "country": country,
+        "region": str(result.get("region") or ""),
+        "city": str(result.get("city") or ""),
+        "org": str(result.get("org") or ""),
+    }
+
+
 def _load_results() -> dict[str, dict]:
     try:
         with closing(_connect()) as conn:

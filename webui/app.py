@@ -1202,6 +1202,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 provider=data.get("provider") or "native",
                 account_id=int(acc["id"]),
                 account_email=acc.get("email"),
+                account_proxy=str(acc.get("proxy_used") or ""),
             )
             meta = {k: res.get(k) for k in ("provider", "promo_used", "promo_from_pool", "proxy_used", "country", "currency")}
             if not res.get("ok"):
