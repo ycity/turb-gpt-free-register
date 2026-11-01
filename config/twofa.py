@@ -22,7 +22,17 @@ TWOFA_PROXY_MODE = "saved"
 # OTP 提交也复用此次数/退避配置；只重试无业务错误码、无交互挑战的 403/429。
 # OTP 重试复用同一会话/验证码；明确账号拒绝、挑战以及结果未知的网络超时不自动重放。
 TWOFA_REAUTH_MAX_ATTEMPTS = 3
-TWOFA_REAUTH_RETRY_DELAY = 3.0
+# Cloudflare 质询的冷却通常以分钟计，4s/8s 的退避往往在同一个质询窗口内空转。
+TWOFA_REAUTH_RETRY_DELAY = 15.0
+
+# 撞到 Cloudflare 质询时换一个代理出口重试。被质询的是出口 IP，换 IP 比在同一个
+# 出口上重试有效得多；关掉则所有重试都留在账号注册时的那个代理上。
+TWOFA_SWITCH_PROXY_ON_CHALLENGE = True
+
+# 注册完成后延迟多少秒再自动开 2FA。注册刚结束时出口 IP 正"热"，立刻复用同一个
+# IP 做重认证很容易触发 Cloudflare 质询。设为 0 表示不延迟。
+# 只影响注册后自动触发；手动和批量触发立即执行。
+TWOFA_REGISTRATION_DELAY = 180.0
 
 # 2FA 后台队列。workers 是实际同时执行的账号数，修改后需重启进程以重建线程池。
 TWOFA_WORKERS = 4
@@ -34,6 +44,8 @@ apply_env_overrides(globals(), {
     'TWOFA_PROXY_MODE': 'str',
     'TWOFA_REAUTH_MAX_ATTEMPTS': 'int',
     'TWOFA_REAUTH_RETRY_DELAY': 'float',
+    'TWOFA_SWITCH_PROXY_ON_CHALLENGE': 'bool',
+    'TWOFA_REGISTRATION_DELAY': 'float',
     'TWOFA_WORKERS': 'int',
     'TWOFA_QUEUE_LIMIT': 'int',
 })

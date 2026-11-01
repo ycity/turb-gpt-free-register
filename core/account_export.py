@@ -83,8 +83,17 @@ def _is_retryable_reauth_error(exc: BaseException) -> bool:
     return any(hint in text for hint in _RETRYABLE_REAUTH_HINTS)
 
 
-def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
-    """对 CSRF + signin 阶段的临时故障执行有限指数退避重试。"""
+def _trigger_reauth_with_retry(
+    session: BrowserSession,
+    email: str,
+    *,
+    on_challenge=None,
+) -> str:
+    """对 CSRF + signin 阶段的临时故障执行有限指数退避重试。
+
+    on_challenge 可选，撞到 Cloudflare 质询时调用，返回一个新的 BrowserSession
+    则改用新出口重试。被质询的是出口 IP，换 IP 比在原出口上空转有效。
+    """
     from config import twofa as _twofa_cfg
 
     max_attempts = max(1, min(8, int(
@@ -122,6 +131,17 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
                     "[2FA] 识别为 Cloudflare 质询而非业务拒绝，退避后重试：attempt=%s/%s",
                     attempt, max_attempts,
                 )
+                if on_challenge is not None:
+                    try:
+                        replacement = on_challenge(attempt)
+                    except Exception as swap_exc:
+                        replacement = None
+                        logger.warning(
+                            "[2FA] 切换代理出口失败，继续沿用当前出口：%s: %s",
+                            type(swap_exc).__name__, str(swap_exc)[:160],
+                        )
+                    if replacement is not None:
+                        session = replacement
 
             # 403/429 已开启 BrowserSession 熔断；不清理会导致下一轮在本地直接失败。
             _clear_twofa_session_circuit(session, source="重认证请求")
@@ -681,6 +701,7 @@ def setup_2fa(
     email: str,
     otp_code: str | None = None,
     access_token: str | None = None,
+    on_challenge=None,
 ) -> str:
     """
     完整的 2FA 设置流程。
@@ -692,6 +713,7 @@ def setup_2fa(
         session: 已完成注册的会话
         email: 账号邮箱（用作 login_hint）
         otp_code: 邮箱验证码（None 则按上述策略获取）
+        on_challenge: 可选，撞到 Cloudflare 质询时换出口用的回调
 
     Returns:
         TOTP secret（Base32 字符串），可直接用于 pyotp.TOTP() 生成 6 位动态码
@@ -725,7 +747,21 @@ def setup_2fa(
     # 阶段一：重认证
     logger.info("[2FA] 阶段1：发起重认证")
     reauth_otp_after_ts = time.time()
-    auth_url = _trigger_reauth_with_retry(session, email)
+    # 质询换出口后，后续所有步骤必须跟着用新会话，否则 Cookie/指纹对不上。
+    swapped: list[BrowserSession] = []
+
+    def _swap(attempt: int):
+        if on_challenge is None:
+            return None
+        replacement = on_challenge(attempt)
+        if replacement is not None:
+            swapped.append(replacement)
+        return replacement
+
+    auth_url = _trigger_reauth_with_retry(
+        session, email, on_challenge=_swap if on_challenge else None)
+    if swapped:
+        session = swapped[-1]
     logger.info("[2FA] 重认证 authorize URL 已获取")
     human_delay("api")
     _follow_reauth_with_retry(session, auth_url)
@@ -754,7 +790,10 @@ def setup_2fa(
                     type(first_wait_exc).__name__, str(first_wait_exc)[:180],
                 )
                 reauth_otp_after_ts = time.time()
-                resend_auth_url = _trigger_reauth_with_retry(session, email)
+                resend_auth_url = _trigger_reauth_with_retry(
+                    session, email, on_challenge=_swap if on_challenge else None)
+                if swapped:
+                    session = swapped[-1]
                 human_delay("api")
                 _follow_reauth_with_retry(session, resend_auth_url)
                 send_email_otp(session)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -123,9 +124,25 @@ def _run_twofa(
     fh: logging.FileHandler | None = None
     session: BrowserSession | None = None
     relay = None
+    # 质询换出口时新建的会话/中继，退出前一并回收。
+    extra_sessions: list[BrowserSession] = []
+    extra_relays: list = []
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
+    cooldown_note = ""
     try:
+        # 注册刚结束时出口 IP 正"热"，立刻复用同一个 IP 做重认证很容易撞 Cloudflare
+        # 质询。冷却必须在占用 worker 名额之前，否则会把队列堵住。
+        # 只延迟注册后自动触发；手动和批量触发按用户预期立即执行。
+        if trigger == "registration_auto":
+            delay = max(0.0, min(1800.0, float(
+                getattr(_twofa_cfg, "TWOFA_REGISTRATION_DELAY", 180.0) or 0.0
+            )))
+            if delay > 0:
+                # 日志文件稍后会被清空重建，这里先记下来，等清空后再写进去。
+                cooldown_note = f"[2FA] 注册后冷却 {delay:.0f}s，等待出口 IP 降温再开始"
+                logger.info("[2FA] 注册后冷却 %.0fs：email=%s", delay, email)
+                time.sleep(delay)
         with _LOCK:
             while len(_RUNNING) >= _WORKERS:
                 _LOCK.wait()
@@ -135,6 +152,8 @@ def _run_twofa(
         log_file = log_path(email)
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("", encoding="utf-8")
+        if cooldown_note:
+            _append_log(email, cooldown_note)
         fh = logging.FileHandler(str(log_path(email)), encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
@@ -152,7 +171,32 @@ def _run_twofa(
             f"source={proxy_source} device_id={session.device_id}",
         )
         _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
-        secret = setup_2fa(session, email, access_token=access_token)
+
+        def _switch_proxy(attempt: int):
+            """撞到 Cloudflare 质询时换一个代理池出口重开会话。"""
+            if not bool(getattr(_twofa_cfg, "TWOFA_SWITCH_PROXY_ON_CHALLENGE", True)):
+                return None
+            from core.proxy_chain import open_proxy_pool_proxy
+
+            new_transport, new_relay = open_proxy_pool_proxy(None)
+            if not new_transport:
+                _append_log(email, "[2FA] 代理池没有可用出口，继续沿用当前出口重试")
+                return None
+            # 每次换出口都换指纹种子，避免新 IP 配旧指纹反而更可疑。
+            replacement = BrowserSession(
+                proxy=new_transport,
+                fingerprint_seed=f"account:{identity}:retry{attempt}",
+            )
+            extra_sessions.append(replacement)
+            if new_relay is not None:
+                extra_relays.append(new_relay)
+            label = mask_proxy_url(
+                getattr(replacement, "proxy_target", None) or replacement.proxy or "direct")
+            _append_log(email, f"[2FA] 已切换代理出口重试：attempt={attempt} target={label}")
+            return replacement
+
+        secret = setup_2fa(session, email, access_token=access_token,
+                           on_challenge=_switch_proxy)
         db.update_account_totp_secret(
             account_id,
             {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},
@@ -173,6 +217,16 @@ def _run_twofa(
         logger.exception("[2FA] 后台异常: %s", email)
         return result
     finally:
+        for extra in extra_sessions:
+            try:
+                close_browser_session(extra)
+            except Exception:
+                pass
+        for extra_relay in extra_relays:
+            try:
+                extra_relay.close()
+            except Exception:
+                pass
         if session is not None:
             try:
                 close_browser_session(session)

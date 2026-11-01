@@ -332,6 +332,22 @@ EDITABLE_FIELDS = [
         ],
     },
     {
+        "key": "TWOFA_SWITCH_PROXY_ON_CHALLENGE", "file": "twofa.py", "type": "bool", "group": "功能开关",
+        "label": "2FA质询换出口", "help": "撞到 Cloudflare 质询时换一个代理池出口重试；关掉则所有重试都留在账号注册时的代理上",
+    },
+    {
+        "key": "TWOFA_REAUTH_RETRY_DELAY", "file": "twofa.py", "type": "float", "group": "功能开关",
+        "label": "2FA重试退避(秒)", "help": "重认证失败后的首次退避秒数，按 2 倍递增（15 → 30 → 60）；Cloudflare 质询冷却常以分钟计，太小会空转",
+    },
+    {
+        "key": "TWOFA_REAUTH_MAX_ATTEMPTS", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "2FA重试次数", "help": "重认证的最大尝试次数，默认3，范围1-8",
+    },
+    {
+        "key": "TWOFA_REGISTRATION_DELAY", "file": "twofa.py", "type": "float", "group": "功能开关",
+        "label": "2FA注册后冷却(秒)", "help": "注册完成后等待多久再自动开 2FA，默认180秒。刚注册完出口IP正热，立刻复用容易被 Cloudflare 质询；0=不等待。只影响自动触发，手动和批量立即执行",
+    },
+    {
         "key": "TWOFA_WORKERS", "file": "twofa.py", "type": "int", "group": "功能开关",
         "label": "2FA并发数", "help": "同时执行的2FA设置任务数，默认4，范围1-16；保存后立即生效",
     },
