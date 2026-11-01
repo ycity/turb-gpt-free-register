@@ -54,6 +54,22 @@ _RETRYABLE_REAUTH_HINTS = (
 )
 
 
+def _is_cf_challenge_response(response) -> bool:
+    """区分 Cloudflare 质询和业务拒绝。
+
+    两者都是 403，但含义完全不同：质询是出口 IP 被风控拦下，换会话重试有意义；
+    业务拒绝（如 token 失效）重试多少次都一样。Cloudflare 用 `cf-mitigated:
+    challenge` 明确标注质询，正文是 HTML 而不是 JSON。
+    """
+    if response is None:
+        return False
+    headers = {str(k).lower(): str(v) for k, v in (getattr(response, "headers", {}) or {}).items()}
+    if headers.get("cf-mitigated", "").strip().lower() == "challenge":
+        return True
+    content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    return content_type == "text/html" and bool(headers.get("cf-ray"))
+
+
 def _is_retryable_reauth_error(exc: BaseException) -> bool:
     """仅重试限流、服务端错误和传输故障，不重试普通业务 4xx。"""
     response = getattr(exc, "response", None)
@@ -90,15 +106,22 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
             retryable = _is_retryable_reauth_error(exc)
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
-            # CSRF/signin 的明确拒绝不通过清除本地熔断反复重放。
-            if str(status) == "403" or (status is None and re.search(r"\b403\b", str(exc))):
-                retryable = False
+            # CSRF/signin 的明确业务拒绝不通过清除本地熔断反复重放；但 Cloudflare
+            # 质询同样是 403，它只说明当前出口被拦截，退避后重试是有意义的。
+            is_403 = str(status) == "403" or (status is None and re.search(r"\b403\b", str(exc)))
+            if is_403:
+                retryable = _is_cf_challenge_response(response)
             if attempt >= max_attempts or not retryable:
                 logger.warning(
                     "[2FA] 重认证发起失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
                     attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
                 )
                 raise
+            if is_403:
+                logger.info(
+                    "[2FA] 识别为 Cloudflare 质询而非业务拒绝，退避后重试：attempt=%s/%s",
+                    attempt, max_attempts,
+                )
 
             # 403/429 已开启 BrowserSession 熔断；不清理会导致下一轮在本地直接失败。
             _clear_twofa_session_circuit(session, source="重认证请求")
