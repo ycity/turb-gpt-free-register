@@ -719,7 +719,7 @@
     .accounts-table-v2-wrap { overflow: auto; padding: 0; }
     .accounts-table-v2 {
       width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
-      min-width: 1390px;
+      min-width: 1160px;
     }
     .accounts-table-v2 th, .accounts-table-v2 td {
       padding: 12px 12px; border-bottom: 1px solid #ebeef5;
@@ -739,12 +739,10 @@
     }
     .accounts-table-v2 .col-id { width: 72px; }
     .accounts-table-v2 .col-email { width: 330px; }
-    .accounts-table-v2 .col-source { width: 90px; }
     .accounts-table-v2 .col-proxy { width: 110px; }
     .accounts-table-v2 .col-token { width: 100px; }
     .accounts-table-v2 .col-password { width: 120px; }
     .accounts-table-v2 .col-plan { width: 220px; }
-    .accounts-table-v2 .col-note { width: 140px; }
     .accounts-table-v2 .col-small { width: 170px; }
     .accounts-table-v2 .col-status { width: 100px; }
     .accounts-table-v2 .col-agent { width: 140px; }
@@ -780,7 +778,6 @@
     .accounts-table-v2 .col-email,
     .accounts-table-v2 .col-password,
     .accounts-table-v2 .col-plan,
-    .accounts-table-v2 .col-note,
     .accounts-table-v2 .col-agent,
     .accounts-table-v2 .col-actions {
       white-space: normal; overflow: visible; text-overflow: clip; vertical-align: middle;
@@ -2528,9 +2525,9 @@
       <div class="accounts-table-v2-wrap">
         <table class="accounts-table-v2">
           <colgroup>
-            <col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source">
+            <col class="col-check"><col class="col-id"><col class="col-email">
             <col class="col-proxy">
-            <col class="col-token"><col class="col-password"><col class="col-plan"><col class="col-note"><col class="col-small">
+            <col class="col-token"><col class="col-password"><col class="col-plan"><col class="col-small">
             <col class="col-status"><col class="col-time"><col class="col-actions">
           </colgroup>
           <thead>
@@ -2538,12 +2535,10 @@
               <th class="col-check"><input type="checkbox" id="accountsSelectAllV2" title="全选/取消全选当前页账号" disabled></th>
               <th class="col-id">ID</th>
               <th class="col-email">邮箱</th>
-              <th class="col-source">来源</th>
               <th class="col-proxy" title="注册该账号时使用的代理在代理池中的名称">注册代理</th>
               <th class="col-token">Token</th>
               <th class="col-password">密码</th>
               <th class="col-plan">套餐</th>
-              <th class="col-note">备注</th>
               <th class="col-small">2FA</th>
               <th class="col-status">Codex</th>
               <th class="col-time">创建时间</th>
@@ -3990,20 +3985,17 @@ function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') 
   return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
 }
 const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '月'};
-function _limitWindowText(r) {
-  const w = Array.isArray(r.limit_windows) ? r.limit_windows : [];
-  return w.map(x => LIMIT_WINDOW_LABEL[x] || x).join('/');
-}
 function _teamPlanTag(r, excludeAccountId = '') {
   // 账号名下的付费 workspace 各挂一个标签；主标签已展示的那个 workspace 不再重复。
   const list = Array.isArray(r.workspace_plans) ? r.workspace_plans : [];
-  const limitText = _limitWindowText(r);
+  // 标签只标窗口类型，取最短的那个（5h 比周更能说明限制强度）；明细放 title。
+  const windows = Array.isArray(r.limit_windows) ? r.limit_windows : [];
+  const limitText = windows.length ? (LIMIT_WINDOW_LABEL[windows[0]] || windows[0]) : '';
   return list.filter(w => w && w.has_active_subscription &&
       !['', 'free', 'guest'].includes(String(w.plan_type || '').toLowerCase()) &&
       String(w.account_id || '') !== String(excludeAccountId || ''))
     .map(w => {
       const plan = String(w.plan_type || '').toUpperCase();
-      const name = w.name ? `（${w.name}）` : '';
       // esc() 会把空串渲染成 '-'，没有限额数据时不能走 esc。
       const limit = limitText ? ` · ${esc(limitText)}限额` : '';
       const expire = _fmtPlanTime(w.expires_at, true);
@@ -4013,7 +4005,7 @@ function _teamPlanTag(r, excludeAccountId = '') {
                    `套餐: ${w.plan_type || '-'}`,
                    expire ? `到期 ${expire}` : '',
                    features ? `限额窗口 → ${features}` : ''].filter(Boolean).join('；');
-      return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}${esc(name)}${limit}</span>`;
+      return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}${limit}</span>`;
     }).join('');
 }
 function _planCell(r) {
@@ -4392,12 +4384,10 @@ function renderAccounts() {
         <div class="acc-v2-email-user">${esc(r.user_name || '-')}</div>
         ${['queued','running'].includes(r.email_change_status) ? '<div class="acc-v2-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? `<div class="acc-v2-email-status" title="${esc(r.email_change_error || '')}">换绑失败: ${esc(r.email_change_error || '-')}</div>` : '')}
       </td>
-      <td class="col-source">${esc(r.email_source || '-')}</td>
       <td class="col-proxy">${r.register_proxy_name ? `<span title="${esc(r.register_proxy_name)}">${esc(short(r.register_proxy_name, 16))}</span>` : '<span class="acc-v2-muted" title="注册代理未命名、已从代理池删除，或注册时未使用代理">-</span>'}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
       <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
-      <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small">${_totpCellV2(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
       <td class="col-time" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
@@ -4414,7 +4404,7 @@ function renderAccounts() {
 
   const bodyV2 = $('#accountsBodyV2');
   if (bodyV2) {
-    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="13" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
+    bodyV2.innerHTML = rows.map(rowHtmlV2).join('') || '<tr><td colspan="11" style="text-align:center;color:#909399;padding:28px;">暂无账号</td></tr>';
   }
   updateAccountSelectionUi(rows);
   _renderPager('accounts', total);
