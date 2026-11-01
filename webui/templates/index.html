@@ -5887,7 +5887,7 @@ $('#btnCopyTeamUrl').addEventListener('click', () => {
   copyText($('#teamResultUrlText').value);
   showToast('长链接已复制！');
 });
-$('#teamCheckoutModal').addEventListener('click', e => { if (e.target.id === 'teamCheckoutModal') closeTeamCheckoutModal(); });
+// Team 结账弹窗不支持点击遮罩关闭：生成要等 10–40 秒，误点空白丢掉结果代价太大。
 
 $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'emailChangeModalV2') closeEmailChangeModal(); });
 (function bindAccountsToolbarV2() {
