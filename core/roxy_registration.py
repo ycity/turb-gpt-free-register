@@ -2447,6 +2447,35 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 35) 
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
 
 
+def recover_session_after_token_failure(email: str, proxy: str | None, reason: BaseException) -> dict:
+    """账号已在 OpenAI 侧建成、但浏览器没拿到 accessToken 时，重新登录补一次。
+
+    典型场景：资料页提交成功，回跳 chatgpt.com 时 OAuth callback 失败
+    （url 带 error=Callback），/api/auth/session 一直是空的。这时账号是好的，
+    丢掉就等于白白浪费一个邮箱，所以改用协议登录重新取 token。
+
+    复用查活的登录流程：有注册密码走密码，没有就走邮箱验证码，两种情况都覆盖。
+    返回和 _fetch_chatgpt_session 同构的 session dict；补救失败时抛出原始异常。
+    """
+    from core.account_liveness import check_account_liveness
+
+    logger.warning("[注册补救] 账号已创建但未拿到 accessToken，改用重新登录补取：%s（原因：%s）",
+                   email, str(reason)[:160])
+    try:
+        result = check_account_liveness(email, proxy, clear_log=False,
+                                        email_source=resolve_email_source(email))
+    except Exception as exc:
+        logger.error("[注册补救] 重新登录失败：%s: %s", type(exc).__name__, str(exc)[:200])
+        raise reason from exc
+    session_info = result.get("session") or {}
+    if not (result.get("ok") and session_info.get("accessToken")):
+        logger.error("[注册补救] 重新登录未拿到 accessToken：status=%s error=%s",
+                     result.get("status"), str(result.get("error"))[:200])
+        raise reason
+    logger.info("[注册补救] 重新登录成功，已补到 accessToken：%s", email)
+    return session_info
+
+
 def _check_manual_stop() -> None:
     try:
         from core.registration_service import check_stop_requested
@@ -2637,7 +2666,14 @@ def run_roxy_registration(
 
         logger.info("[Roxy注册] 等待 ChatGPT 跳转并写入 session/accessToken")
         _check_manual_stop()
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
+        try:
+            session_info = _fetch_chatgpt_session(driver, timeout=120)
+        except Exception as exc:
+            # 资料页已提交说明账号在 OpenAI 侧建好了，只是浏览器没接到 token；
+            # 直接判失败会白白废掉一个可用账号，这里改用重新登录补取。
+            if not create_acknowledged:
+                raise
+            session_info = recover_session_after_token_failure(email, proxy, exc)
         _traffic_checkpoint()
         access_token = session_info["accessToken"]
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)

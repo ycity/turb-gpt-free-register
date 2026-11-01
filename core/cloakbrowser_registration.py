@@ -21,6 +21,7 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    recover_session_after_token_failure,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,15 @@ def run_cloak_registration(
             create_acknowledged = True
             human_delay("post_auth")
 
-        session_info = _fetch_chatgpt_session(driver, timeout=120)
+        try:
+            session_info = _fetch_chatgpt_session(driver, timeout=120)
+        except Exception as exc:
+            # 资料页已提交说明账号在 OpenAI 侧建好了，只是浏览器没接到 token；
+            # 直接判失败会白白废掉一个可用账号，这里改用重新登录补取。
+            if not create_acknowledged:
+                raise
+            session_info = recover_session_after_token_failure(
+                email, (opened.raw or {}).get("proxy_pool_target") if opened else proxy, exc)
         access_token = session_info["accessToken"]
         logger.info("[Cloak注册] 已拿到 accessToken：%s", email)
 
