@@ -10,6 +10,7 @@ import urllib.request
 import urllib.error
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,27 @@ def _connect() -> sqlite3.Connection:
 
 
 def extract_clean_promo_code(raw: str) -> str:
-    """从纯优惠码或带 promo/coupon 参数的链接中提取优惠码。"""
+    """从纯优惠码或分享链接中提取优惠码。
+
+    支持三种形态：
+      - 带 promo= / coupon= 等查询参数的链接
+      - https://chatgpt.com/p/<CODE> 这类把码放在路径末段的分享链接
+      - 纯优惠码
+    """
     raw = str(raw or "").strip()
     if not raw:
         return ""
     m = re.search(r'(?:promo|promo_code|coupon|code)=([A-Za-z0-9_-]+)', raw, re.I)
     if m:
         return m.group(1).strip()
+    # 链接的 scheme/域名同样由字母数字组成，不能直接取第一段匹配，
+    # 否则 https://chatgpt.com/p/XXXX 会被提取成 "https"。
+    if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://', raw) or raw.lower().startswith("chatgpt.com/"):
+        path = urlsplit(raw if "://" in raw else f"https://{raw}").path
+        segment = next(
+            (part for part in reversed(path.split("/")) if part.strip()), ""
+        )
+        return segment.strip()
     m_code = re.search(r'([A-Za-z0-9_-]{4,})', raw)
     if m_code:
         return m_code.group(1).strip()
