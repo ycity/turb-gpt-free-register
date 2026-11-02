@@ -360,6 +360,112 @@ EDITABLE_FIELDS = [
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },
     {
+        "key": "VCC_AUTO_PAY_ENABLED", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "启用自动支付", "help": "生成 Team 长链后自动用 VCC 虚拟卡填写 Stripe 结账页。关闭则完全不执行支付动作。支付失败不影响长链本身",
+    },
+    {
+        "key": "VCC_AUTO_SUBMIT", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "自动点击提交(真实扣款)", "help": "开启=金额校验通过后真实提交并扣款，不可逆；关闭=填好后停在提交按钮前并截图，便于人工核对。两道金额闸门任一不通过都不会提交",
+    },
+    {
+        "key": "VCC_EXPECTED_AMOUNT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "期望应付金额", "help": "页面总额必须等于该值才允许提交，默认1150。注意账单地址决定税费：账单国家为 EG 时会加收14% VAT 变成1311，闸门会拦住。0=不做等值校验",
+    },
+    {
+        "key": "VCC_EXPECTED_CURRENCY", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "期望币种", "help": "页面币种必须与该值一致，默认 EGP。币种在创建结账会话时就定了，改账单地址不会改变币种。留空=不校验",
+    },
+    {
+        "key": "VCC_MAX_CHARGE", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "单笔扣款上限", "help": "硬上限，无论等值校验是否开启，总额超过该值一律不提交，默认1200。必须大于期望金额，否则闸门永远不通过",
+    },
+    {
+        "key": "VCC_AMOUNT_TOLERANCE", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "金额允许误差", "help": "等值校验的绝对误差，默认0.01，用于容忍页面四舍五入",
+    },
+    {
+        "key": "VCC_CRED_FILE", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "VCC 凭据文件", "help": "每行 `key: xxx` 格式，支持 key / secret / webhook_secret。留空则读取下面三个字段。注意 VCC 会校验来源 IP 白名单，需把本机或服务器 IP 加白",
+    },
+    {
+        "key": "VCC_API_KEY", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "VCC API Key", "help": "商户端「开发者配置」生成。留空则从凭据文件读取",
+    },
+    {
+        "key": "VCC_API_SECRET", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "VCC API Secret", "help": "用于请求签名。明文只展示一次，请妥善保存",
+    },
+    {
+        "key": "VCC_WEBHOOK_SECRET", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "VCC Webhook Secret", "help": "用于解密卡号/有效期/CVV 密文，与 API Secret 不是同一个值，缺少则取不到卡片三要素",
+    },
+    {
+        "key": "VCC_CARD_ID", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "指定卡 ID", "help": "形如 VC2026...。留空则自动取第一张状态正常的卡",
+    },
+    {
+        "key": "VCC_HOLDER_ID", "file": "vcc.py", "type": "int", "group": "自动支付",
+        "label": "指定持卡人 ID", "help": "姓名来源。0=自动取 merchantDefault 持卡人；存在多个可用持卡人且都不是默认时必须显式指定",
+    },
+    {
+        "key": "VCC_BILLING_COUNTRY", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单国家", "help": "两位国家码。必须填卡实际登记的账单国家——账单地址直接决定税费，不要为了规避税费填非登记地址",
+    },
+    {
+        "key": "VCC_BILLING_STATE", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单州/省", "help": "美国填两位州码如 AK。省份下拉按国家重新渲染，填错会选不中",
+    },
+    {
+        "key": "VCC_BILLING_CITY", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单城市", "help": "卡登记的城市",
+    },
+    {
+        "key": "VCC_BILLING_LINE1", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单街道", "help": "卡登记的详细地址第一行",
+    },
+    {
+        "key": "VCC_BILLING_LINE2", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单街道2", "help": "选填",
+    },
+    {
+        "key": "VCC_BILLING_POSTAL", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "账单邮编", "help": "卡登记的邮编",
+    },
+    {
+        "key": "VCC_3DS_ENABLED", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "自动处理 3DS", "help": "提交后若出现 3DS 质询，轮询 VCC 接口取验证码并自动填入。走轮询不需要配置公网 Webhook 地址",
+    },
+    {
+        "key": "VCC_3DS_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "3DS 等待上限(秒)", "help": "等待验证码到达的最长时间，默认180秒",
+    },
+    {
+        "key": "VCC_HEADLESS", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "无头浏览器", "help": "关闭可看到填表过程，便于排查",
+    },
+    {
+        "key": "VCC_SCREENSHOT_DIR", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "截图目录", "help": "留空则用 cache/vcc_pay/。填好、被拦截和提交后都会截图",
+    },
+    {
+        "key": "VCC_KEEP_OPEN", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "填完交给人点提交",
+        "help": "开启后用本机浏览器打开窗口，填好表单停住等你自己点提交；会强制有头并压住上面的自动提交开关",
+    },
+    {
+        "key": "VCC_KEEP_OPEN_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "等待人工提交(秒)", "help": "交还窗口后最多等多久，默认1800秒。期间会阻塞提链流程",
+    },
+    {
+        "key": "VCC_BROWSER_CHANNEL", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "本机浏览器通道",
+        "help": "chrome 或 msedge。要开窗口就必须填，Playwright 自带内核是无头版开不出窗口",
+    },
+    {
+        "key": "VCC_BROWSER_PATH", "file": "vcc.py", "type": "str", "group": "自动支付",
+        "label": "浏览器路径", "help": "直接指定浏览器可执行文件；上面的通道留空时才生效",
+    },
+    {
         "key": "ENABLE_HUMANIZE_DELAY", "file": "humanize.py", "type": "bool", "group": "人工节奏",
         "label": "启用随机停顿", "help": "在注册、OTP、授权等步骤之间加入随机等待，更接近人工操作节奏",
     },

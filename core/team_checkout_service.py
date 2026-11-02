@@ -347,6 +347,29 @@ def _native_checkout(token: str, proxy: str, workspace: str, seats: int, country
     return None, data, f"{msg} [HTTP {status}]"
 
 
+def _maybe_auto_pay(url: str, account_email: str, proxy: str) -> dict | None:
+    """生成长链后按配置尝试 VCC 自动支付。
+
+    支付失败绝不影响提链结果：长链本身已经拿到，这里只附带一个 auto_pay 字段。
+    """
+    try:
+        from config import vcc as vcc_cfg
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("VCC 配置不可用，跳过自动支付：%s", exc)
+        return None
+    if not getattr(vcc_cfg, "VCC_AUTO_PAY_ENABLED", False):
+        return None
+    if not account_email:
+        logger.warning("VCC 自动支付需要账号邮箱，当前为空，已跳过")
+        return {"ok": False, "stage": "precheck", "message": "缺少账号邮箱"}
+    try:
+        from core.vcc_checkout_pay import pay_checkout
+        return pay_checkout(url, email=account_email, proxy=proxy, cfg=vcc_cfg)
+    except Exception as exc:  # noqa: BLE001 - 支付异常不能吃掉长链
+        logger.exception("VCC 自动支付异常")
+        return {"ok": False, "stage": "exception", "message": f"{type(exc).__name__}: {exc}"}
+
+
 def generate_team_checkout_link(
     token: str,
     proxy_address: str = "",
@@ -432,7 +455,11 @@ def generate_team_checkout_link(
     if url:
         if assigned:
             mark_promo_code(assigned["id"], "used", account_id, account_email)
-        return {"ok": True, "url": url, "data": data, **meta}
+        result = {"ok": True, "url": url, "data": data, **meta}
+        pay = _maybe_auto_pay(url, account_email or "", used_proxy)
+        if pay is not None:
+            result["auto_pay"] = pay
+        return result
 
     logger.warning("Team 提链失败 provider=%s account=%s promo=%s proxy=%s: %s",
                    provider, account_id, promo, meta["proxy_used"], err_msg)

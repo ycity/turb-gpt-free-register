@@ -1,0 +1,188 @@
+<!--
+  Stripe 结账页 DOM 契约样本（classic 变体）。
+
+  这是实采页面的精简提取，不是完整副本：只保留自动填表依赖的结构——
+  html[data-checkout-variant]、form#payment-form、各 input 的 id 与
+  aria-required、国家/省份下拉（省份故意保留埃及省份，用于验证"国家必须
+  先选、省份会随国家重渲染"这一依赖）、条款复选框、提交按钮、总额元素。
+
+  已剔除：Stripe 的全部 JS bundle、Link/hCaptcha/logger 等基础设施 iframe、
+  内联样式表。页面原始会话 id 与商户 logo URL 也已替换为占位值。
+
+  如果 Stripe 改版导致选择器失效，这个样本会先失败，便于定位。
+-->
+<html lang="ja" translate="no" class="App--classic" data-checkout-variant="classic" data-elements-loaded="true" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <title>OpenAI OpCo, LLC</title>
+</head>
+<body data-session-id="cs_live_SAMPLE_REDACTED">
+<div id="root"><div class="App-Container"><div class="App">
+
+<div class="App-Overview">
+  <div class="OrderSummaryColumn" data-testid="order-summary-column">
+    <div data-testid="product-summary" class="ProductSummary no-image is-recurring">
+      <h2 class="ProductSummary-name" data-testid="product-summary-name">ChatGPT Business Subscription を定期購入</h2>
+      <span class="ProductSummary-totalAmount" id="ProductSummary-totalAmount" data-testid="product-summary-total-amount">
+        <div class="ProductSummaryTotalAmount"><div><span class="CurrencyAmount" dir="ltr">EGP&nbsp;1,311.00</span></div></div>
+      </span>
+    </div>
+  </div>
+
+  <section data-testid="order-details" class="OrderDetails">
+    <ul class="OrderDetails-items">
+      <li class="OrderDetails-item">
+        <div class="LineItem">
+          <div data-testid="line-item-product-name">ChatGPT Business Subscription</div>
+          <button class="Button AdjustableQuantitySelector" type="button" data-testid="line-item-adjustable-qty">数量 2</button>
+          <span data-testid="line-item-billing-interval">月次請求</span>
+          <div data-testid="line-item-amount-detail">seat あたり <span class="CurrencyAmount" dir="ltr">EGP&nbsp;1,150.00</span></div>
+          <div data-testid="line-item-total-amount"><span class="CurrencyAmount" dir="ltr">EGP&nbsp;2,300.00</span></div>
+        </div>
+      </li>
+    </ul>
+    <div class="OrderDetails-footer">
+      <div class="Subtotal">
+        <span>小計</span>
+        <span data-testid="order-details-footer-subtotal-amount"><span class="CurrencyAmount" dir="ltr">EGP&nbsp;2,300.00</span></span>
+      </div>
+      <div class="AppliedDiscount">
+        <span>smb_channel_partner_kone_SAMPLE</span>
+        <span><span class="CurrencyAmount" dir="ltr">-EGP&nbsp;1,150.00</span></span>
+      </div>
+      <div class="OrderDetailsSubtotalItem">
+        <span>VAT</span>
+        <span><span class="CurrencyAmount" dir="ltr">EGP&nbsp;161.00</span></span>
+      </div>
+      <div class="OrderDetails-total">
+        <span>本日のご請求合計</span>
+        <span id="OrderDetails-TotalAmount"><span class="CurrencyAmount" dir="ltr">EGP&nbsp;1,311.00</span></span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="App-Payment"><main class="CheckoutPaymentForm">
+<form class="PaymentForm-form" novalidate id="payment-form"
+      toolname="fill_payment_form"
+      tooldescription="Fills the payment form with buyer and payment details.">
+
+  <div class="FormFieldGroup" data-qa="FormFieldGroup-email" data-component-name="contactDetails">
+    <label for="email">メールアドレス</label>
+    <input class="CheckoutInput Input Input--empty" autocomplete="email" id="email" name="email"
+           type="text" aria-required="true" inputmode="email" placeholder="email@example.com" value="">
+  </div>
+
+  <h2 class="PaymentMethod-Heading">決済手段</h2>
+
+  <fieldset class="FormFieldGroup-Fieldset" id="cardForm-fieldset">
+    <input class="CheckoutInput Input Input--empty" autocomplete="cc-number" id="cardNumber" name="cardNumber"
+           type="text" data-field-interaction-name="number" aria-required="true" inputmode="numeric"
+           aria-label="カード番号" placeholder="1234 1234 1234 1234" value="">
+    <input class="CheckoutInput Input Input--empty" autocomplete="cc-exp" id="cardExpiry" name="cardExpiry"
+           type="text" data-field-interaction-name="expiry" aria-required="true" inputmode="numeric"
+           aria-label="有効期限" placeholder="MM (月) / YY (年)" value="">
+    <input class="CheckoutInput Input Input--empty" autocomplete="cc-csc" id="cardCvc" name="cardCvc"
+           type="text" data-field-interaction-name="cvc" aria-required="true" inputmode="numeric"
+           aria-label="クレジットカードまたはデビットカードのCVC / CVV" placeholder="CVC" value="">
+  </fieldset>
+
+  <div class="BillingInfoForm">
+    <div class="FormFieldGroup" data-qa="FormFieldGroup-billingName" data-component-name="billingAddress">
+      <label for="billingName">カード名義 (ローマ字)</label>
+      <input class="CheckoutInput Input Input--empty" autocomplete="cc-name" id="billingName" name="billingName"
+             data-field-interaction-name="name" type="text" aria-required="true" placeholder="氏名" value="">
+    </div>
+
+    <fieldset class="FormFieldGroup-Fieldset" id="billing-address-fieldset">
+      <div class="Select">
+        <select id="billingCountry" name="billingCountry" autocomplete="billing country"
+                data-field-interaction-name="country" aria-label="国または地域" class="Select-source">
+          <option value="" disabled hidden></option>
+          <option value="AU">オーストラリア</option>
+          <option value="CA">カナダ</option>
+          <option value="EG">エジプト</option>
+          <option value="GB">イギリス</option>
+          <option value="JP">日本</option>
+          <option value="SG">シンガポール</option>
+          <option value="US">アメリカ合衆国</option>
+        </select>
+      </div>
+
+      <input class="CheckoutInput Input Input--empty" autocomplete="billing address-line1"
+             id="billingAddressLine1" name="billingAddressLine1" data-field-interaction-name="addressLine1"
+             type="text" aria-required="true" aria-label="住所 (1 行目)" placeholder="住所 (1 行目)" value="">
+      <input class="CheckoutInput Input Input--empty" autocomplete="billing address-line2"
+             id="billingAddressLine2" name="billingAddressLine2" data-field-interaction-name="addressLine2"
+             type="text" aria-required="false" aria-label="住所 (2 行目)" placeholder="住所 (2 行目)" value="">
+      <input class="CheckoutInput Input Input--empty" autocomplete="billing address-level2"
+             id="billingLocality" name="billingLocality" data-field-interaction-name="locality"
+             type="text" aria-required="true" aria-label="市区町村" placeholder="市区町村" value="">
+
+      <!--
+        省份下拉按当前所选国家渲染。采集时国家已是 EG，所以实采页里是埃及各省，
+        没有任何美国州码。这也是"国家必须先选"的依据：顺序反了会选不中州。
+
+        静态样本无法真的随国家重渲染，因此这里同时列出埃及省份与美国州码，
+        让填表的成功路径可测；真实页面上切到 US 后只会剩美国州码。
+        选中与否由代码显式校验，不依赖本样本的选项集合。
+      -->
+      <div class="Select">
+        <select id="billingAdministrativeArea" name="billingAdministrativeArea"
+                autocomplete="billing address-level1" data-field-interaction-name="administrativeArea"
+                aria-label="省" class="Select-source Select-source--empty">
+          <option value="">省</option>
+          <option value="أسوان">أسوان — Aswan Governorate</option>
+          <option value="الإسكندرية">الإسكندرية — Alexandria Governorate</option>
+          <option value="الجيزة">الجيزة — Giza Governorate</option>
+          <option value="القاهرة">القاهرة — Cairo Governorate</option>
+          <option value="بورسعيد">بورسعيد — Port Said Governorate</option>
+          <option value="AK">Alaska</option>
+          <option value="CA">California</option>
+          <option value="DE">Delaware</option>
+          <option value="NY">New York</option>
+          <option value="OR">Oregon</option>
+        </select>
+      </div>
+
+      <input class="CheckoutInput Input Input--empty" autocomplete="billing postal-code"
+             id="billingPostalCode" name="billingPostalCode" type="text"
+             data-field-interaction-name="postalCode" aria-required="false" inputmode="numeric"
+             aria-label="郵便番号" placeholder="郵便番号" value="">
+    </fieldset>
+  </div>
+
+  <div class="FormFieldCheckbox OptInSetupFutureUsageCheckbox">
+    <input id="optInSetupFutureUsageCheckbox" name="optInSetupFutureUsageCheckbox" type="checkbox" class="Checkbox-Input">
+    <label for="optInSetupFutureUsageCheckbox">お支払い情報を保存</label>
+  </div>
+
+  <div class="TaxIdCollection-Container">
+    <input id="purchasingAsBusinessCheckbox" name="purchasingAsBusinessCheckbox" type="checkbox" class="Checkbox-Input">
+    <label for="purchasingAsBusinessCheckbox">ビジネスとして購入</label>
+  </div>
+
+  <div class="ConfirmPayment">
+    <!-- 必填项：不勾选无法提交 -->
+    <div class="FormFieldCheckbox TermsOfServiceConsentCheckbox">
+      <input id="termsOfServiceConsentCheckbox" name="termsOfServiceConsentCheckbox" type="checkbox" class="Checkbox-Input">
+      <label for="termsOfServiceConsentCheckbox">キャンセルされるまで、使用した座席に応じて毎月請求が行われます。</label>
+    </div>
+
+    <button class="SubmitButton SubmitButton--clickable" type="submit" data-testid="hosted-payment-submit-button">
+      <span class="SubmitButton-Text SubmitButton-Text--current">申し込む</span>
+      <span class="SubmitButton-Text SubmitButton-Text--pre" data-testid="submit-button-processing-label">処理中</span>
+    </button>
+
+    <div class="ConfirmPayment-PostSubmit"></div>
+  </div>
+</form>
+
+<div class="AiAgentPaymentSteering" aria-hidden="true">
+  <p>Payment mode: Live mode. Test data not accepted.</p>
+</div>
+</main></div>
+
+</div></div></div>
+</body>
+</html>

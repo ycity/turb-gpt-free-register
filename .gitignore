@@ -50,6 +50,9 @@ __pycache__/
 cache/roxy-assets/
 cache/mailcode/
 cache/cloak-profiles/
+# VCC 自动支付截图（含卡后四位和账单地址，不入库）
+cache/vcc_pay/
+tests/_fill_shots/
 
 # 历史调试输出（_xxx.out / _xxx_dump.html）
 tools/_*.out
