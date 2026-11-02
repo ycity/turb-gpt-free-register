@@ -1307,6 +1307,13 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "error": "该账号没有记录注册代理，而配置要求支付走注册代理；"
                              "请在配置里关闭 VCC_USE_ACCOUNT_PROXY 或补上代理",
                 }), 400
+            # 探测发现本单代理打不开结账页时，前端会把能用的出口传回来。
+            # 支付必须走这个出口，否则照样卡在等表单上。
+            override = str(data.get("pay_proxy") or "").strip()
+            if override and override != proxy:
+                logger.warning("[pay] 账号 %s 改用备用出口支付：%s",
+                               acc.get("email"), override.split("@")[-1])
+                proxy = override
 
         try:
             sess = start_session(account_id=int(acc["id"]),
@@ -1493,6 +1500,44 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": True, "active": False, "finished": True,
                             **recent.public()})
         return jsonify({"ok": True, "active": False})
+
+    @app.get("/api/pay/probe-link")
+    def api_pay_probe_link():
+        """检查账号上存着的 Team 长链是否还能用于支付。
+
+        Stripe 的 checkout session 有时效，过期后页面只剩一句
+        "You're all done here"，表单永远等不出来。失败重试前先探一下，
+        免得拿一条废链接再白等一个 60 秒超时。
+        """
+        try:
+            account_id = int(request.args.get("account_id") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "account_id 非法"}), 400
+        acc = db.get_account(account_id)
+        if acc is None:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        url = str(acc.get("team_checkout_url") or "").strip()
+        if not url:
+            return jsonify({"ok": True, "usable": False, "reason": "没有已保存的长链"})
+
+        from core.vcc_checkout_pay import probe_with_fallback
+
+        proxy = str(acc.get("proxy_used") or "").strip()
+        # 本单代理打不开时试试别的出口：实测同一条长链在 softbank 出口始终
+        # 空白，换出口后表单秒出，所以"空白"不等于长链作废。
+        candidates: list[str] = []
+        for row in db.list_accounts(limit=60):
+            alt = str(row.get("proxy_used") or "").strip()
+            if alt and alt != proxy and alt not in candidates:
+                candidates.append(alt)
+        try:
+            res = probe_with_fallback(url, proxy=proxy,
+                                      candidates=candidates[:4])
+        except Exception as exc:
+            logger.exception("探测长链失败")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "url": url,
+                        "created_at": acc.get("team_checkout_created_at"), **res})
 
     @app.get("/api/pay/vnc-status")
     def api_pay_vnc_status():

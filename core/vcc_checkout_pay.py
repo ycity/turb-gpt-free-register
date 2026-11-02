@@ -388,7 +388,28 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
         raise VccPayError(
             f"结账页变体为 {variant}，当前仅适配 classic；已停止以免误填")
     result.stage = "fill"
-    page.wait_for_selector(SEL_FORM, timeout=int(cfg.VCC_PAGE_TIMEOUT * 1000))
+    try:
+        page.wait_for_selector(SEL_FORM, timeout=int(cfg.VCC_PAGE_TIMEOUT * 1000))
+    except Exception as exc:
+        # 裸抛 Playwright 的 "waiting for locator(...) to be visible" 看不出原因。
+        # 绝大多数情况是结账会话已过期（页面只剩一句 all done），这时重试没有
+        # 意义，必须重新生成长链——把这点直接说出来。
+        text = ""
+        try:
+            text = (page.inner_text("body") or "").strip()
+        except Exception:
+            pass
+        low = text.lower()
+        if any(mark in low for mark in _EXPIRED_MARKERS):
+            raise VccPayError(
+                "结账会话已过期或已完成，支付表单不会再出现。"
+                "这条长链已作废，需要重新生成（会消耗一个新的优惠码）") from exc
+        if not text:
+            raise VccPayError(
+                "结账页空白，页面资源没能加载完（常见于代理不稳定）。"
+                "长链本身可能还有效，可稍后重试或换代理") from exc
+        raise VccPayError(
+            f"等不到支付表单，页面当前显示：{text[:80]}") from exc
 
     filled = result.filled
     _fill(page, SEL_EMAIL, email, label="email", filled=filled)
@@ -485,6 +506,99 @@ def build_proxy_option(proxy: str) -> dict[str, str] | None:
         option["username"] = parsed.username
         option["password"] = parsed.password or ""
     return option
+
+
+#: Stripe checkout session 过期后页面上会出现的措辞
+_EXPIRED_MARKERS = (
+    "you're all done here",
+    "you’re all done here",
+    "checkout session has timed out",
+    "this payment link is no longer",
+    "no longer active",
+)
+
+
+def probe_checkout_link(checkout_url: str, *, proxy: str = "",
+                        timeout: float = 30.0) -> dict[str, Any]:
+    """只读地检查长链还能不能用来支付，不填表也不提交。
+
+    结果分三种，处置完全不同：
+      - usable：表单能渲染出来，可以直接支付
+      - 会话过期：长链作废，只能重新生成（会再消耗优惠码）
+      - 页面空白：长链多半还有效，是这个出口加载不出 Stripe 资源。
+        实测 softbank 出口对同一条链始终空白，换出口后表单秒出。
+    """
+    from playwright.sync_api import sync_playwright
+
+    url = (checkout_url or "").strip()
+    if not url:
+        return {"usable": False, "reason": "长链为空", "kind": "empty"}
+
+    launch: dict[str, Any] = {"headless": True}
+    option = build_proxy_option(proxy)
+    if option:
+        launch["proxy"] = option
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(**launch)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.set_default_timeout(int(timeout * 1000))
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+            except Exception as exc:
+                return {"usable": False, "kind": "network",
+                        "reason": f"打不开页面（{type(exc).__name__}）"}
+            # 表单是 React 渲染的，给它一点时间，但别等满整个支付超时
+            try:
+                page.wait_for_selector(SEL_FORM, timeout=int(min(timeout, 20.0) * 1000))
+                return {"usable": True, "kind": "ready", "reason": "表单已就绪"}
+            except Exception:
+                pass
+            text = ""
+            try:
+                text = (page.inner_text("body") or "").strip()
+            except Exception:
+                pass
+            low = text.lower()
+            if any(mark in low for mark in _EXPIRED_MARKERS):
+                return {"usable": False, "kind": "expired",
+                        "reason": "结账会话已过期或已完成"}
+            if not text:
+                return {"usable": False, "kind": "blank",
+                        "reason": "页面空白，该出口加载不出 Stripe 资源"}
+            return {"usable": False, "kind": "unknown",
+                    "reason": f"未出现支付表单（页面显示：{text[:60]}）"}
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+def probe_with_fallback(checkout_url: str, *, proxy: str = "",
+                        candidates: list[str] | None = None,
+                        timeout: float = 30.0) -> dict[str, Any]:
+    """先用本单代理探，空白就换候选出口再试。
+
+    空白意味着长链很可能没问题，只是这个出口连不上 Stripe 的静态资源。
+    会话过期则换谁都一样，不浪费时间继续探。
+    """
+    first = probe_checkout_link(checkout_url, proxy=proxy, timeout=timeout)
+    if first.get("usable") or first.get("kind") == "expired":
+        return {**first, "proxy": proxy}
+
+    for alt in candidates or []:
+        alt = (alt or "").strip()
+        if not alt or alt == proxy:
+            continue
+        res = probe_checkout_link(checkout_url, proxy=alt, timeout=timeout)
+        if res.get("usable"):
+            logger.warning("[pay] 本单代理打不开结账页，改用备用出口 %s",
+                           alt.split("@")[-1])
+            return {**res, "proxy": alt, "switched": True,
+                    "original_reason": first.get("reason")}
+    return {**first, "proxy": proxy}
 
 
 def pay_checkout(checkout_url: str, *, email: str, proxy: str = "",

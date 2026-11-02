@@ -2987,6 +2987,13 @@
       <input type="hidden" id="autoPaySessionId">
 
       <div id="autoPaySetup">
+        <div id="autoPayReuseBox" class="hidden" style="margin:4px 0 12px;padding:10px 12px;border-radius:6px;background:#f0f9eb;border:1px solid #c2e7b0;font-size:13px;color:#529b2e;">
+          <label class="team-checkout-check" style="margin:0;">
+            <input type="checkbox" id="apReuseLink" checked>
+            <span><b>复用已生成的长链</b>（优惠码已消耗，重新生成会再烧一个）</span>
+          </label>
+          <div id="apReuseMeta" class="muted" style="margin-top:6px;word-break:break-all;font-size:12px;"></div>
+        </div>
         <div style="font-size:13px;font-weight:600;color:#475569;margin:4px 0 8px;">① 长链参数</div>
         <label class="outlook-import-field">
           <span>提链方式</span>
@@ -4603,7 +4610,12 @@ function _autoPayRender(s) {
   $('#autoPaySessionId').value = s.session_id || '';
   const amt = (s.amount === null || s.amount === undefined) ? '-' : `${esc(s.currency || '')} ${Number(s.amount).toFixed(2)}`;
   $('#autoPayAmount').textContent = amt;
-  $('#autoPayExpected').textContent = s.expected ? Number(s.expected).toFixed(2) : '不校验';
+  // 会话在读到金额前就失败时 expected 还没赋值，这时显示「不校验」会让人
+  // 误以为闸门被关了。只有真的配成 0 才是不校验。
+  const expEl = $('#autoPayExpected');
+  if (s.expected) expEl.textContent = Number(s.expected).toFixed(2);
+  else if (s.state === 'failed' || s.state === 'cancelled') expEl.textContent = '未校验（未走到金额读取）';
+  else expEl.textContent = '待读取';
   $('#autoPayCard').textContent = s.card_mask || '-';
   $('#autoPaySummary').classList.toggle('hidden', !s.card_mask && s.amount === null);
 
@@ -4693,6 +4705,15 @@ function _autoPayOpenModal(id, { setup = true } = {}) {
   cancel.textContent = '取消并关闭';
   cancel.classList.remove('jobs-tb-btn--primary');
   delete cancel.dataset.finished;
+  // 复用长链是上一单失败时的一次性提议，每次开窗都要重置，避免把旧长链
+  // 带到别的账号或别的一单上。
+  const reuseBox = $('#autoPayReuseBox');
+  if (reuseBox) {
+    reuseBox.classList.add('hidden');
+    const cb = $('#apReuseLink');
+    if (cb) { cb.checked = true; delete cb.dataset.url; delete cb.dataset.proxy; }
+    _autoPaySyncReuseState();
+  }
   $('#autoPayModal').classList.remove('hidden');
   // 弹窗是全屏遮罩，背景不该再跟着滚
   document.body.style.overflow = 'hidden';
@@ -4821,6 +4842,35 @@ async function _autoPayLoadSetup() {
   await _autoPayCheckFunds();
 }
 
+function _autoPayUseExistingLink(url, when, payProxy) {
+  const box = $('#autoPayReuseBox');
+  if (!box) return;
+  box.classList.remove('hidden');
+  const cb = $('#apReuseLink');
+  cb.checked = true;
+  cb.dataset.url = url;
+  if (payProxy) cb.dataset.proxy = payProxy; else delete cb.dataset.proxy;
+  const via = payProxy ? `<br>支付将改走可用出口：${esc(String(payProxy).split('@').pop())}` : '';
+  $('#apReuseMeta').innerHTML =
+    `生成于 ${esc(when)}：${esc(url.slice(0, 80))}${url.length > 80 ? '…' : ''}${via}`;
+  _autoPaySyncReuseState();
+  _autoPaySetStatus('', '将复用已生成的长链，不再消耗新的优惠码。确认卡片和账单地址后点「开始填表」。');
+}
+
+function _autoPaySyncReuseState() {
+  // 复用长链时，长链参数一概不起作用，灰掉避免误以为能改
+  const on = $('#apReuseLink') && $('#apReuseLink').checked
+             && !$('#autoPayReuseBox').classList.contains('hidden');
+  ['apProvider', 'apPromoCode', 'apUse1024Proxy', 'apProxyAddress',
+   'apWorkspace', 'apSeats', 'apCountry2', 'apCurrency'].forEach(k => {
+    const el = $('#' + k);
+    if (!el) return;
+    el.disabled = on;
+    const field = el.closest('label');
+    if (field) field.style.opacity = on ? '0.45' : '';
+  });
+}
+
 async function openAutoPay(id) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id)) || {};
 
@@ -4835,7 +4885,60 @@ async function openAutoPay(id) {
   } catch (err) { /* 查不到就当没有 */ }
 
   if (finished && Number(finished.account_id) === Number(id)) {
-    const okTxt = finished.state === 'done' ? '已完成' : finished.state;
+    const ok = finished.state === 'done';
+    const savedUrl = String(acc.team_checkout_url || '').trim();
+    // 上一单失败且还留着长链：先探活再决定，别拿一条已失效的长链让人干等 60 秒。
+    // Stripe 的 checkout session 有时效，过期后页面只剩 "You're all done here"。
+    if (!ok && savedUrl) {
+      const when = acc.team_checkout_created_at || '未知时间';
+      let probe = null;
+      _autoPaySetStatus('', '正在检查上一条长链是否还能用…');
+      try {
+        const pr = await fetch('/api/pay/probe-link?account_id=' + encodeURIComponent(id));
+        probe = await pr.json();
+      } catch (e) { /* 探不到就按不可用处理 */ }
+
+      if (probe && probe.ok && probe.usable) {
+        const switched = probe.switched
+          ? `\n注意：本账号自己的代理打不开结账页（${probe.original_reason || ''}），\n已找到可用出口，支付会改走它。`
+          : '';
+        if (confirm(`该账号最近一单支付失败：\n\n${finished.message || ''}\n\n` +
+                    `已生成的长链（${when}）经检查仍然有效，优惠码已消耗。${switched}\n\n` +
+                    `点「确定」复用这条长链，不再消耗新的优惠码（推荐）。\n` +
+                    `点「取消」查看上一单结果。`)) {
+          _autoPayOpenModal(id, { setup: true });
+          $('#autoPaySessionId').value = '';
+          await _autoPayLoadSetup();
+          _autoPayUseExistingLink(savedUrl, when, probe.switched ? probe.proxy : '');
+          return;
+        }
+        _autoPayOpenModal(finished.account_id, { setup: false });
+        $('#autoPaySessionId').value = finished.session_id;
+        _autoPayRender(finished);
+        return;
+      }
+
+      const why = (probe && probe.reason) || '无法访问';
+      const expired = probe && probe.kind === 'expired';
+      const tip = expired
+        ? '这条长链已作废，它消耗的优惠码无法找回。'
+        : '长链本身可能还有效，但所有出口都打不开结账页，建议稍后再试。';
+      if (!confirm(`该账号最近一单支付失败：\n\n${finished.message || ''}\n\n` +
+                   `上一条长链（${when}）暂不可用：${why}\n${tip}\n\n` +
+                   `点「确定」生成新长链重新支付（会再消耗一个优惠码）。\n` +
+                   `点「取消」先查看上一单结果。`)) {
+        _autoPayOpenModal(finished.account_id, { setup: false });
+        $('#autoPaySessionId').value = finished.session_id;
+        _autoPayRender(finished);
+        return;
+      }
+      _autoPayOpenModal(id, { setup: true });
+      $('#autoPaySessionId').value = '';
+      await _autoPayLoadSetup();
+      _autoPaySetStatus('warn', `上一条长链已失效（${why}），本次会生成新的长链并消耗一个优惠码。`);
+      return;
+    }
+    const okTxt = ok ? '已完成' : finished.state;
     if (!confirm(`该账号最近一单支付${okTxt}：\n\n${finished.message || ''}\n\n` +
                  `点「确定」查看上一单结果，点「取消」直接发起新的支付。`)) {
       // 继续走下面的新建流程
@@ -4907,6 +5010,14 @@ async function _autoPayStart() {
   const chosen = $('#autoPayAddrSelect').value;
   if (chosen) payload.billing_address_id = Number(chosen);
 
+  // 复用长链时直接把 URL 交给后端，后端就不会再生成（也就不会再消耗优惠码）
+  const reuse = $('#apReuseLink');
+  if (reuse && reuse.checked && !$('#autoPayReuseBox').classList.contains('hidden') && reuse.dataset.url) {
+    payload.checkout_url = reuse.dataset.url;
+    if (reuse.dataset.proxy) payload.pay_proxy = reuse.dataset.proxy;
+    btn.textContent = '正在打开长链…';
+  }
+
   try {
     const r = await fetch('/api/accounts/pay/start', {
       method: 'POST',
@@ -4953,6 +5064,9 @@ function _autoPayBind() {
   if (btnClose) btnClose.onclick = () => close(false);
   const btnCancel = $('#btnAutoPayCancel');
   if (btnCancel) btnCancel.onclick = () => close(true);
+
+  const reuseCb = $('#apReuseLink');
+  if (reuseCb) reuseCb.addEventListener('change', _autoPaySyncReuseState);
 
   const btnOk = $('#btnAutoPayConfirm');
   if (btnOk) btnOk.onclick = async () => {
