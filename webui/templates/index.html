@@ -2969,8 +2969,8 @@
   <div class="outlook-import-dialog" role="document" style="width:min(900px,100%);">
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
-        <h3 id="autoPayTitle">自动支付</h3>
-        <p id="autoPayHint">服务端会生成长链、用该账号注册时的代理填好支付表单，停在提交前等你确认。</p>
+        <h3 id="autoPayTitle">生成 Team 长链并支付</h3>
+        <p id="autoPayHint">服务端会按下面的参数生成长链，再用该账号注册时的代理填好支付表单，停在提交前等你确认。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAutoPay" aria-label="关闭">×</button>
     </div>
@@ -2979,11 +2979,40 @@
       <input type="hidden" id="autoPaySessionId">
 
       <div id="autoPaySetup">
+        <div style="font-size:13px;font-weight:600;color:#475569;margin:4px 0 8px;">① 长链参数</div>
+        <label class="outlook-import-field">
+          <span>提链方式</span>
+          <select id="apProvider">
+            <option value="native">本地直连 chatgpt.com（自研，token 不经过第三方）</option>
+            <option value="jinmotech">jinmotech 接口</option>
+          </select>
+        </label>
+        <label class="outlook-import-field">
+          <span>优惠码 <small class="muted" id="apPromoHint">池中可用: -</small></span>
+          <input type="text" id="apPromoCode" placeholder="留空 = 自动使用优惠码池中下一个未使用的码" autocomplete="off">
+        </label>
+        <label class="team-checkout-check">
+          <input type="checkbox" id="apUse1024Proxy" checked>
+          <span>自动从 1024proxy 拉取代理（填了自定义代理以自定义为准）</span>
+        </label>
+        <label class="outlook-import-field">
+          <span>提链用自定义代理（可选，留空走账号注册代理）</span>
+          <input type="text" id="apProxyAddress" placeholder="host:port 或 host:port:user:pass" autocomplete="off">
+        </label>
+        <div class="team-checkout-grid">
+          <label class="outlook-import-field"><span>工作区名称</span><input type="text" id="apWorkspace" value="MyTeam"></label>
+          <label class="outlook-import-field"><span>席位</span><input type="number" id="apSeats" value="2" min="2" max="100"></label>
+          <label class="outlook-import-field"><span>国家</span><input type="text" id="apCountry2" value="EG" maxlength="2"></label>
+          <label class="outlook-import-field"><span>货币</span><input type="text" id="apCurrency" placeholder="自动" maxlength="3"></label>
+        </div>
+
+        <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">② 支付卡片</div>
         <label class="outlook-import-field">
           <span>支付卡片 <small class="muted" id="autoPayCardHint">加载中…</small></span>
           <select id="autoPayCardSelect"></select>
         </label>
 
+        <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">③ 账单地址</div>
         <label class="outlook-import-field">
           <span>账单地址</span>
           <select id="autoPayAddrSelect">
@@ -4642,6 +4671,15 @@ function _autoPayFillAddrForm(a) {
 let _autoPayAddrCache = [];
 
 async function _autoPayLoadSetup() {
+  // 优惠码池余量：留空会自动取一个，先让人知道还剩多少
+  try {
+    const r = await fetch('/api/promo-codes/stats');
+    const s = await r.json();
+    const n = s && s.unused;
+    $('#apPromoHint').textContent = (n === undefined || n === null)
+      ? '池中可用: -' : `池中可用: ${n}`;
+  } catch (err) { /* 提示性信息，失败不挡流程 */ }
+
   // 卡片：直接问 VCC，余额和状态都是实时的
   const sel = $('#autoPayCardSelect');
   sel.innerHTML = '<option value="">加载中…</option>';
@@ -4763,6 +4801,15 @@ async function _autoPayStart() {
     holder_id: Number(opt && opt.dataset.holder) || 0,
     billing: addr,
     save_address: $('#autoPaySaveAddr').checked,
+    // 长链参数
+    provider: $('#apProvider').value,
+    promo_code: $('#apPromoCode').value.trim(),
+    use_1024proxy: $('#apUse1024Proxy').checked,
+    proxy_address: $('#apProxyAddress').value.trim(),
+    workspace: $('#apWorkspace').value.trim() || 'MyTeam',
+    seats: Number($('#apSeats').value) || 2,
+    country: ($('#apCountry2').value.trim() || 'EG').toUpperCase(),
+    currency: $('#apCurrency').value.trim().toUpperCase(),
   };
   const chosen = $('#autoPayAddrSelect').value;
   if (chosen) payload.billing_address_id = Number(chosen);
@@ -4888,7 +4935,7 @@ function _accountsV2MoreMenu(r) {
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,
     _planAction(r),
     `<button type="button" onclick="generateTeamLink(${esc(r.id)}, this); return false;" title="提取该账号的 Team 订阅 Stripe 支付长链接">生成Team长链</button>`,
-    `<button type="button" onclick="openAutoPay(${esc(r.id)}); return false;" title="生成长链并用该账号的注册代理在服务端填好支付表单，停在提交前等你确认">自动支付</button>`,
+    `<button type="button" onclick="openAutoPay(${esc(r.id)}); return false;" title="生成 Team 长链并用该账号的注册代理在服务端填好支付表单，停在提交前等你确认">生成Team长链并支付</button>`,
     _extractLinkAction(r),
     _codexAction(r),
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,
