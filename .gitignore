@@ -99,3 +99,6 @@ webui.log
 webui.pid
 logs/
 run/
+
+# Agent 临时文件：探针脚本、一次性校验、调试产物
+.agents/tmp/
