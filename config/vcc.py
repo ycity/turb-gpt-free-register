@@ -53,6 +53,19 @@ VCC_CARD_ID = ""
 # 账单币种与卡币种通常不同，这里只做"卡可用余额 >= 该值"的粗筛，单位是卡的币种。
 VCC_MIN_CARD_BALANCE = 0.0
 
+# ---- 余额检查与自动充值 ----
+# 卡内余额不足时自动从 VCC 账户划钱到卡上。
+VCC_AUTO_RECHARGE = True
+# 每次充值金额（USD）。实际会取它和"刚好够付+1"中的较大值。
+VCC_RECHARGE_AMOUNT = 21.0
+# 等充值到账的上限（秒）。同步响应只表示受理，钱要几秒后才到卡上。
+VCC_RECHARGE_TIMEOUT = 90.0
+# EGP 兑 USD 的折算汇率，用于判断"卡里的钱够不够付这张 EGP 账单"。
+# 写死而不实时查：实时汇率会让判断每次都不一样，排查时说不清。
+VCC_USD_RATE = 56.0
+# 折算后额外留的余量（USD），覆盖汇率波动和可能的跨境费。
+VCC_BALANCE_BUFFER = 1.0
+
 # ---- 金额闸门 ----
 # 页面"本次应付总额"必须精确等于该值才允许提交。单位与页面币种一致。
 # 设为 0 表示不做等值校验（此时仅 VCC_MAX_CHARGE 生效）。
@@ -152,6 +165,11 @@ apply_env_overrides(globals(), {
     'VCC_BILLING_NAME': 'str',
     'VCC_CARD_ID': 'str',
     'VCC_MIN_CARD_BALANCE': 'float',
+    'VCC_AUTO_RECHARGE': 'bool',
+    'VCC_RECHARGE_AMOUNT': 'float',
+    'VCC_RECHARGE_TIMEOUT': 'float',
+    'VCC_USD_RATE': 'float',
+    'VCC_BALANCE_BUFFER': 'float',
     'VCC_EXPECTED_AMOUNT': 'float',
     'VCC_EXPECTED_CURRENCY': 'str',
     'VCC_AMOUNT_TOLERANCE': 'float',

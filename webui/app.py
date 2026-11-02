@@ -1232,6 +1232,35 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception as exc:
             return jsonify({"ok": False, "error": f"支付模块不可用：{exc}"}), 500
 
+        # 弹窗可以按次指定卡和账单地址，不改全局配置
+        run_cfg = _build_pay_cfg(vcc_cfg, data)
+
+        # 余额不够就在生成长链之前停下，免得白白消耗一个优惠码
+        funds_info = None
+        if bool(data.get("check_funds", True)):
+            try:
+                from core.vcc_client import build_client_from_config
+                from core.vcc_funds import InsufficientFunds, ensure_funds
+
+                card_id = (run_cfg.VCC_CARD_ID or "").strip()
+                client = build_client_from_config()
+                if not card_id:
+                    picked = client.pick_card(min_balance=0.0)
+                    card_id = str(picked.get("cardId") or "")
+                check = ensure_funds(client, card_id, run_cfg)
+                funds_info = check.as_dict()
+                if check.recharged:
+                    logger.warning("[pay] 支付前自动充值 %.2f USD 到卡 %s",
+                                   check.recharged, card_id[:8])
+            except InsufficientFunds as exc:
+                return jsonify({"ok": False, "error": str(exc),
+                                "stage": "funds"}), 400
+            except Exception as exc:
+                logger.exception("余额检查异常")
+                return jsonify({"ok": False,
+                                "error": f"余额检查失败：{type(exc).__name__}: {exc}",
+                                "stage": "funds"}), 500
+
         url = (data.get("checkout_url") or "").strip()
         meta = {}
         if not url:
@@ -1273,9 +1302,6 @@ def create_app(auth_code: str | None = None) -> Flask:
                              "请在配置里关闭 VCC_USE_ACCOUNT_PROXY 或补上代理",
                 }), 400
 
-        # 弹窗可以按次指定卡和账单地址，不改全局配置
-        run_cfg = _build_pay_cfg(vcc_cfg, data)
-
         try:
             sess = start_session(account_id=int(acc["id"]),
                                  email=str(acc.get("email") or ""),
@@ -1305,7 +1331,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 pass
 
         return jsonify({"ok": True, "url": url, "saved_address": saved_address,
-                        **meta, **sess.public()})
+                        "funds": funds_info, **meta, **sess.public()})
 
     @app.get("/api/pay/<sid>/status")
     def api_pay_status(sid):
@@ -1383,6 +1409,23 @@ def create_app(auth_code: str | None = None) -> Flask:
             })
         cards.sort(key=lambda c: (not c["usable"], -c["balance"]))
         return jsonify({"ok": True, "cards": cards})
+
+    @app.get("/api/pay/funds-check")
+    def api_pay_funds_check():
+        """只查不充：选完卡就告诉人够不够付、要不要充。"""
+        card_id = (request.args.get("card_id") or "").strip()
+        try:
+            from config import vcc as cfg
+            from core.vcc_client import build_client_from_config
+            from core.vcc_funds import preflight
+            client = build_client_from_config()
+            if not card_id:
+                card_id = str(client.pick_card(min_balance=0.0).get("cardId") or "")
+            return jsonify(preflight(client, card_id, cfg))
+        except Exception as exc:
+            logger.exception("余额预检异常")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
 
     @app.get("/api/pay/billing-addresses")
     def api_pay_billing_addresses():

@@ -3011,6 +3011,7 @@
           <span>支付卡片 <small class="muted" id="autoPayCardHint">加载中…</small></span>
           <select id="autoPayCardSelect"></select>
         </label>
+        <div id="autoPayFunds" class="hidden" style="margin:-4px 0 8px;padding:8px;border-radius:6px;font-size:13px;"></div>
 
         <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">③ 账单地址</div>
         <label class="outlook-import-field">
@@ -4670,6 +4671,39 @@ function _autoPayFillAddrForm(a) {
 
 let _autoPayAddrCache = [];
 
+async function _autoPayCheckFunds() {
+  const box = $('#autoPayFunds');
+  const cardId = $('#autoPayCardSelect').value;
+  if (!cardId) { box.classList.add('hidden'); return true; }
+  box.classList.remove('hidden');
+  box.style.cssText += ';background:#f8fafc;border:1px solid #e2e8f0;color:#475569;';
+  box.textContent = '正在检查余额…';
+  try {
+    const r = await fetch(`/api/pay/funds-check?card_id=${encodeURIComponent(cardId)}`);
+    const s = await r.json();
+    if (!s.ok) {
+      box.style.cssText += ';background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;';
+      box.innerHTML = '<b>无法支付：</b>' + esc(s.error || '余额不足');
+      return false;
+    }
+    if (s.need_recharge) {
+      box.style.cssText += ';background:#fff6e5;border:1px solid #f0c36d;color:#92400e;';
+      box.innerHTML = `卡内 <b>${s.card_balance.toFixed(2)}</b> USD 不足（本次约需 ` +
+        `${s.needed.toFixed(2)}），开始时会自动从账户充值 <b>${s.recharge.toFixed(2)}</b> USD` +
+        `（账户可用 ${s.account_balance.toFixed(2)}）`;
+    } else {
+      box.style.cssText += ';background:#f0fdf4;border:1px solid #86efac;color:#166534;';
+      box.innerHTML = `卡内 <b>${s.card_balance.toFixed(2)}</b> USD 足够本次支付` +
+        `（约需 ${s.needed.toFixed(2)}）`;
+    }
+    return true;
+  } catch (err) {
+    box.style.cssText += ';background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;';
+    box.textContent = '余额检查失败：' + err.message;
+    return false;
+  }
+}
+
 async function _autoPayLoadSetup() {
   // 优惠码池余量：留空会自动取一个，先让人知道还剩多少
   try {
@@ -4732,6 +4766,8 @@ async function _autoPayLoadSetup() {
       }
     }
   } catch (err) { /* 用表单现有值 */ }
+
+  await _autoPayCheckFunds();
 }
 
 async function openAutoPay(id) {
@@ -4790,6 +4826,12 @@ async function _autoPayStart() {
   const cardId = $('#autoPayCardSelect').value;
   if (!cardId) { showToast('请选择支付卡片'); return; }
   const opt = $('#autoPayCardSelect').selectedOptions[0];
+
+  // 余额不够就别发起了：长链一生成就消耗优惠码
+  if (!(await _autoPayCheckFunds())) {
+    showToast('余额不足，无法发起支付');
+    return;
+  }
 
   btn.disabled = true;
   btn.textContent = '正在生成长链…';
@@ -4880,6 +4922,9 @@ function _autoPayBind() {
 
   const btnStart = $('#btnAutoPayStart');
   if (btnStart) btnStart.onclick = _autoPayStart;
+
+  const cardSel = $('#autoPayCardSelect');
+  if (cardSel) cardSel.onchange = _autoPayCheckFunds;
 
   const addrSel = $('#autoPayAddrSelect');
   if (addrSel) addrSel.onchange = () => {

@@ -466,6 +466,31 @@ EDITABLE_FIELDS = [
         "label": "浏览器路径", "help": "直接指定浏览器可执行文件；上面的通道留空时才生效",
     },
     {
+        "key": "VCC_AUTO_RECHARGE", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "卡余额不足时自动充值",
+        "help": "支付前检查卡内余额，不够就从VCC账户划钱到卡上；账户也不够则在生成长链前拦下",
+    },
+    {
+        "key": "VCC_RECHARGE_AMOUNT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "每次充值金额(USD)",
+        "help": "按该额度整额充值，一次不够则充整数倍，默认21美元",
+    },
+    {
+        "key": "VCC_RECHARGE_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "等充值到账上限(秒)",
+        "help": "充值是异步的，同步响应只表示受理；超时未到账会报错并提示不要重复发起",
+    },
+    {
+        "key": "VCC_USD_RATE", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "账单币种兑USD汇率",
+        "help": "用于判断卡内美元够不够付EGP账单。写死而非实时查，避免每次判断结果不同",
+    },
+    {
+        "key": "VCC_BALANCE_BUFFER", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "余额判断缓冲(USD)",
+        "help": "折算后额外留的余量，覆盖汇率波动和可能的跨境费",
+    },
+    {
         "key": "VCC_SESSION_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",
         "label": "网页支付等待上限(秒)",
         "help": "网页端自动支付：填好表单后等你确认、以及等你输 3DS 验证码的最长时间，默认900秒",

@@ -217,6 +217,48 @@ class VccClient:
                 return row
         return data
 
+    def account_balance(self, currency: str = "USD") -> float:
+        """账户可用余额。充值卡片的钱从这里出。"""
+        data = self.post("/openapi/v1/account/balance/query", {})
+        for row in data.get("balances") or []:
+            if str(row.get("currency") or "").upper() == currency.upper():
+                return self._available(row)
+        return 0.0
+
+    def recharge_card(self, card_id: str, amount: float, *,
+                      request_no: str, currency: str = "USD") -> dict:
+        """给卡充值。真实划走账户余额。
+
+        request_no 必须由调用方给定且可复现：接口按它做幂等，重复提交同一个
+        请求号不会重复扣款。超时或 500 时绝不能换新请求号重试——那会变成
+        两笔真实划账。
+
+        返回里 status 首次通常是 PROCESSING，几秒后才到卡上。
+        """
+        if amount <= 0:
+            raise VccError(f"充值金额必须为正数，收到 {amount}")
+        if not request_no:
+            raise VccError("充值必须提供 request_no，否则重试会重复扣款")
+        return self.post("/openapi/v1/cards/funds/operate", {
+            "cardId": card_id,
+            "operationType": "RECHARGE",
+            "amount": f"{amount:.2f}",
+            "currency": currency,
+            "requestNo": request_no,
+        })
+
+    def wait_card_balance(self, card_id: str, target: float, *,
+                          timeout: float = 60.0, interval: float = 3.0) -> float:
+        """等卡余额涨到目标值。充值是异步的，同步响应只表示受理。"""
+        deadline = time.time() + timeout
+        last = 0.0
+        while time.time() < deadline:
+            last = self._available(self.card_balance(card_id))
+            if last >= target:
+                return last
+            time.sleep(interval)
+        return last
+
     @staticmethod
     def _is_active(card: dict) -> bool:
         """卡状态是否可用。接口返回字符串 'ACTIVE'，老文档写的是数字 1，两种都认。"""
