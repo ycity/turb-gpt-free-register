@@ -153,6 +153,7 @@
     .status-partial_success { color: #9a6700; background: #fff7d6; }
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
+    .status-warn { color: var(--amber); background: #fff7e6; }
     .extract-link-cell {
       display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
       margin-top: 4px; max-width: 100%;
@@ -4577,7 +4578,9 @@ function _autoPayBindLive() {
 
 function _autoPaySetStatus(kind, html) {
   const el = $('#autoPayStatus');
-  el.className = kind === 'ok' ? 'status-success' : (kind === 'error' ? 'status-failed' : '');
+  el.className = kind === 'ok' ? 'status-success'
+    : (kind === 'error' ? 'status-failed'
+    : (kind === 'warn' ? 'status-warn' : ''));
   el.innerHTML = html;
   el.classList.remove('hidden');
 }
@@ -4892,7 +4895,11 @@ async function openAutoPay(id) {
     if (!ok && savedUrl) {
       const when = acc.team_checkout_created_at || '未知时间';
       let probe = null;
-      _autoPaySetStatus('', '正在检查上一条长链是否还能用…');
+      // 探活要开真浏览器、还可能逐个试备用出口，实测近 30 秒。必须先把窗开出来
+      // 并给出进度，否则点完按钮界面毫无动静，看起来就是"点了没反应"。
+      _autoPayOpenModal(id, { setup: true });
+      $('#autoPaySessionId').value = '';
+      _autoPaySetStatus('', '上一单支付失败，正在检查已生成的长链是否还能用（最多约 30 秒）…');
       try {
         const pr = await fetch('/api/pay/probe-link?account_id=' + encodeURIComponent(id));
         probe = await pr.json();
@@ -4906,8 +4913,6 @@ async function openAutoPay(id) {
                     `已生成的长链（${when}）经检查仍然有效，优惠码已消耗。${switched}\n\n` +
                     `点「确定」复用这条长链，不再消耗新的优惠码（推荐）。\n` +
                     `点「取消」查看上一单结果。`)) {
-          _autoPayOpenModal(id, { setup: true });
-          $('#autoPaySessionId').value = '';
           await _autoPayLoadSetup();
           _autoPayUseExistingLink(savedUrl, when, probe.switched ? probe.proxy : '');
           return;
@@ -4932,10 +4937,8 @@ async function openAutoPay(id) {
         _autoPayRender(finished);
         return;
       }
-      _autoPayOpenModal(id, { setup: true });
-      $('#autoPaySessionId').value = '';
       await _autoPayLoadSetup();
-      _autoPaySetStatus('warn', `上一条长链已失效（${why}），本次会生成新的长链并消耗一个优惠码。`);
+      _autoPaySetStatus('warn', `上一条长链不可用（${why}），本次会生成新的长链并消耗一个优惠码。`);
       return;
     }
     const okTxt = ok ? '已完成' : finished.state;
