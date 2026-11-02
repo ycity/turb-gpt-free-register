@@ -217,29 +217,56 @@ class VccClient:
                 return row
         return data
 
+    @staticmethod
+    def _is_active(card: dict) -> bool:
+        """卡状态是否可用。接口返回字符串 'ACTIVE'，老文档写的是数字 1，两种都认。"""
+        status = card.get("cardStatus")
+        if isinstance(status, str):
+            return status.strip().upper() == "ACTIVE"
+        try:
+            return int(status or 0) == 1
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _available(row: dict) -> float:
+        """从余额行里取可用额度。实测返回的是 balance 字段。"""
+        for name in ("availableBalance", "availableAmount", "balance"):
+            value = row.get(name)
+            if value in (None, ""):
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
     def pick_card(self, *, card_id: str = "", min_balance: float = 0.0) -> dict:
-        """选一张可用卡。cardStatus==1 表示正常。"""
+        """选一张可用卡。"""
         cards = self.list_cards(card_id=card_id)
         if not cards:
             raise VccError(f"VCC 未查询到可用卡{f'（cardId={card_id}）' if card_id else ''}")
         if card_id:
             card = cards[0]
-            if int(card.get("cardStatus", 0) or 0) != 1:
+            if not self._is_active(card):
                 raise VccError(f"卡 {card_id} 状态不可用：cardStatus={card.get('cardStatus')}")
             return card
 
-        usable = [c for c in cards if int(c.get("cardStatus", 0) or 0) == 1]
+        usable = [c for c in cards if self._is_active(c)]
         if not usable:
             raise VccError("所有卡状态均不可用")
         if min_balance <= 0:
             return usable[0]
         for card in usable:
             cid = str(card.get("cardId") or "")
-            try:
-                avail = float(self.card_balance(cid).get("availableAmount") or 0.0)
-            except Exception:  # noqa: BLE001 - 查不到余额时不卡住选卡
-                logger.debug("[vcc] 卡 %s 余额查询失败，跳过余额筛选", cid)
-                return card
+            # 卡行自带 balance，优先用它，省一次请求
+            avail = self._available(card)
+            if not avail:
+                try:
+                    avail = self._available(self.card_balance(cid))
+                except VccError:
+                    logger.debug("[vcc] 卡 %s 余额查询失败，跳过该卡", cid)
+                    continue
             if avail >= min_balance:
                 return card
         raise VccError(f"没有可用余额 >= {min_balance} 的卡")

@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     ports:
       - "5002:5000"
+      # noVNC：远程观看并直接操作支付页面的浏览器。
+      # 只绑在本机回环，外部要用请走 SSH 端口转发，别直接暴露到公网。
+      - "127.0.0.1:6080:6080"
     volumes:
       - ./turb.sqlite3:/app/turb.sqlite3
       - ./logs:/app/logs
@@ -18,5 +21,15 @@ services:
       - ./config:/app/config
       - ./webui:/app/webui
       - ./main.py:/app/main.py
+      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh:ro
     environment:
       - PYTHONUNBUFFERED=1
+      # 浏览器装在挂载的 cache 卷里，容器重建也不用重新下载。
+      # 不指向 /root/.cache：那里没有挂载，重启就丢。
+      - PLAYWRIGHT_BROWSERS_PATH=/app/cache/ms-playwright
+      # 有头 Chrome 用的虚拟显示：Stripe 提交时会弹 hCaptcha，
+      # 无头浏览器几乎必被拦，必须有头 + 真人远程点击才过得去。
+      - DISPLAY=:99
+    # hCaptcha 等复杂页面在默认 64MB 共享内存下会崩，Chrome 需要更大的 /dev/shm
+    shm_size: 1gb
+    entrypoint: ["/bin/sh", "/app/docker-entrypoint.sh"]

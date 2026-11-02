@@ -35,9 +35,9 @@ VCC_API_TIMEOUT = 30.0
 VCC_BILLING_COUNTRY = "US"
 VCC_BILLING_STATE = "AK"
 VCC_BILLING_CITY = "Anchorage"
-VCC_BILLING_LINE1 = "11901 Northern Raven Dr"
+VCC_BILLING_LINE1 = "750 West Dimond Boulevard"
 VCC_BILLING_LINE2 = ""
-VCC_BILLING_POSTAL = "99516"
+VCC_BILLING_POSTAL = "99515"
 
 # 持卡人姓名来源：
 #   holder = 从 cardholders/query 取（按 VCC_HOLDER_ID，未指定则取 merchantDefault，
@@ -97,6 +97,41 @@ VCC_KEEP_OPEN = False
 # 交还窗口后最多等多久（秒）。期间会阻塞调用方，WebUI 流程里慎用。
 VCC_KEEP_OPEN_TIMEOUT = 1800.0
 
+# ---- WebUI 会话式支付 ----
+# 浏览器跑在服务端，填好表单后截图给人看，人点确认后由程序提交。
+# 会话最长存活时间（秒）：等待确认和等待 3DS 验证码都用这个上限。
+VCC_SESSION_TIMEOUT = 900.0
+# 点下提交后等页面落定的上限（秒）。Stripe 的处理中可能持续数分钟，
+# 超时只报告"结果未知"，绝不重复提交。
+VCC_SUBMIT_TIMEOUT = 180.0
+
+# 服务端浏览器用有头模式（需要 Xvfb 虚拟显示）。
+# 提交时 Stripe 可能弹 hCaptcha，无头浏览器几乎必被拦；有头 + 真人远程点击
+# 才过得去。关掉则退回无头，适合只填表不提交的场景。
+VCC_SERVER_HEADED = True
+# Xvfb 显示号，容器启动时会在该编号上拉起虚拟显示。
+VCC_DISPLAY = ":99"
+# 远程交互：把服务端浏览器画面推到网页上，由人直接点击操作。
+# 人机验证只认真实交互环境，答案无法从别处搬运，所以必须让人操作这个浏览器。
+VCC_REMOTE_CONTROL = True
+# 推帧间隔（秒）。越小越跟手，但占带宽和 CPU。
+VCC_FRAME_INTERVAL = 0.6
+
+# 用 CloakBrowser 代替裸 Playwright 打开支付页。
+# 裸 Chromium 会被 Stripe 风控和发卡行 3DS 判成自动化环境，表现为
+# "We are unable to authenticate your payment method"。CloakBrowser 带指纹
+# 伪装、真实鼠标轨迹和按出口 IP 匹配的时区语言，注册流程靠它过 Cloudflare。
+VCC_USE_CLOAK = True
+# 拟人化鼠标/输入轨迹。人机验证和 3DS 风控都会看这个。
+VCC_CLOAK_HUMANIZE = True
+# 按出口 IP 自动匹配时区、语言、WebRTC，避免代理在美国而浏览器报日本时区。
+VCC_CLOAK_GEOIP = True
+# 指纹种子，留空则每次随机。填固定值可让同一张卡每次呈现同一台设备。
+VCC_CLOAK_SEED = ""
+# 填表和提交是否走账号注册时用的代理。关掉则用服务器出口直连。
+# 注意：取卡号走 VCC 接口，始终直连以满足 IP 白名单，不受此开关影响。
+VCC_USE_ACCOUNT_PROXY = True
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'VCC_AUTO_PAY_ENABLED': 'bool',
@@ -134,4 +169,15 @@ apply_env_overrides(globals(), {
     'VCC_BROWSER_PATH': 'str',
     'VCC_KEEP_OPEN': 'bool',
     'VCC_KEEP_OPEN_TIMEOUT': 'float',
+    'VCC_SESSION_TIMEOUT': 'float',
+    'VCC_SUBMIT_TIMEOUT': 'float',
+    'VCC_SERVER_HEADED': 'bool',
+    'VCC_DISPLAY': 'str',
+    'VCC_REMOTE_CONTROL': 'bool',
+    'VCC_FRAME_INTERVAL': 'float',
+    'VCC_USE_CLOAK': 'bool',
+    'VCC_CLOAK_HUMANIZE': 'bool',
+    'VCC_CLOAK_GEOIP': 'bool',
+    'VCC_CLOAK_SEED': 'str',
+    'VCC_USE_ACCOUNT_PROXY': 'bool',
 })

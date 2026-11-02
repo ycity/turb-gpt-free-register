@@ -174,21 +174,130 @@ def _screenshot(page: Any, out_dir: Path, name: str, sink: list[str]) -> None:
         logger.debug("[vcc-pay] 截图失败：%s", exc)
 
 
+def _scroll_into_view(page: Any, selector: str) -> None:
+    """把元素滚进视口。
+
+    CloakBrowser 的 humanize 会把 fill 变成"移鼠标 + 点击聚焦 + 逐字输入"，
+    元素不在视口里就点不到，表现为 fill 超时；裸 Playwright 直接写 DOM 所以
+    不受影响。这里统一先滚动，两种浏览器都安全。
+    """
+    try:
+        page.locator(selector).first.scroll_into_view_if_needed(timeout=5000)
+    except Exception:  # noqa: BLE001 - 滚不动就让后续操作自己报错
+        pass
+
+
+def _fill_via_dom(page: Any, selector: str, value: str) -> bool:
+    """绕过指针直接写入并派发事件。
+
+    humanize 模式下相邻控件（例如国家下拉）可能盖住输入框拦截指针事件，
+    真实点击永远落不上去。此时退回 DOM 写入：值和事件都是真的，只是少了
+    鼠标轨迹，对这种普通文本框没有风控意义。
+    """
+    try:
+        return bool(page.evaluate(
+            """([sel, val]) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                const proto = el instanceof HTMLTextAreaElement
+                    ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, val);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }""", [selector, value]))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _digits(value: str) -> str:
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _value_matches(page: Any, selector: str, expected: str) -> bool:
+    """校验输入框里的值是否就是我们想填的。
+
+    Stripe 会给卡号自动插空格，所以只比数字；humanize 逐字输入时会和这个
+    自动格式化抢光标，导致字符顺序错乱甚至丢位，必须填完回读确认。
+    """
+    try:
+        actual = page.input_value(selector, timeout=3000) or ""
+    except Exception:  # noqa: BLE001
+        return False
+    want = _digits(expected)
+    if want:
+        return _digits(actual) == want
+    return actual.strip() == str(expected).strip()
+
+
 def _fill(page: Any, selector: str, value: str, *, label: str,
-          filled: dict[str, bool], required: bool = True) -> None:
+          filled: dict[str, bool], required: bool = True,
+          exact: bool = False) -> None:
+    """填一个输入框。
+
+    exact=True 时填完会回读校验，值对不上就改用 DOM 直写。卡号、有效期、
+    CVV 这类字段差一位就作废，不能只看"没抛异常"。
+    """
     if not value:
         if required:
             raise VccPayError(f"{label} 为空，无法填写")
         filled[label] = False
         return
     try:
+        _scroll_into_view(page, selector)
         page.fill(selector, value)
-        filled[label] = True
+        if not exact or _value_matches(page, selector, value):
+            filled[label] = True
+            return
+        logger.warning("[vcc-pay] %s 填写后校验不符，改用 DOM 直写", label)
     except Exception as exc:  # noqa: BLE001
-        if required:
-            raise VccPayError(f"填写 {label} 失败：{type(exc).__name__}") from exc
-        logger.debug("[vcc-pay] 选填项 %s 跳过：%s", label, exc)
-        filled[label] = False
+        logger.debug("[vcc-pay] %s 常规填写失败，改走 DOM：%s", label, type(exc).__name__)
+
+    if _fill_via_dom(page, selector, value):
+        if exact and not _value_matches(page, selector, value):
+            if required:
+                raise VccPayError(f"填写 {label} 后校验不符，已停止以免提交错误信息")
+            filled[label] = False
+            return
+        logger.info("[vcc-pay] %s 改用 DOM 写入成功", label)
+        filled[label] = True
+        return
+    if required:
+        raise VccPayError(f"填写 {label} 失败：指针被遮挡且 DOM 写入未成功")
+    filled[label] = False
+
+
+def _select_via_dom(page: Any, selector: str, value: str) -> bool:
+    """绕过指针直接选中下拉项。
+
+    和 _fill_via_dom 同理：humanize 要真实点击，被遮挡就永远点不上。
+    按 value 找不到时退而按可见文本匹配。
+    """
+    try:
+        return bool(page.evaluate(
+            """([sel, val]) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                const want = String(val).trim().toLowerCase();
+                let hit = -1;
+                for (let i = 0; i < el.options.length; i++) {
+                    const o = el.options[i];
+                    if (String(o.value).trim().toLowerCase() === want) { hit = i; break; }
+                }
+                if (hit < 0) {
+                    for (let i = 0; i < el.options.length; i++) {
+                        if (el.options[i].text.trim().toLowerCase() === want) { hit = i; break; }
+                    }
+                }
+                if (hit < 0) return false;
+                el.selectedIndex = hit;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }""", [selector, value]))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _select(page: Any, selector: str, value: str, *, label: str,
@@ -198,20 +307,27 @@ def _select(page: Any, selector: str, value: str, *, label: str,
         if required:
             raise VccPayError(f"{label} 为空，无法选择")
         return
-    try:
-        page.select_option(selector, value=value)
-        filled[label] = True
-    except Exception:
+    for attempt in (
+        lambda: page.select_option(selector, value=value),
+        lambda: page.select_option(selector, label=value),
+    ):
         try:
-            page.select_option(selector, label=value)
+            _scroll_into_view(page, selector)
+            attempt()
             filled[label] = True
             return
-        except Exception as exc:  # noqa: BLE001
-            if required:
-                raise VccPayError(
-                    f"选择 {label}={value} 失败，页面可能不接受该取值") from exc
-            logger.debug("[vcc-pay] 选填下拉 %s 跳过：%s", label, exc)
-            filled[label] = False
+        except Exception:  # noqa: BLE001
+            continue
+
+    if _select_via_dom(page, selector, value):
+        logger.info("[vcc-pay] %s 改用 DOM 选中成功（指针被遮挡）", label)
+        filled[label] = True
+        return
+    if required:
+        raise VccPayError(
+            f"选择 {label}={value} 失败，页面可能不接受该取值")
+    logger.debug("[vcc-pay] 选填下拉 %s 跳过", label)
+    filled[label] = False
 
 
 def _check(page: Any, selector: str, *, label: str,
@@ -220,13 +336,35 @@ def _check(page: Any, selector: str, *, label: str,
         if page.is_checked(selector):
             filled[label] = True
             return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _scroll_into_view(page, selector)
         page.check(selector)
         filled[label] = True
-    except Exception as exc:  # noqa: BLE001
-        if required:
-            raise VccPayError(f"勾选 {label} 失败：{type(exc).__name__}") from exc
-        logger.debug("[vcc-pay] 选填勾选 %s 跳过：%s", label, exc)
-        filled[label] = False
+        return
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 条款勾选是提交的前提，被遮挡时也要能勾上
+    try:
+        ok = bool(page.evaluate(
+            """(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return false;
+                if (!el.checked) { el.click(); }
+                return !!el.checked;
+            }""", selector))
+    except Exception:  # noqa: BLE001
+        ok = False
+    if ok:
+        logger.info("[vcc-pay] %s 改用 DOM 勾选成功（指针被遮挡）", label)
+        filled[label] = True
+        return
+    if required:
+        raise VccPayError(f"勾选 {label} 失败：指针被遮挡且 DOM 勾选未成功")
+    logger.debug("[vcc-pay] 选填勾选 %s 跳过", label)
+    filled[label] = False
 
 
 def read_total(page: Any) -> tuple[str, float | None]:
@@ -254,15 +392,28 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
 
     filled = result.filled
     _fill(page, SEL_EMAIL, email, label="email", filled=filled)
-    _fill(page, SEL_CARD_NUMBER, card["number"], label="card_number", filled=filled)
+    # 支付三要素差一位就作废，且 Stripe 会自动插空格与逐字输入抢光标，必须回读校验
+    _fill(page, SEL_CARD_NUMBER, card["number"], label="card_number",
+          filled=filled, exact=True)
     _fill(page, SEL_CARD_EXPIRY, f"{card['exp_month']} / {card['exp_year']}",
-          label="card_expiry", filled=filled)
-    _fill(page, SEL_CARD_CVC, card["cvc"], label="card_cvc", filled=filled)
+          label="card_expiry", filled=filled, exact=True)
+    _fill(page, SEL_CARD_CVC, card["cvc"], label="card_cvc",
+          filled=filled, exact=True)
     _fill(page, SEL_BILLING_NAME, billing["name"], label="billing_name", filled=filled)
 
     # 国家必须先选：省份下拉按国家重新渲染，顺序反了会选不到州。
+    # 重渲染期间下拉会盖住下方输入框拦截指针，humanize 模式下点不进去，
+    # 所以等省份下拉真正重建完再填地址。
     _select(page, SEL_COUNTRY, billing["country"], label="billing_country", filled=filled)
-    page.wait_for_timeout(400)
+    try:
+        page.wait_for_function(
+            """() => {
+                const s = document.querySelector('select#billingAdministrativeArea');
+                return !s || s.options.length > 1;
+            }""", timeout=8000)
+    except Exception:  # noqa: BLE001 - 等不到就按原节奏继续
+        pass
+    page.wait_for_timeout(800)
 
     _fill(page, SEL_LINE1, billing["line1"], label="billing_line1", filled=filled)
     _fill(page, SEL_LINE2, billing.get("line2", ""), label="billing_line2",
@@ -288,7 +439,7 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
         filled["billing_state"] = False
 
     _fill(page, SEL_POSTAL, billing.get("postal", ""), label="billing_postal",
-          filled=filled, required=False)
+          filled=filled, required=False, exact=True)
 
     if getattr(cfg, "VCC_SAVE_PAYMENT_METHOD", False):
         _check(page, SEL_SAVE_PM, label="save_payment_method",
@@ -297,9 +448,43 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
     if getattr(cfg, "VCC_ACCEPT_TERMS", True):
         _check(page, SEL_TERMS, label="accept_terms", filled=filled, required=True)
 
+    # 最后复核支付三要素：中间任何一步的重渲染都可能把已填内容冲掉，
+    # 带着错卡号提交会被判成无效卡，白费一次尝试。
+    for selector, want, name in (
+        (SEL_CARD_NUMBER, card["number"], "卡号"),
+        (SEL_CARD_CVC, card["cvc"], "CVV"),
+    ):
+        if not _value_matches(page, selector, want):
+            if not _fill_via_dom(page, selector, want) or \
+                    not _value_matches(page, selector, want):
+                raise VccPayError(f"{name}最终校验不符，已停止以免提交错误卡信息")
+            logger.warning("[vcc-pay] %s 最终复核时重写了一次", name)
+
     # 地址落定后页面会重算税，等它稳下来再读金额
     page.wait_for_timeout(1500)
     _screenshot(page, out_dir, "filled", result.screenshots)
+
+
+def build_proxy_option(proxy: str) -> dict[str, str] | None:
+    """把代理串转成 Playwright 的 proxy 参数。
+
+    Chromium 不认 server 里内嵌的 user:pass，必须拆成独立字段，否则所有请求
+    都会静默卡住直到超时（表现为 Page.goto timeout，而不是认证失败）。
+    """
+    proxy = (proxy or "").strip()
+    if not proxy:
+        return None
+    from urllib.parse import urlparse
+
+    parsed = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+    if not parsed.hostname:
+        return {"server": proxy}
+    option = {"server": f"{parsed.scheme or 'http'}://{parsed.hostname}"
+                        f"{':' + str(parsed.port) if parsed.port else ''}"}
+    if parsed.username:
+        option["username"] = parsed.username
+        option["password"] = parsed.password or ""
+    return option
 
 
 def pay_checkout(checkout_url: str, *, email: str, proxy: str = "",
@@ -384,7 +569,7 @@ def pay_checkout(checkout_url: str, *, email: str, proxy: str = "",
             "需要有头浏览器，但未配置 VCC_BROWSER_CHANNEL / VCC_BROWSER_PATH；"
             "Playwright 自带内核为 headless shell，无法显示窗口")
     if proxy:
-        launch["proxy"] = {"server": proxy}
+        launch["proxy"] = build_proxy_option(proxy)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(**launch)

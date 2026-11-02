@@ -24,11 +24,19 @@ RUN pip install --no-cache-dir \
     "playwright>=1.49.0" \
     "playwright-stealth>=2.0.3" \
     "selenium>=4.20.0" && \
-    python -m playwright install-deps chromium
+    python -m playwright install-deps chromium && \
+    pip install --no-cache-dir websockify && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends xvfb x11vnc novnc && \
+    rm -rf /var/lib/apt/lists/*
+
+# 浏览器装进已挂载的 cache 目录，docker restart 后不丢。
+# /root/.cache 没有挂载，装那里重启即失效。
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/cache/ms-playwright
 
 COPY . .
 
-RUN mkdir -p /app/data /app/logs /app/run
+RUN mkdir -p /app/data /app/logs /app/run /app/cache
 
 EXPOSE 5000
 

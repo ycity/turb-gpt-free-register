@@ -1579,7 +1579,7 @@
 
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
-    #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden) {
+    #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -1595,6 +1595,12 @@
       display: flex; align-items: flex-start; gap: 12px;
       padding: 20px 20px 14px; border-bottom: 1px solid #ebeef5;
     }
+    /* 自动支付要放下 1280x900 的实时画面，比默认弹窗宽 */
+    #autoPayModal .outlook-import-dialog {
+      width: min(1040px, 100%); max-height: calc(100vh - 32px);
+    }
+    #autoPayModal .outlook-import-body { overflow: auto; }
+    #autoPayShot { user-select: none; -webkit-user-drag: none; }
     .outlook-import-head-main { min-width: 0; flex: 1; }
     .outlook-import-head h3 {
       margin: 0; font-size: 18px; font-weight: 700; color: #303133; line-height: 1.3;
@@ -2694,11 +2700,12 @@
           <thead>
             <tr>
               <th style="width:60px;">ID</th>
-              <th style="width:220px;">优惠码</th>
+              <th style="width:200px;">优惠码</th>
               <th style="width:90px;">状态</th>
-              <th style="width:180px;">绑定账号</th>
-              <th style="width:160px;">导入时间</th>
-              <th>最后状态/错误</th>
+              <!-- 邮箱约 29 字符，table-layout:fixed 下宽度是硬上限，不会按内容撑开 -->
+              <th style="width:330px;">绑定账号</th>
+              <th style="width:150px;">导入时间</th>
+              <th style="width:200px;">最后状态/错误</th>
             </tr>
           </thead>
           <tbody id="promosBodyV2"></tbody>
@@ -2955,6 +2962,85 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelTeamCheckout">关闭</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitTeamCheckout">立即生成长链接</button>
+    </div>
+  </div>
+</div>
+<div id="autoPayModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="autoPayTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(900px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="autoPayTitle">自动支付</h3>
+        <p id="autoPayHint">服务端会生成长链、用该账号注册时的代理填好支付表单，停在提交前等你确认。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseAutoPay" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <input type="hidden" id="autoPayAccountId">
+      <input type="hidden" id="autoPaySessionId">
+
+      <div id="autoPaySetup">
+        <label class="outlook-import-field">
+          <span>支付卡片 <small class="muted" id="autoPayCardHint">加载中…</small></span>
+          <select id="autoPayCardSelect"></select>
+        </label>
+
+        <label class="outlook-import-field">
+          <span>账单地址</span>
+          <select id="autoPayAddrSelect">
+            <option value="">— 手动填写 —</option>
+          </select>
+        </label>
+
+        <div class="team-checkout-grid">
+          <label class="outlook-import-field"><span>国家(两位)</span><input type="text" id="autoPayCountry" maxlength="2" placeholder="US"></label>
+          <label class="outlook-import-field"><span>州/省</span><input type="text" id="autoPayState" placeholder="AK"></label>
+          <label class="outlook-import-field"><span>城市</span><input type="text" id="autoPayCity" placeholder="Anchorage"></label>
+          <label class="outlook-import-field"><span>邮编</span><input type="text" id="autoPayPostal" placeholder="99515"></label>
+        </div>
+        <label class="outlook-import-field"><span>街道地址</span><input type="text" id="autoPayLine1" placeholder="750 West Dimond Boulevard"></label>
+        <label class="outlook-import-field"><span>地址第二行（可选）</span><input type="text" id="autoPayLine2"></label>
+        <label class="outlook-import-field"><span>持卡人姓名（留空则用卡的持卡人）</span><input type="text" id="autoPayName" placeholder="ONeal Di"></label>
+
+        <label class="team-checkout-check">
+          <input type="checkbox" id="autoPaySaveAddr" checked>
+          <span>保存这个账单地址，下次可直接从上面的下拉框选择</span>
+        </label>
+      </div>
+
+      <div id="autoPayStatus" class="hidden"></div>
+      <div id="autoPaySummary" class="hidden" style="display:flex;gap:16px;flex-wrap:wrap;margin:8px 0;font-size:13px;">
+        <span>应付：<b id="autoPayAmount">-</b></span>
+        <span>期望：<b id="autoPayExpected">-</b></span>
+        <span>卡号：<b id="autoPayCard">-</b></span>
+      </div>
+      <div id="autoPayOtpBox" class="hidden">
+        <label class="outlook-import-field">
+          <span>3DS 验证码（未能自动取到，请看下方截图后输入）</span>
+          <input type="text" id="autoPayOtpInput" maxlength="10" autocomplete="off" inputmode="numeric">
+        </label>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAutoPaySubmitOtp">提交验证码</button>
+      </div>
+      <div id="autoPayShotBox" class="hidden" style="margin-top:8px;">
+        <div id="autoPayLiveHint" class="hidden" style="margin-bottom:6px;padding:8px;background:#fff6e5;border:1px solid #f0c36d;border-radius:6px;font-size:13px;">
+          页面需要你本人操作（例如人机验证）。<b>下面的画面是实时的，直接点它即可</b>，完成后会自动继续。
+          <button type="button" class="jobs-tb-btn" id="btnAutoPayHumanDone" style="margin-left:8px;">我已完成</button>
+          <div id="autoPayVncTip" class="hidden" style="margin-top:8px;padding:8px;background:#eef6ff;border:1px solid #a9c9f0;border-radius:6px;line-height:1.7;">
+            <b>人机验证认鼠标轨迹，截图点击可能过不了。</b>建议用远程画面直接操作：
+            <div style="margin:6px 0;">1. 本机执行（保持窗口开着）：
+              <code id="autoPayVncCmd" style="display:block;margin:4px 0;padding:6px;background:#0f172a;color:#e2e8f0;border-radius:4px;user-select:all;">ssh -N -L 16080:127.0.0.1:6080 Isvoro-li-HKCN2-Std</code>
+              <small class="muted">本地用 16080：Windows 保留了 6050-6149，直接转发 6080 会 Permission denied。</small>
+            </div>
+            <div>2. 打开 <a href="http://127.0.0.1:16080/vnc.html?autoconnect=1&resize=scale" target="_blank" rel="noopener noreferrer">http://127.0.0.1:16080/vnc.html</a> 在真实画面里完成验证</div>
+          </div>
+        </div>
+        <img id="autoPayShot" alt="支付表单截图" draggable="false"
+             style="width:100%;border:1px solid var(--line,#ddd);border-radius:6px;display:block;">
+      </div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnAutoPayCancel">取消并关闭</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAutoPayStart">开始填表</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary hidden" id="btnAutoPayConfirm" disabled>确认支付</button>
     </div>
   </div>
 </div>
@@ -4202,9 +4288,11 @@ async function loadPromosList() {
         <td>${esc(item.id)}</td>
         <td><strong class="mono" style="color:#2563eb;">${esc(item.code)}</strong></td>
         <td><span class="pill ${stCls}">${stTxt}</span></td>
-        <td>${esc(item.account_email || (item.account_id ? '#' + item.account_id : '-'))}</td>
+        <td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+            title="${esc(item.account_email || '')}">${esc(item.account_email || (item.account_id ? '#' + item.account_id : '-'))}</td>
         <td style="font-size:12px; color:#64748b;">${esc((item.created_at || '').slice(0, 19).replace('T', ' '))}</td>
-        <td style="font-size:12px; color:#ef4444;">${esc(item.last_error || '-')}</td>
+        <td style="font-size:12px; color:#ef4444; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+            title="${esc(item.last_error || '')}">${esc(item.last_error || '-')}</td>
       </tr>`;
     }).join('');
   } catch(e) {
@@ -4344,6 +4432,450 @@ function generateTeamLink(id, btn) {
   openTeamCheckoutModal(id);
 }
 
+let _autoPayTimer = null;
+let _autoPayViewport = { w: 1280, h: 900 };
+let _autoPayLive = false;
+
+async function _autoPaySend(kind, extra) {
+  const sid = $('#autoPaySessionId').value;
+  if (!sid || !_autoPayLive) return;
+  try {
+    await fetch(`/api/pay/${encodeURIComponent(sid)}/input`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ kind }, extra || {}))
+    });
+  } catch (err) { /* 单次操作失败不打断 */ }
+}
+
+function _autoPayCoords(ev) {
+  // 图片按宽度缩放显示，点击坐标要换算回浏览器真实视口
+  const img = $('#autoPayShot');
+  const r = img.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  return {
+    x: Math.round((ev.clientX - r.left) / r.width * _autoPayViewport.w),
+    y: Math.round((ev.clientY - r.top) / r.height * _autoPayViewport.h)
+  };
+}
+
+function _autoPayBindLive() {
+  const img = $('#autoPayShot');
+  if (!img || img._liveBound) return;
+  img._liveBound = true;
+
+  img.addEventListener('click', (ev) => {
+    if (!_autoPayLive) return;
+    const p = _autoPayCoords(ev);
+    if (p) _autoPaySend('click', p);
+  });
+  img.addEventListener('wheel', (ev) => {
+    if (!_autoPayLive) return;
+    ev.preventDefault();
+    _autoPaySend('scroll', { dx: ev.deltaX, dy: ev.deltaY });
+  }, { passive: false });
+
+  document.addEventListener('keydown', (ev) => {
+    if (!_autoPayLive) return;
+    if ($('#autoPayModal').classList.contains('hidden')) return;
+    const tag = (ev.target && ev.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    if (ev.key.length === 1) { _autoPaySend('text', { text: ev.key }); ev.preventDefault(); }
+    else if (['Enter','Backspace','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(ev.key)) {
+      _autoPaySend('key', { key: ev.key }); ev.preventDefault();
+    }
+  });
+}
+
+function _autoPaySetStatus(kind, html) {
+  const el = $('#autoPayStatus');
+  el.className = kind === 'ok' ? 'status-success' : (kind === 'error' ? 'status-failed' : '');
+  el.innerHTML = html;
+  el.classList.remove('hidden');
+}
+
+function _autoPayStop() {
+  if (_autoPayTimer) { clearInterval(_autoPayTimer); _autoPayTimer = null; }
+}
+
+function _autoPayFinish(label) {
+  // 会话到终态：停轮询、收掉交互入口，把底部按钮换成单纯的关闭，
+  // 否则画面停在最后一帧又还摆着「确认支付」，看着像卡住了。
+  _autoPayStop();
+  _autoPayLive = false;
+  $('#autoPayLiveHint').classList.add('hidden');
+  $('#autoPayOtpBox').classList.add('hidden');
+  $('#autoPayShot').style.cursor = 'default';
+  const ok = $('#btnAutoPayConfirm');
+  if (ok) { ok.disabled = true; ok.classList.add('hidden'); }
+  const start = $('#btnAutoPayStart');
+  if (start) start.classList.add('hidden');
+  const cancel = $('#btnAutoPayCancel');
+  if (cancel) {
+    cancel.textContent = label || '关闭';
+    cancel.classList.add('jobs-tb-btn--primary');
+    cancel.dataset.finished = '1';
+  }
+}
+
+function _autoPayRender(s) {
+  $('#autoPaySessionId').value = s.session_id || '';
+  const amt = (s.amount === null || s.amount === undefined) ? '-' : `${esc(s.currency || '')} ${Number(s.amount).toFixed(2)}`;
+  $('#autoPayAmount').textContent = amt;
+  $('#autoPayExpected').textContent = s.expected ? Number(s.expected).toFixed(2) : '不校验';
+  $('#autoPayCard').textContent = s.card_mask || '-';
+  $('#autoPaySummary').classList.toggle('hidden', !s.card_mask && s.amount === null);
+
+  if (s.viewport) _autoPayViewport = { w: s.viewport.w, h: s.viewport.h };
+  if (s.screenshot) {
+    $('#autoPayShot').src = 'data:image/png;base64,' + s.screenshot;
+    $('#autoPayShotBox').classList.remove('hidden');
+    _autoPayBindLive();
+  }
+
+  const wasLive = _autoPayLive;
+  _autoPayLive = !!s.needs_human;
+  $('#autoPayLiveHint').classList.toggle('hidden', !_autoPayLive);
+  $('#autoPayShot').style.cursor = _autoPayLive ? 'crosshair' : 'default';
+  // 刚进入需要人操作的状态时，把画面滚到眼前，别让人以为没反应
+  if (_autoPayLive && !wasLive) {
+    try { $('#autoPayLiveHint').scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch (e) {}
+    fetch('/api/pay/vnc-status').then(r => r.json()).then(v => {
+      $('#autoPayVncTip').classList.toggle('hidden', !(v && v.available));
+    }).catch(() => {});
+  }
+
+  $('#autoPayOtpBox').classList.toggle('hidden', s.state !== 'awaiting_otp');
+  $('#btnAutoPayConfirm').disabled = !s.can_confirm;
+
+  if (s.state === 'preparing') {
+    _autoPaySetStatus('', '正在生成长链并填写表单，请稍候…');
+  } else if (s.state === 'awaiting_confirm') {
+    if (s.gate_error) {
+      _autoPaySetStatus('error', '金额闸门未通过，已禁止提交：' + esc(s.gate_error));
+    } else {
+      _autoPaySetStatus('ok', `表单已填好，应付 ${amt}。核对无误后点「确认支付」，<b>点击后会真实扣款</b>。`);
+    }
+  } else if (s.state === 'submitting') {
+    _autoPaySetStatus('', esc(s.message || '正在提交…'));
+  } else if (s.state === 'awaiting_human') {
+    _autoPaySetStatus('', '<b>需要你操作：</b>' + esc(s.message || ''));
+  } else if (s.state === 'awaiting_otp') {
+    _autoPaySetStatus('', '需要 3DS 验证码：' + esc(s.message || ''));
+  } else if (s.state === 'done') {
+    _autoPaySetStatus('ok',
+      `<b>支付已完成</b>：${esc(s.message || '已提交')}。<br>` +
+      `<small class="muted">结果以 VCC 后台的扣款记录为准；页面画面停在提交后的最后一帧，可以直接关闭。</small>`);
+    _autoPayFinish('支付完成，关闭');
+  } else if (s.state === 'failed' || s.state === 'cancelled') {
+    _autoPaySetStatus('error', esc(s.message || s.state));
+    _autoPayFinish('关闭');
+  }
+}
+
+async function _autoPayPoll() {
+  const sid = $('#autoPaySessionId').value;
+  if (!sid) return;
+  try {
+    const r = await fetch(`/api/pay/${encodeURIComponent(sid)}/status`);
+    const s = await r.json();
+    if (s.ok) {
+      _autoPayRender(s);
+      // 人工接管时画面要跟手，加快刷新
+      const want = s.needs_human ? 700 : 2000;
+      if (_autoPayTimer && _autoPayTimer._ms !== want) {
+        clearInterval(_autoPayTimer);
+        _autoPayTimer = setInterval(_autoPayPoll, want);
+        _autoPayTimer._ms = want;
+      }
+    }
+    else { _autoPaySetStatus('error', esc(s.error || '会话已失效')); _autoPayStop(); }
+  } catch (err) {
+    _autoPaySetStatus('error', '轮询失败：' + esc(err.message));
+  }
+}
+
+function _autoPayOpenModal(id, { setup = true } = {}) {
+  $('#autoPayAccountId').value = id || '';
+  $('#autoPayShotBox').classList.add('hidden');
+  $('#autoPaySummary').classList.add('hidden');
+  $('#autoPayOtpBox').classList.add('hidden');
+  $('#autoPayLiveHint').classList.add('hidden');
+  $('#autoPaySetup').classList.toggle('hidden', !setup);
+  $('#btnAutoPayStart').classList.toggle('hidden', !setup);
+  $('#btnAutoPayConfirm').classList.toggle('hidden', setup);
+  $('#btnAutoPayConfirm').disabled = true;
+  $('#btnAutoPayStart').disabled = false;
+  $('#btnAutoPayStart').textContent = '开始填表';
+  // 清掉上一次的终态痕迹，否则底部按钮会一直停在「支付完成，关闭」
+  const cancel = $('#btnAutoPayCancel');
+  cancel.textContent = '取消并关闭';
+  cancel.classList.remove('jobs-tb-btn--primary');
+  delete cancel.dataset.finished;
+  $('#autoPayModal').classList.remove('hidden');
+  // 弹窗是全屏遮罩，背景不该再跟着滚
+  document.body.style.overflow = 'hidden';
+}
+
+function _autoPayAddrForm() {
+  return {
+    country: $('#autoPayCountry').value.trim().toUpperCase(),
+    state: $('#autoPayState').value.trim(),
+    city: $('#autoPayCity').value.trim(),
+    line1: $('#autoPayLine1').value.trim(),
+    line2: $('#autoPayLine2').value.trim(),
+    postal: $('#autoPayPostal').value.trim(),
+    name: $('#autoPayName').value.trim(),
+  };
+}
+
+function _autoPayFillAddrForm(a) {
+  $('#autoPayCountry').value = a.country || '';
+  $('#autoPayState').value = a.state || '';
+  $('#autoPayCity').value = a.city || '';
+  $('#autoPayLine1').value = a.line1 || '';
+  $('#autoPayLine2').value = a.line2 || '';
+  $('#autoPayPostal').value = a.postal || '';
+  $('#autoPayName').value = a.name || '';
+}
+
+let _autoPayAddrCache = [];
+
+async function _autoPayLoadSetup() {
+  // 卡片：直接问 VCC，余额和状态都是实时的
+  const sel = $('#autoPayCardSelect');
+  sel.innerHTML = '<option value="">加载中…</option>';
+  try {
+    const r = await fetch('/api/pay/cards');
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '查询失败');
+    const cards = s.cards || [];
+    if (!cards.length) {
+      sel.innerHTML = '<option value="">（没有可用卡）</option>';
+      $('#autoPayCardHint').textContent = '未查询到卡片';
+    } else {
+      sel.innerHTML = cards.map(c =>
+        `<option value="${esc(c.card_id)}" data-holder="${esc(c.holder_id || '')}"
+                 ${c.usable ? '' : 'disabled'}>
+           ${esc(c.mask)} — ${c.balance.toFixed(2)} USD — ${esc(c.holder_name)}${c.usable ? '' : '（' + esc(c.status) + '）'}
+         </option>`).join('');
+      $('#autoPayCardHint').textContent = `共 ${cards.length} 张，已按余额排序`;
+    }
+  } catch (err) {
+    sel.innerHTML = '<option value="">（加载失败）</option>';
+    $('#autoPayCardHint').textContent = '加载失败：' + err.message;
+  }
+
+  // 地址簿
+  const addrSel = $('#autoPayAddrSelect');
+  try {
+    const r = await fetch('/api/pay/billing-addresses');
+    const s = await r.json();
+    _autoPayAddrCache = s.addresses || [];
+    addrSel.innerHTML = '<option value="">— 手动填写 —</option>' +
+      _autoPayAddrCache.map(a =>
+        `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join('');
+  } catch (err) { /* 地址簿是锦上添花，失败不挡流程 */ }
+
+  // 没存过地址时用配置里的默认值兜底
+  try {
+    const r = await fetch('/api/pay/defaults');
+    const s = await r.json();
+    if (s.ok) {
+      if (_autoPayAddrCache.length) {
+        addrSel.value = String(_autoPayAddrCache[0].id);
+        _autoPayFillAddrForm(_autoPayAddrCache[0]);
+      } else {
+        _autoPayFillAddrForm(s.billing || {});
+      }
+      if (s.card_id) {
+        const opt = [...$('#autoPayCardSelect').options].find(o => o.value === s.card_id);
+        if (opt) $('#autoPayCardSelect').value = s.card_id;
+      }
+    }
+  } catch (err) { /* 用表单现有值 */ }
+}
+
+async function openAutoPay(id) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id)) || {};
+
+  // 先看有没有进行中的会话：同时只允许一个，直接接回去，免得白白再消耗优惠码
+  let active = null;
+  let finished = null;
+  try {
+    const r = await fetch('/api/pay/active');
+    const s = await r.json();
+    if (s.ok && s.active) active = s;
+    else if (s.ok && s.finished) finished = s;
+  } catch (err) { /* 查不到就当没有 */ }
+
+  if (finished && Number(finished.account_id) === Number(id)) {
+    const okTxt = finished.state === 'done' ? '已完成' : finished.state;
+    if (!confirm(`该账号最近一单支付${okTxt}：\n\n${finished.message || ''}\n\n` +
+                 `点「确定」查看上一单结果，点「取消」直接发起新的支付。`)) {
+      // 继续走下面的新建流程
+    } else {
+      _autoPayOpenModal(finished.account_id, { setup: false });
+      $('#autoPaySessionId').value = finished.session_id;
+      _autoPayRender(finished);
+      return;
+    }
+  }
+
+  if (active) {
+    const same = Number(active.account_id) === Number(id);
+    const who = active.email || ('#' + active.account_id);
+    if (!confirm(`已有进行中的支付会话：\n\n账号：${who}\n状态：${active.state}\n金额：${active.currency || ''} ${active.amount ?? '-'}\n\n` +
+                 (same ? '点确定接回该会话继续。' : '点确定查看该会话（与当前账号不同）。'))) return;
+    _autoPayOpenModal(active.account_id, { setup: false });
+    $('#autoPaySessionId').value = active.session_id;
+    _autoPayRender(active);
+    _autoPayStop();
+    _autoPayTimer = setInterval(_autoPayPoll, 2000);
+    _autoPayTimer._ms = 2000;
+    return;
+  }
+
+  _autoPayOpenModal(id, { setup: true });
+  $('#autoPaySessionId').value = '';
+  _autoPaySetStatus('', `账号：${esc(acc.email || ('#' + id))}。选好卡片和账单地址后点「开始填表」。`);
+  await _autoPayLoadSetup();
+}
+
+async function _autoPayStart() {
+  const id = $('#autoPayAccountId').value;
+  const btn = $('#btnAutoPayStart');
+  const addr = _autoPayAddrForm();
+  for (const [k, label] of [['country', '国家'], ['city', '城市'], ['line1', '街道地址']]) {
+    if (!addr[k]) { showToast('请填写' + label); return; }
+  }
+  const cardId = $('#autoPayCardSelect').value;
+  if (!cardId) { showToast('请选择支付卡片'); return; }
+  const opt = $('#autoPayCardSelect').selectedOptions[0];
+
+  btn.disabled = true;
+  btn.textContent = '正在生成长链…';
+  _autoPaySetStatus('', '正在生成长链并填写表单，请稍候…');
+
+  const payload = {
+    account_id: Number(id),
+    card_id: cardId,
+    holder_id: Number(opt && opt.dataset.holder) || 0,
+    billing: addr,
+    save_address: $('#autoPaySaveAddr').checked,
+  };
+  const chosen = $('#autoPayAddrSelect').value;
+  if (chosen) payload.billing_address_id = Number(chosen);
+
+  try {
+    const r = await fetch('/api/accounts/pay/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const s = await r.json();
+    if (!r.ok || !s.ok) {
+      _autoPaySetStatus('error', esc(s.error || ('HTTP ' + r.status)));
+      btn.disabled = false;
+      btn.textContent = '开始填表';
+      return;
+    }
+    $('#autoPaySetup').classList.add('hidden');
+    $('#btnAutoPayStart').classList.add('hidden');
+    $('#btnAutoPayConfirm').classList.remove('hidden');
+    _autoPayRender(s);
+    _autoPayStop();
+    _autoPayTimer = setInterval(_autoPayPoll, 2000);
+    _autoPayTimer._ms = 2000;
+  } catch (err) {
+    _autoPaySetStatus('error', '请求失败：' + esc(err.message));
+    btn.disabled = false;
+    btn.textContent = '开始填表';
+  }
+}
+
+function _autoPayBind() {
+  const close = async (alsoCancel) => {
+    const sid = $('#autoPaySessionId').value;
+    const finished = $('#btnAutoPayCancel').dataset.finished === '1';
+    // 会话已经结束就没什么可取消的，直接关窗
+    if (alsoCancel && sid && !finished) {
+      // 会话还活着时关窗要问一声：直接取消会白丢已填好的表单和优惠码
+      if (!confirm('关闭并取消当前支付会话？\n\n表单已填好的进度会丢弃。\n如果只想暂时离开，点「取消」，稍后再点「自动支付」可接回。')) return;
+      try { await fetch(`/api/pay/${encodeURIComponent(sid)}/cancel`, { method: 'POST' }); } catch (e) {}
+    }
+    _autoPayStop();
+    $('#autoPayModal').classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  const btnClose = $('#btnCloseAutoPay');
+  // 右上角 × 只收起窗口，会话留着；真要作废走底部「取消并关闭」
+  if (btnClose) btnClose.onclick = () => close(false);
+  const btnCancel = $('#btnAutoPayCancel');
+  if (btnCancel) btnCancel.onclick = () => close(true);
+
+  const btnOk = $('#btnAutoPayConfirm');
+  if (btnOk) btnOk.onclick = async () => {
+    const sid = $('#autoPaySessionId').value;
+    if (!sid) return;
+    const amt = $('#autoPayAmount').textContent;
+    if (!confirm(`确认提交支付？\n\n应付：${amt}\n\n这会真实扣款，无法撤销。`)) return;
+    btnOk.disabled = true;
+    try {
+      const r = await fetch(`/api/pay/${encodeURIComponent(sid)}/confirm`, { method: 'POST' });
+      const s = await r.json();
+      if (!r.ok || !s.ok) { _autoPaySetStatus('error', esc(s.error || ('HTTP ' + r.status))); btnOk.disabled = false; }
+    } catch (err) {
+      _autoPaySetStatus('error', '确认失败：' + esc(err.message));
+      btnOk.disabled = false;
+    }
+  };
+
+  const btnStart = $('#btnAutoPayStart');
+  if (btnStart) btnStart.onclick = _autoPayStart;
+
+  const addrSel = $('#autoPayAddrSelect');
+  if (addrSel) addrSel.onchange = () => {
+    const picked = _autoPayAddrCache.find(a => String(a.id) === addrSel.value);
+    if (picked) {
+      _autoPayFillAddrForm(picked);
+      // 选的是已存地址，默认不再重复保存
+      $('#autoPaySaveAddr').checked = false;
+    } else {
+      $('#autoPaySaveAddr').checked = true;
+    }
+  };
+
+  const btnHuman = $('#btnAutoPayHumanDone');
+  if (btnHuman) btnHuman.onclick = async () => {
+    const sid = $('#autoPaySessionId').value;
+    if (!sid) return;
+    try {
+      await fetch(`/api/pay/${encodeURIComponent(sid)}/human-done`, { method: 'POST' });
+    } catch (err) {
+      _autoPaySetStatus('error', '提交失败：' + esc(err.message));
+    }
+  };
+
+  const btnOtp = $('#btnAutoPaySubmitOtp');  if (btnOtp) btnOtp.onclick = async () => {
+    const sid = $('#autoPaySessionId').value;
+    const code = $('#autoPayOtpInput').value.trim();
+    if (!sid || !code) return;
+    try {
+      await fetch(`/api/pay/${encodeURIComponent(sid)}/otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      $('#autoPayOtpInput').value = '';
+    } catch (err) {
+      _autoPaySetStatus('error', '提交验证码失败：' + esc(err.message));
+    }
+  };
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _autoPayBind);
+else _autoPayBind();
+
 function _accountsV2MoreMenu(r) {
   const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
@@ -4356,6 +4888,7 @@ function _accountsV2MoreMenu(r) {
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,
     _planAction(r),
     `<button type="button" onclick="generateTeamLink(${esc(r.id)}, this); return false;" title="提取该账号的 Team 订阅 Stripe 支付长链接">生成Team长链</button>`,
+    `<button type="button" onclick="openAutoPay(${esc(r.id)}); return false;" title="生成长链并用该账号的注册代理在服务端填好支付表单，停在提交前等你确认">自动支付</button>`,
     _extractLinkAction(r),
     _codexAction(r),
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,

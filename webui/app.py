@@ -326,6 +326,47 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
             pass
     return {"ok": True, "log": content, "running": running}
 
+def _build_pay_cfg(base, data: dict):
+    """按本次请求覆盖支付配置，不动全局模块。
+
+    支付会话跑在后台线程里，直接改 config 模块会影响并发的其它会话，
+    所以每次请求复制一份快照。
+    """
+    class RunCfg:
+        pass
+
+    for name in dir(base):
+        if name.startswith("VCC_"):
+            setattr(RunCfg, name, getattr(base, name))
+
+    card_id = str(data.get("card_id") or "").strip()
+    if card_id:
+        RunCfg.VCC_CARD_ID = card_id
+    holder_id = data.get("holder_id")
+    if holder_id not in (None, "", 0, "0"):
+        try:
+            RunCfg.VCC_HOLDER_ID = int(holder_id)
+        except (TypeError, ValueError):
+            pass
+
+    billing = data.get("billing")
+    if isinstance(billing, dict):
+        mapping = {
+            "country": "VCC_BILLING_COUNTRY", "state": "VCC_BILLING_STATE",
+            "city": "VCC_BILLING_CITY", "line1": "VCC_BILLING_LINE1",
+            "line2": "VCC_BILLING_LINE2", "postal": "VCC_BILLING_POSTAL",
+            "name": "VCC_BILLING_NAME",
+        }
+        for key, attr in mapping.items():
+            if key in billing:
+                value = str(billing.get(key) or "").strip()
+                setattr(RunCfg, attr, value.upper() if key == "country" else value)
+        # 弹窗明确给了姓名就用它，否则仍按持卡人取
+        if str(billing.get("name") or "").strip():
+            RunCfg.VCC_NAME_SOURCE = "config"
+    return RunCfg()
+
+
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
@@ -1165,6 +1206,301 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, **queued}), 503
         return jsonify({"ok": True, "started": True, **{k: v for k, v in queued.items() if k != "future"}}), 202
 
+
+    @app.post("/api/accounts/pay/start")
+    def api_account_pay_start():
+        """生成长链并在服务端填好支付表单，停在确认前。
+
+        浏览器跑在服务端：填表和提交走账号注册时的代理，取卡号走 VCC 接口
+        则必须直连（IP 白名单），两条路互不影响。
+        """
+        data = request.get_json(silent=True) or {}
+        try:
+            acc = db.get_account(int(data.get("account_id") or data.get("id")))
+        except Exception:
+            acc = None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+
+        token = (acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有有效的 access_token"}), 400
+
+        try:
+            from config import vcc as vcc_cfg
+            from core.vcc_pay_session import start_session
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"支付模块不可用：{exc}"}), 500
+
+        url = (data.get("checkout_url") or "").strip()
+        meta = {}
+        if not url:
+            try:
+                from core.team_checkout_service import generate_team_checkout_link
+                res = generate_team_checkout_link(
+                    token=token,
+                    proxy_address=data.get("proxy_address") or "",
+                    workspace=data.get("workspace") or "MyTeam",
+                    seats=int(data.get("seats") or 2),
+                    country=data.get("country") or "EG",
+                    currency=data.get("currency") or "",
+                    promo_code=data.get("promo_code") or "",
+                    use_1024proxy=bool(data.get("use_1024proxy", True)),
+                    provider=data.get("provider") or "native",
+                    account_id=int(acc["id"]),
+                    account_email=acc.get("email"),
+                    account_proxy=str(acc.get("proxy_used") or ""),
+                )
+                if not res.get("ok"):
+                    return jsonify({"ok": False,
+                                    "error": res.get("error") or "生成长链接失败"}), 400
+                url = res.get("url") or ""
+                meta = {k: res.get(k) for k in
+                        ("promo_used", "proxy_used", "country", "currency")}
+                db.update_account_team_checkout(int(acc["id"]), {"url": url})
+            except Exception as exc:
+                logger.exception("生成 Team 长链接异常")
+                return jsonify({"ok": False,
+                                "error": f"{type(exc).__name__}: {exc}"}), 500
+
+        proxy = ""
+        if getattr(vcc_cfg, "VCC_USE_ACCOUNT_PROXY", True):
+            proxy = str(acc.get("proxy_used") or "").strip()
+            if not proxy:
+                return jsonify({
+                    "ok": False,
+                    "error": "该账号没有记录注册代理，而配置要求支付走注册代理；"
+                             "请在配置里关闭 VCC_USE_ACCOUNT_PROXY 或补上代理",
+                }), 400
+
+        # 弹窗可以按次指定卡和账单地址，不改全局配置
+        run_cfg = _build_pay_cfg(vcc_cfg, data)
+
+        try:
+            sess = start_session(account_id=int(acc["id"]),
+                                 email=str(acc.get("email") or ""),
+                                 checkout_url=url, proxy=proxy, cfg=run_cfg)
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+        except Exception as exc:
+            logger.exception("启动支付会话异常")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+        # 地址只在会话真正起来之后才存，免得把填错的地址也记进地址簿
+        saved_address = None
+        if data.get("save_address") and isinstance(data.get("billing"), dict):
+            try:
+                from core.billing_address_store import mark_used, save_address
+                saved_address = save_address(data["billing"])
+                if saved_address.get("id"):
+                    mark_used(int(saved_address["id"]))
+            except Exception as exc:
+                logger.warning("保存账单地址失败：%s", exc)
+        elif data.get("billing_address_id"):
+            try:
+                from core.billing_address_store import mark_used
+                mark_used(int(data["billing_address_id"]))
+            except Exception:
+                pass
+
+        return jsonify({"ok": True, "url": url, "saved_address": saved_address,
+                        **meta, **sess.public()})
+
+    @app.get("/api/pay/<sid>/status")
+    def api_pay_status(sid):
+        from core.vcc_pay_session import get_session
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        return jsonify({"ok": True, **sess.public()})
+
+    @app.post("/api/pay/<sid>/confirm")
+    def api_pay_confirm(sid):
+        """人工确认后才真实提交扣款。"""
+        from core.vcc_pay_session import (
+            ST_AWAITING_CONFIRM, get_session, send_command,
+        )
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        if sess.state != ST_AWAITING_CONFIRM:
+            return jsonify({"ok": False,
+                            "error": f"当前状态 {sess.state}，不可确认"}), 409
+        if sess.gate_error:
+            return jsonify({"ok": False,
+                            "error": f"金额闸门未通过，拒绝提交：{sess.gate_error}"}), 409
+        send_command(sid, "confirm")
+        return jsonify({"ok": True, **sess.public()})
+
+    @app.post("/api/pay/<sid>/otp")
+    def api_pay_otp(sid):
+        from core.vcc_pay_session import ST_AWAITING_OTP, get_session, send_command
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        if sess.state != ST_AWAITING_OTP:
+            return jsonify({"ok": False,
+                            "error": f"当前状态 {sess.state}，不需要验证码"}), 409
+        code = str((request.get_json(silent=True) or {}).get("code") or "").strip()
+        if not code:
+            return jsonify({"ok": False, "error": "验证码为空"}), 400
+        send_command(sid, "otp", code=code)
+        return jsonify({"ok": True})
+
+    @app.get("/api/pay/cards")
+    def api_pay_cards():
+        """列出 VCC 可用卡，供支付前选择。"""
+        try:
+            from core.vcc_client import VccError, build_client_from_config
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"VCC 模块不可用：{exc}"}), 500
+        try:
+            client = build_client_from_config()
+            rows = client.list_cards()
+        except VccError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        except Exception as exc:
+            logger.exception("查询 VCC 卡列表异常")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+
+        cards = []
+        for r in rows:
+            status = str(r.get("cardStatus") or "")
+            try:
+                balance = float(r.get("balance") or 0.0)
+            except (TypeError, ValueError):
+                balance = 0.0
+            cards.append({
+                "card_id": str(r.get("cardId") or ""),
+                "mask": str(r.get("cardNoMask") or ""),
+                "balance": balance,
+                "status": status,
+                "holder_id": r.get("holderId"),
+                "holder_name": str(r.get("holderName") or ""),
+                "card_bin": str(r.get("cardBin") or ""),
+                "usable": status.upper() == "ACTIVE",
+            })
+        cards.sort(key=lambda c: (not c["usable"], -c["balance"]))
+        return jsonify({"ok": True, "cards": cards})
+
+    @app.get("/api/pay/billing-addresses")
+    def api_pay_billing_addresses():
+        from core.billing_address_store import list_addresses
+        return jsonify({"ok": True, "addresses": list_addresses()})
+
+    @app.post("/api/pay/billing-addresses")
+    def api_pay_billing_address_save():
+        from core.billing_address_store import save_address
+        data = request.get_json(silent=True) or {}
+        try:
+            saved = save_address(data)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("保存账单地址异常")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "address": saved})
+
+    @app.delete("/api/pay/billing-addresses/<int:addr_id>")
+    def api_pay_billing_address_delete(addr_id):
+        from core.billing_address_store import delete_address
+        return jsonify({"ok": delete_address(addr_id)})
+
+    @app.get("/api/pay/defaults")
+    def api_pay_defaults():
+        """返回配置里的默认账单地址和选卡偏好，用于预填弹窗。"""
+        from config import vcc as cfg
+        return jsonify({
+            "ok": True,
+            "billing": {
+                "name": cfg.VCC_BILLING_NAME or "",
+                "country": cfg.VCC_BILLING_COUNTRY or "",
+                "state": cfg.VCC_BILLING_STATE or "",
+                "city": cfg.VCC_BILLING_CITY or "",
+                "line1": cfg.VCC_BILLING_LINE1 or "",
+                "line2": cfg.VCC_BILLING_LINE2 or "",
+                "postal": cfg.VCC_BILLING_POSTAL or "",
+            },
+            "card_id": cfg.VCC_CARD_ID or "",
+            "holder_id": cfg.VCC_HOLDER_ID or 0,
+            "expected_amount": cfg.VCC_EXPECTED_AMOUNT,
+            "expected_currency": cfg.VCC_EXPECTED_CURRENCY,
+        })
+
+    @app.get("/api/pay/active")
+    def api_pay_active():
+        """查当前是否有进行中的支付会话，便于页面刷新后接回去。
+
+        没有进行中的会话时，顺带返回最近结束的那个，免得刚付完刷新页面
+        就看不到结果。
+        """
+        from core.vcc_pay_session import last_finished, list_active
+        sess = list_active()
+        if sess:
+            return jsonify({"ok": True, "active": True, **sess.public()})
+        recent = last_finished()
+        if recent:
+            return jsonify({"ok": True, "active": False, "finished": True,
+                            **recent.public()})
+        return jsonify({"ok": True, "active": False})
+
+    @app.get("/api/pay/vnc-status")
+    def api_pay_vnc_status():
+        """noVNC 是否可用。前端据此决定显示实时画面还是退回截图。"""
+        import socket as _socket
+        sock = _socket.socket()
+        sock.settimeout(1.5)
+        try:
+            sock.connect(("127.0.0.1", 6080))
+            ok = True
+        except Exception:
+            ok = False
+        finally:
+            sock.close()
+        return jsonify({"ok": True, "available": ok, "port": 6080})
+
+    @app.post("/api/pay/<sid>/input")
+    def api_pay_input(sid):
+        """把人在网页上的点击/输入转发给服务端浏览器。
+
+        人机验证只认真实交互环境，答案无法在别处解完搬过来，
+        所以必须让人直接操作这个浏览器。
+        """
+        from core.vcc_pay_session import (
+            ST_AWAITING_HUMAN, get_session, send_command,
+        )
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        if sess.state != ST_AWAITING_HUMAN:
+            return jsonify({"ok": False,
+                            "error": f"当前状态 {sess.state}，不接受远程操作"}), 409
+        data = request.get_json(silent=True) or {}
+        kind = str(data.get("kind") or "").strip()
+        if kind not in ("click", "move", "down", "up", "scroll", "key", "text"):
+            return jsonify({"ok": False, "error": f"不支持的操作：{kind}"}), 400
+        send_command(sid, "input", **{k: v for k, v in data.items() if k != "op"})
+        return jsonify({"ok": True})
+
+    @app.post("/api/pay/<sid>/human-done")
+    def api_pay_human_done(sid):
+        """人表示已完成页面操作，继续后续流程。"""
+        from core.vcc_pay_session import get_session, send_command
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        send_command(sid, "done")
+        return jsonify({"ok": True})
+
+    @app.post("/api/pay/<sid>/cancel")
+    def api_pay_cancel(sid):
+        from core.vcc_pay_session import get_session, send_command
+        sess = get_session(sid)
+        if not sess:
+            return jsonify({"ok": False, "error": "会话不存在或已过期"}), 404
+        send_command(sid, "cancel")
+        return jsonify({"ok": True, **sess.public()})
 
     @app.post("/api/accounts/generate-team-link")
     def api_account_generate_team_link():

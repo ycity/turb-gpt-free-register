@@ -209,13 +209,233 @@ class ConfigDefaultsTest(unittest.TestCase):
     def test_gate_defaults_are_consistent(self):
         from config import vcc
         self.assertEqual(vcc.VCC_EXPECTED_AMOUNT, 1150.0)
-        self.assertEqual(vcc.VCC_BILLING_COUNTRY, "US")
-        self.assertEqual(vcc.VCC_BILLING_STATE, "AK")
-        self.assertEqual(vcc.VCC_BILLING_POSTAL, "99516")
         # 上限必须高于期望值，否则闸门自相矛盾、永远不过
         self.assertGreater(vcc.VCC_MAX_CHARGE, vcc.VCC_EXPECTED_AMOUNT)
         # 默认不启用，避免误扣
         self.assertFalse(vcc.VCC_AUTO_PAY_ENABLED)
+
+    def test_billing_address_is_complete(self):
+        """账单地址随卡变化，这里只校验必填项齐全、州与国家匹配。"""
+        from config import vcc
+        for name in ("VCC_BILLING_COUNTRY", "VCC_BILLING_STATE",
+                     "VCC_BILLING_CITY", "VCC_BILLING_LINE1",
+                     "VCC_BILLING_POSTAL"):
+            self.assertTrue(getattr(vcc, name), f"{name} 不能为空")
+        if vcc.VCC_BILLING_COUNTRY == "US":
+            self.assertRegex(vcc.VCC_BILLING_STATE, r"^[A-Z]{2}$")
+            self.assertRegex(vcc.VCC_BILLING_POSTAL, r"^\d{5}(-\d{4})?$")
+
+
+class PickCardTest(unittest.TestCase):
+    """选卡。实测接口返回的 cardStatus 是字符串 'ACTIVE'，余额字段叫 balance。"""
+
+    @staticmethod
+    def _client(cards, balances=None):
+        cl = VccClient("k", "s", webhook_secret="w")
+        cl.list_cards = lambda **_kw: list(cards)
+        cl.card_balance = lambda cid: (balances or {}).get(cid, {})
+        return cl
+
+    def test_accepts_string_status(self):
+        card = {"cardId": "a", "cardStatus": "ACTIVE", "balance": "21.00"}
+        self.assertEqual(self._client([card]).pick_card()["cardId"], "a")
+
+    def test_accepts_legacy_numeric_status(self):
+        card = {"cardId": "a", "cardStatus": 1, "balance": "21.00"}
+        self.assertEqual(self._client([card]).pick_card()["cardId"], "a")
+
+    def test_rejects_inactive_string_status(self):
+        card = {"cardId": "a", "cardStatus": "FROZEN", "balance": "21.00"}
+        with self.assertRaises(VccError):
+            self._client([card]).pick_card(card_id="a")
+
+    def test_min_balance_reads_balance_field(self):
+        """余额筛选必须认 balance 字段，否则所有卡都会被当成 0 余额。"""
+        cards = [{"cardId": "poor", "cardStatus": "ACTIVE", "balance": "0.46"},
+                 {"cardId": "rich", "cardStatus": "ACTIVE", "balance": "21.00"}]
+        picked = self._client(cards).pick_card(min_balance=10.0)
+        self.assertEqual(picked["cardId"], "rich")
+
+    def test_min_balance_rejects_when_all_too_low(self):
+        cards = [{"cardId": "a", "cardStatus": "ACTIVE", "balance": "0.46"}]
+        with self.assertRaises(VccError):
+            self._client(cards).pick_card(min_balance=10.0)
+
+
+class BuildProxyOptionTest(unittest.TestCase):
+    """Chromium 不认 server 里内嵌的 user:pass，必须拆字段。
+
+    不拆的后果不是认证失败，而是所有请求静默卡到超时，很难排查。
+    """
+
+    @staticmethod
+    def _build(raw):
+        from core.vcc_checkout_pay import build_proxy_option
+        return build_proxy_option(raw)
+
+    def test_credentials_are_split_out_of_server(self):
+        opt = self._build("http://yun:pw123@1.2.3.4:48901")
+        self.assertEqual(opt["server"], "http://1.2.3.4:48901")
+        self.assertEqual(opt["username"], "yun")
+        self.assertEqual(opt["password"], "pw123")
+        self.assertNotIn("@", opt["server"])
+
+    def test_plain_proxy_has_no_credential_keys(self):
+        opt = self._build("http://1.2.3.4:8080")
+        self.assertEqual(opt["server"], "http://1.2.3.4:8080")
+        self.assertNotIn("username", opt)
+
+    def test_bare_hostport_defaults_to_http(self):
+        self.assertEqual(self._build("1.2.3.4:8080")["server"],
+                         "http://1.2.3.4:8080")
+
+    def test_hostname_proxy_keeps_host(self):
+        opt = self._build("http://u:p@ft-us.lazycat.cv:16611")
+        self.assertEqual(opt["server"], "http://ft-us.lazycat.cv:16611")
+        self.assertEqual(opt["username"], "u")
+
+    def test_empty_proxy_returns_none(self):
+        self.assertIsNone(self._build(""))
+        self.assertIsNone(self._build("   "))
+
+
+class FillFallbackTest(unittest.TestCase):
+    """指针被遮挡时要退回 DOM 写入，不能直接失败。
+
+    CloakBrowser 的 humanize 把 fill 变成真实点击，国家下拉重渲染时会盖住
+    下方输入框拦截指针，表现为 fill 超时。
+    """
+
+    class Page:
+        def __init__(self, fill_ok=True, dom_ok=True):
+            self.fill_ok = fill_ok
+            self.dom_ok = dom_ok
+            self.dom_calls = []
+
+        def locator(self, _sel):
+            return self
+
+        @property
+        def first(self):
+            return self
+
+        def scroll_into_view_if_needed(self, timeout=0):
+            pass
+
+        def fill(self, _sel, _val):
+            if not self.fill_ok:
+                raise TimeoutError("intercepts pointer events")
+
+        def evaluate(self, _script, args):
+            self.dom_calls.append(tuple(args))
+            return self.dom_ok
+
+    def test_normal_fill_does_not_touch_dom(self):
+        from core.vcc_checkout_pay import _fill
+        page = self.Page(fill_ok=True)
+        filled = {}
+        _fill(page, "#city", "Anchorage", label="billing_city", filled=filled)
+        self.assertTrue(filled["billing_city"])
+        self.assertEqual(page.dom_calls, [])
+
+    def test_pointer_blocked_falls_back_to_dom(self):
+        from core.vcc_checkout_pay import _fill
+        page = self.Page(fill_ok=False, dom_ok=True)
+        filled = {}
+        _fill(page, "#city", "Anchorage", label="billing_city", filled=filled)
+        self.assertTrue(filled["billing_city"])
+        self.assertEqual(page.dom_calls, [("#city", "Anchorage")])
+
+    def test_required_field_raises_when_both_paths_fail(self):
+        from core.vcc_checkout_pay import VccPayError, _fill
+        page = self.Page(fill_ok=False, dom_ok=False)
+        with self.assertRaises(VccPayError):
+            _fill(page, "#city", "Anchorage", label="billing_city", filled={})
+
+    def test_optional_field_is_skipped_when_both_fail(self):
+        from core.vcc_checkout_pay import _fill
+        page = self.Page(fill_ok=False, dom_ok=False)
+        filled = {}
+        _fill(page, "#line2", "Apt 1", label="billing_line2",
+              filled=filled, required=False)
+        self.assertFalse(filled["billing_line2"])
+
+
+class ExactFillTest(unittest.TestCase):
+    """卡号这类字段必须回读校验。
+
+    humanize 逐字输入会和 Stripe 的自动插空格抢光标，导致字符顺序错乱甚至
+    丢位（实测把 5556597902158361 填成了 5556 5978 9021 5836），页面直接
+    报卡号无效。只看"没抛异常"是不够的。
+    """
+
+    class Page:
+        def __init__(self, typed_result, dom_result=None):
+            self.typed_result = typed_result
+            self.dom_result = dom_result
+            self.current = ""
+            self.dom_calls = 0
+
+        def locator(self, _sel):
+            return self
+
+        @property
+        def first(self):
+            return self
+
+        def scroll_into_view_if_needed(self, timeout=0):
+            pass
+
+        def fill(self, _sel, _val):
+            self.current = self.typed_result
+
+        def input_value(self, _sel, timeout=0):
+            return self.current
+
+        def evaluate(self, _script, args):
+            self.dom_calls += 1
+            if self.dom_result is None:
+                return False
+            self.current = self.dom_result
+            return True
+
+    GOOD = "5556597902158361"
+    SCRAMBLED = "5556 5978 9021 5836"
+
+    def test_scrambled_card_triggers_dom_rewrite(self):
+        from core.vcc_checkout_pay import _fill
+        page = self.Page(typed_result=self.SCRAMBLED, dom_result=self.GOOD)
+        filled = {}
+        _fill(page, "#cardNumber", self.GOOD, label="card_number",
+              filled=filled, exact=True)
+        self.assertTrue(filled["card_number"])
+        self.assertEqual(page.dom_calls, 1)
+
+    def test_correct_typing_skips_dom(self):
+        from core.vcc_checkout_pay import _fill
+        # Stripe 会插空格，比较时只看数字
+        page = self.Page(typed_result="5556 5979 0215 8361")
+        filled = {}
+        _fill(page, "#cardNumber", self.GOOD, label="card_number",
+              filled=filled, exact=True)
+        self.assertTrue(filled["card_number"])
+        self.assertEqual(page.dom_calls, 0)
+
+    def test_raises_when_dom_rewrite_also_wrong(self):
+        from core.vcc_checkout_pay import VccPayError, _fill
+        page = self.Page(typed_result=self.SCRAMBLED, dom_result="1234")
+        with self.assertRaises(VccPayError):
+            _fill(page, "#cardNumber", self.GOOD, label="card_number",
+                  filled={}, exact=True)
+
+    def test_non_exact_field_accepts_whatever_typed(self):
+        from core.vcc_checkout_pay import _fill
+        page = self.Page(typed_result="anything")
+        filled = {}
+        _fill(page, "#billingName", "ONeal Di", label="billing_name",
+              filled=filled)
+        self.assertTrue(filled["billing_name"])
+        self.assertEqual(page.dom_calls, 0)
 
 
 if __name__ == "__main__":

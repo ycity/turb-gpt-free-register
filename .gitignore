@@ -49,6 +49,10 @@ __pycache__/
 .ruff_cache/
 cache/roxy-assets/
 cache/mailcode/
+# 支付截图含卡号后四位和账单地址
+cache/vcc_pay/
+cache/*.png
+cache/ms-playwright/
 cache/cloak-profiles/
 # VCC 自动支付截图（含卡后四位和账单地址，不入库）
 cache/vcc_pay/

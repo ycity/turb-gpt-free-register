@@ -466,6 +466,16 @@ EDITABLE_FIELDS = [
         "label": "浏览器路径", "help": "直接指定浏览器可执行文件；上面的通道留空时才生效",
     },
     {
+        "key": "VCC_SESSION_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "网页支付等待上限(秒)",
+        "help": "网页端自动支付：填好表单后等你确认、以及等你输 3DS 验证码的最长时间，默认900秒",
+    },
+    {
+        "key": "VCC_USE_ACCOUNT_PROXY", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "支付走账号注册代理",
+        "help": "填表和提交使用该账号注册时的代理；取卡号始终直连以满足VCC的IP白名单，不受此开关影响",
+    },
+    {
         "key": "ENABLE_HUMANIZE_DELAY", "file": "humanize.py", "type": "bool", "group": "人工节奏",
         "label": "启用随机停顿", "help": "在注册、OTP、授权等步骤之间加入随机等待，更接近人工操作节奏",
     },
