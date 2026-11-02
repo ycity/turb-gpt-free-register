@@ -374,6 +374,11 @@ _MISSING_PAGE_ELEMENT_REFRESH_RETRIES = 3
 # 人机验证等待时间的兜底默认值；实际取 config.cloakbrowser.CHALLENGE_MAX_WAIT_SECONDS。
 _CHALLENGE_MAX_WAIT_SECONDS = 90.0
 _CHALLENGE_POLL_SECONDS = 1.5
+# 邮箱提交重试节奏：普通失败短等即可；被 Cloudflare 边缘 403/429 拒绝时必须
+# 跨出当前封锁窗口，否则三次重试会全部落在同一个窗口里。
+_EMAIL_RETRY_DELAY_SECONDS = 1.0
+_EMAIL_BLOCKED_RETRY_DELAY_SECONDS = 20.0
+_EMAIL_BLOCKED_RETRY_DELAY_CAP = 90.0
 
 
 def _challenge_max_wait() -> float:
@@ -384,6 +389,43 @@ def _challenge_max_wait() -> float:
     except (TypeError, ValueError):
         return _CHALLENGE_MAX_WAIT_SECONDS
     return max(0.0, value)
+
+
+def _nextauth_blocked(na_res: object) -> bool:
+    """NextAuth 兜底是否被边缘直接拒绝（403/429），而不是业务失败。"""
+    if not isinstance(na_res, dict):
+        return False
+    try:
+        return int(na_res.get("status") or 0) in (403, 429)
+    except (TypeError, ValueError):
+        return False
+
+
+def _email_retry_delay(*, blocked_403: bool, attempt: int) -> float:
+    """邮箱提交重试前的等待。
+
+    被 Cloudflare 边缘拒绝时冷却以分钟计，固定等 1 秒会让所有重试挤在同一个
+    封锁窗口内空转（2FA 侧 TWOFA_REAUTH_RETRY_DELAY 的注释记录了同一结论）。
+    普通失败保持原来的短等，不拖慢正常流程。
+    """
+    if not blocked_403:
+        return _EMAIL_RETRY_DELAY_SECONDS
+    try:
+        base = float(getattr(_cfg, "ROXY_EMAIL_BLOCKED_RETRY_DELAY",
+                             _EMAIL_BLOCKED_RETRY_DELAY_SECONDS))
+    except (TypeError, ValueError):
+        base = _EMAIL_BLOCKED_RETRY_DELAY_SECONDS
+    if base <= 0:
+        return 0.0
+    return min(base * (2 ** max(0, attempt - 1)), _EMAIL_BLOCKED_RETRY_DELAY_CAP)
+
+
+def _sleep_with_stop(seconds: float) -> None:
+    """分段睡眠，保证手动停止能及时生效。"""
+    deadline = time.time() + max(0.0, float(seconds))
+    while time.time() < deadline:
+        _check_manual_stop()
+        time.sleep(min(1.5, max(0.0, deadline - time.time())))
 
 
 def detect_challenge(driver) -> dict:
@@ -1237,6 +1279,7 @@ def _submit_email_and_wait_next(
             logger.info("%s 邮箱提交诊断期间页面已进入下一步：%s", _log_prefix(driver), advanced)
             return advanced
         logger.warning("%s 邮箱提交后仍未进入下一步：%s，尝试浏览器内 NextAuth signin 跳转 state=%s", _log_prefix(driver), state_name, diagnostic_state)
+        na_res: dict = {}
         try:
             na_res = _submit_email_via_browser_nextauth(driver, current_email)
             logger.info("%s 浏览器内 NextAuth signin 结果：%s", _log_prefix(driver), na_res)
@@ -1256,7 +1299,15 @@ def _submit_email_and_wait_next(
             if "按已注册/不可用邮箱处理并停用" in str(na_exc):
                 raise
             logger.warning("%s NextAuth signin 兜底异常：%s", _log_prefix(driver), na_exc)
-        time.sleep(1.0)
+        # 403 说明出口 IP 正被 Cloudflare 边缘拒绝，冷却以分钟计。固定 sleep(1)
+        # 会让三次重试全挤在同一个封锁窗口里空转，对应 2FA 侧
+        # TWOFA_REAUTH_RETRY_DELAY 的同一结论。被拒时按指数退避等。
+        if attempt < attempts:
+            delay = _email_retry_delay(blocked_403=_nextauth_blocked(na_res), attempt=attempt)
+            if delay > 0:
+                logger.info("%s 邮箱提交重试前等待 %.0fs（attempt=%s/%s）",
+                            _log_prefix(driver), delay, attempt, attempts)
+                _sleep_with_stop(delay)
     # 失败原因要写清楚：被人机验证拦住和页面结构变化是完全不同的两件事。
     blocked = detect_challenge(driver)
     hint = f"（仍停留在 Cloudflare 人机验证：{blocked.get('kind')}）" if blocked.get("active") else ""
@@ -1830,17 +1881,31 @@ def _resubmit_signup_password_form(driver) -> dict:
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
           .find(visible);
         const form = input?.closest('form');
-        const button = form ? [...form.querySelectorAll('button[type="submit"],input[type="submit"],button')]
-          .find(el => visible(el) && !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true') : null;
+        const usable = el => visible(el) && !el.disabled
+          && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        // requestSubmit(submitter) 规范要求 submitter 必须是提交按钮，传普通
+        // button 会抛 TypeError 并让整次兜底提交作废，所以两者分开查找。
+        const submitter = form ? [...form.querySelectorAll('button[type="submit"],input[type="submit"],button:not([type])')]
+          .find(usable) : null;
+        const clickable = form ? [...form.querySelectorAll('button,input[type="submit"]')].find(usable) : null;
         const errors = [...document.querySelectorAll('[role="alert"],[aria-live="assertive"],[aria-live="polite"],.react-aria-FieldError,[slot="errorMessage"],[class*="error"]')]
           .filter(visible).map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 10);
         if (!input || !form) return {ok:false, reason:'missing_password_form', url:location.href, errors};
         if (!String(input.value || '')) return {ok:false, reason:'empty_password', url:location.href, errors};
         if (errors.length) return {ok:false, reason:'page_errors', url:location.href, errors};
-        if (typeof form.requestSubmit === 'function') form.requestSubmit(button || undefined);
-        else if (button) button.click();
-        else form.submit();
-        return {ok:true, reason:'form_requestSubmit', url:location.href, valueLength:String(input.value || '').length};
+        let how = '';
+        try {
+          if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit(submitter || undefined);
+            how = submitter ? 'requestSubmit_with_submitter' : 'requestSubmit_bare';
+          } else if (clickable) { clickable.click(); how = 'button_click'; }
+          else { form.submit(); how = 'form_submit'; }
+        } catch (err) {
+          // requestSubmit 失败时仍要把表单提交出去，否则这次兜底等于没做。
+          if (clickable) { clickable.click(); how = 'button_click_after_error'; }
+          else { form.submit(); how = 'form_submit_after_error'; }
+        }
+        return {ok:true, reason:'form_requestSubmit', how, url:location.href, valueLength:String(input.value || '').length};
         """) or {"ok": False, "reason": "empty_result"}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}

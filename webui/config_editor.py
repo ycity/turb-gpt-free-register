@@ -320,6 +320,10 @@ EDITABLE_FIELDS = [
         "label": "Codex回调超时", "help": "Roxy Codex OAuth 等待 localhost:1455 callback 的最长秒数",
     },
     {
+        "key": "ROXY_EMAIL_BLOCKED_RETRY_DELAY", "file": "roxybrowser.py", "type": "float", "group": "注册方式",
+        "label": "邮箱被拒重试等待(秒)", "help": "邮箱提交被 Cloudflare 403/429 拒绝后，重试前等待的首次秒数（按次翻倍，上限90s）。这类拒绝冷却以分钟计，等太短会让三次重试全落在同一封锁窗口里白跑一个邮箱；0=不等待",
+    },
+    {
         "key": "ENABLE_2FA", "file": "twofa.py", "type": "bool", "group": "功能开关",
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
