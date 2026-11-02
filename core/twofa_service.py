@@ -247,6 +247,15 @@ def _run_twofa(
             _RUNNING.discard(int(account_id))
             _OUTSTANDING = max(0, _OUTSTANDING - 1)
             _LOCK.notify_all()
+        # 自动注册的间隔从 2FA 结束算起；成功和失败都算结束，否则失败会让调度停摆。
+        # 只认注册后自动触发的那次：手动/批量开 2FA 不属于自动注册循环，
+        # 若也推锚点，批量操作会把下一轮自动注册无限期推后。
+        if trigger == "registration_auto":
+            try:
+                from core.auto_register_scheduler import note_twofa_finished
+                note_twofa_finished(email)
+            except Exception:
+                logger.debug("[2FA] 通知自动注册调度失败", exc_info=True)
 
 
 def queue_settings() -> dict:

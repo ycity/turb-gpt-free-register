@@ -468,6 +468,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             except Exception:
                 logger.exception("清理闲置 Cloak 资料目录失败")
 
+    try:
+        from core import auto_register_scheduler
+        auto_register_scheduler.start()
+    except Exception:
+        logger.exception("启动自动注册调度失败")
+
     # ----------------------------------------------------------
     # 页面
     # ----------------------------------------------------------
@@ -3272,6 +3278,26 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify(result)
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/auto-register/status")
+    def api_auto_register_status():
+        """自动注册调度状态：开关、邮箱余量、下一次发起倒计时、当前拦截原因。"""
+        from core import auto_register_scheduler
+        return jsonify({"ok": True, **auto_register_scheduler.status()})
+
+    @app.post("/api/auto-register/toggle")
+    def api_auto_register_toggle():
+        """开关自动注册。Body {enabled: bool}；缺省则取反。"""
+        from core import auto_register_scheduler
+        data = request.get_json(silent=True) or {}
+        if "enabled" in data:
+            enabled = bool(data.get("enabled"))
+        else:
+            enabled = not auto_register_scheduler.is_enabled()
+        if enabled and auto_register_scheduler.available_emails() == 0:
+            return jsonify({"ok": False, "error": "邮箱池已空，无法开启自动注册"}), 400
+        auto_register_scheduler.set_enabled(enabled)
+        return jsonify({"ok": True, **auto_register_scheduler.status()})
 
     @app.post("/api/jobs/cancel-pending")
     def api_jobs_cancel_pending():

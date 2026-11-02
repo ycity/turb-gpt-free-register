@@ -639,6 +639,25 @@ def _read_json(path: Path, default: Any) -> Any:
         return default
 
 
+def get_meta(key: str) -> str | None:
+    """读取 storage_meta 键值；缺失返回 None。"""
+    _ensure_sqlite()
+    with closing(_sqlite_conn()) as conn:
+        row = conn.execute("SELECT value FROM storage_meta WHERE key=?", (str(key),)).fetchone()
+    return str(row[0]) if row else None
+
+
+def set_meta(key: str, value: str) -> None:
+    """写入 storage_meta 键值，供需要跨重启保留的小状态使用。"""
+    _ensure_sqlite()
+    with closing(_sqlite_conn()) as conn, conn:
+        conn.execute(
+            "INSERT INTO storage_meta(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(key), str(value)),
+        )
+
+
 def _reserve_account_id_floor(conn, value: int) -> None:
     conn.execute("""INSERT INTO storage_meta(key,value) VALUES('account_id_high_watermark',?)
                     ON CONFLICT(key) DO UPDATE SET value=MAX(CAST(value AS INTEGER),CAST(excluded.value AS INTEGER))""",
@@ -2246,6 +2265,35 @@ def recover_interrupted_totp_setups() -> int:
         if recovered:
             _save_accounts(rows)
         return recovered
+
+
+def totp_setup_activity() -> dict:
+    """2FA 队列的当前活动快照，供自动注册调度判断上一个号是否收尾。
+
+    pending_since 取 queued/running 账号里最早的入队/开始时刻，让调度方能对
+    卡死的 2FA 设置超时上限，而不是无限期等待。
+    """
+    _ensure_sqlite()
+    status_expr = "lower(COALESCE(CAST(json_extract(payload, '$.totp_setup_status') AS TEXT), ''))"
+    with closing(_sqlite_conn()) as conn:
+        pending = int(conn.execute(
+            f"SELECT COUNT(*) FROM accounts WHERE {status_expr} IN ('queued','running')"
+        ).fetchone()[0])
+        pending_since = conn.execute(
+            f"""SELECT MIN(COALESCE(
+                    CAST(json_extract(payload, '$.totp_setup_started_at') AS TEXT),
+                    CAST(json_extract(payload, '$.totp_setup_queued_at') AS TEXT)))
+                FROM accounts WHERE {status_expr} IN ('queued','running')"""
+        ).fetchone()[0]
+        last_completed = conn.execute(
+            f"""SELECT MAX(CAST(json_extract(payload, '$.totp_setup_completed_at') AS TEXT))
+                FROM accounts WHERE {status_expr} NOT IN ('queued','running')"""
+        ).fetchone()[0]
+    return {
+        "pending": pending,
+        "pending_since": str(pending_since) if pending_since else None,
+        "last_completed_at": str(last_completed) if last_completed else None,
+    }
 
 
 def claim_account_live_check(acc_id: int, trigger: str = "manual", *, run_id: str | None = None, expected_email: str | None = None) -> bool:

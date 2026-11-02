@@ -370,6 +370,12 @@
       display: inline-flex; align-items: center; gap: 8px;
       color: #606266; font-size: 14px; white-space: nowrap;
     }
+    .jobs-toolbar-v2 .jobs-tb-btn.is-auto-on {
+      background: #f0f9eb; border-color: #c2e7b0; color: #529b2e;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn.is-auto-on:hover { background: #e1f3d8; border-color: #a4da89; color: #529b2e; }
+    .auto-reg-hint { color: #909399; font-size: 12px; white-space: nowrap; }
+    .auto-reg-hint.is-warn { color: #e6a23c; }
     .accounts-filter-v2 .acc-v2-date {
       height: 40px; padding: 0 8px;
       border: 1px solid #dcdfe6; border-radius: 6px;
@@ -2405,6 +2411,8 @@
           </span>
         </label>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnStartV2">开始注册</button>
+        <button type="button" class="jobs-tb-btn" id="btnAutoRegToggle" title="邮箱池还有号时按固定间隔自动注册，每次只跑一个；间隔从上一个号 2FA 结束算起">自动注册：读取中</button>
+        <span id="autoRegHint" class="auto-reg-hint"></span>
       </div>
       <div id="regWarnV2"></div>
       <div class="jobs-table-v2-wrap">
@@ -3568,6 +3576,8 @@ function bindJobsBodyEvents(bodyEl) {
   if (cancelV2) cancelV2.addEventListener('click', () => cancelAllPendingJobs(cancelV2));
   const refreshV2 = $('#btnRefreshJobsV2');
   if (refreshV2) refreshV2.addEventListener('click', refreshJobs);
+  const autoRegBtn = $('#btnAutoRegToggle');
+  if (autoRegBtn) autoRegBtn.addEventListener('click', () => toggleAutoRegister(autoRegBtn));
 
   function stepInputNumber(inputId, delta) {
     const el = document.getElementById(inputId);
@@ -3665,6 +3675,47 @@ async function refreshJobs() {
     }
     loadSummary();
   } catch(e) {}
+}
+
+async function refreshAutoRegister() {
+  const btn = $('#btnAutoRegToggle');
+  const hint = $('#autoRegHint');
+  if (!btn) return;
+  try {
+    const s = await api('/api/auto-register/status');
+    btn.textContent = s.enabled ? '自动注册：开' : '自动注册：关';
+    btn.classList.toggle('is-auto-on', !!s.enabled);
+    if (!hint) return;
+    if (!s.enabled) {
+      const pool = s.unlimited_pool ? '按需生成' : `${s.available_emails} 个可用`;
+      hint.textContent = `邮箱池 ${pool}`;
+      hint.classList.remove('is-warn');
+      return;
+    }
+    const eta = Number(s.next_eta_seconds || 0);
+    const parts = [];
+    if (eta > 0) {
+      const m = Math.floor(eta / 60), sec = eta % 60;
+      parts.push(`下次 ${m > 0 ? m + '分' : ''}${sec}秒后`);
+    }
+    parts.push(s.reason || '');
+    hint.textContent = parts.filter(Boolean).join(' · ');
+    hint.classList.toggle('is-warn', s.state === 'pool_empty' || s.state === 'error' || s.state === 'submit_failed');
+  } catch(e) {
+    btn.textContent = '自动注册：读取失败';
+    if (hint) { hint.textContent = e.message || ''; hint.classList.add('is-warn'); }
+  }
+}
+async function toggleAutoRegister(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/auto-register/toggle', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
+    showToast(r.enabled ? '已开启自动注册' : '已关闭自动注册');
+  } catch(e) { showToast('切换失败: ' + e.message); }
+  finally {
+    if (btn) btn.disabled = false;
+    refreshAutoRegister();
+  }
 }
 
 let modalScrollY = 0;
@@ -9220,6 +9271,8 @@ activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false)
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 10000);
 setInterval(loadSummary, 30000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
+refreshAutoRegister();
+setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshAutoRegister(); }, 10000);
 </script>
 {% include 'promo_details.html' %}
 {% include 'account_inspections.html' %}

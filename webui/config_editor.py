@@ -356,6 +356,22 @@ EDITABLE_FIELDS = [
         "label": "2FA队列容量", "help": "允许排队和执行中的2FA任务总数，默认200；保存后立即生效",
     },
     {
+        "key": "AUTO_REGISTER_ENABLED", "file": "auto_register.py", "type": "bool", "group": "功能开关",
+        "label": "启用自动注册", "help": "邮箱池还有号时按固定间隔自动发起注册，每次只跑一个；池子空了自动停。也可在任务页直接开关",
+    },
+    {
+        "key": "AUTO_REGISTER_INTERVAL", "file": "auto_register.py", "type": "float", "group": "功能开关",
+        "label": "自动注册间隔(秒)", "help": "两次注册的间隔，默认1800（半小时）。计时起点是上一个号 2FA 结束的时刻，不是注册任务结束的时刻",
+    },
+    {
+        "key": "AUTO_REGISTER_POLL_INTERVAL", "file": "auto_register.py", "type": "float", "group": "功能开关",
+        "label": "自动注册检查间隔(秒)", "help": "调度线程多久检查一次是否该发起，默认30秒；只影响发起时机的精度",
+    },
+    {
+        "key": "AUTO_REGISTER_2FA_TIMEOUT", "file": "auto_register.py", "type": "float", "group": "功能开关",
+        "label": "自动注册等2FA上限(秒)", "help": "等待上一个号 2FA 收尾的最长时间，默认1800。超过则不再等它，避免 2FA 卡死让自动注册永久停摆",
+    },
+    {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },

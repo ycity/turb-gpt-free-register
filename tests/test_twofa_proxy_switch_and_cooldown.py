@@ -134,5 +134,31 @@ class RegistrationCooldownTests(unittest.TestCase):
         self.assertEqual(order, ["sleep", "slot"])
 
 
+class AutoRegisterAnchorNotifyTests(unittest.TestCase):
+    """2FA 收尾只为注册后自动触发的那次推进自动注册锚点。"""
+
+    def _run(self, trigger):
+        notified = []
+        with patch.object(twofa_service.time, "sleep"), \
+             patch.object(twofa_service._twofa_cfg, "TWOFA_REGISTRATION_DELAY", 0,
+                          create=True), \
+             patch.object(twofa_service.db, "mark_account_totp_setup_running",
+                          return_value=False), \
+             patch("core.auto_register_scheduler.note_twofa_finished",
+                   side_effect=notified.append):
+            twofa_service._run_twofa(
+                account_id=1, email="u@e.test", access_token="t",
+                proxy=None, trigger=trigger)
+        return notified
+
+    def test_registration_auto_advances_anchor(self):
+        self.assertEqual(self._run("registration_auto"), ["u@e.test"])
+
+    def test_manual_setup_does_not_advance_anchor(self):
+        # 手动/批量开 2FA 若也推锚点，批量操作会把自动注册无限期推后。
+        self.assertEqual(self._run("manual"), [])
+        self.assertEqual(self._run("manual_bulk"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
