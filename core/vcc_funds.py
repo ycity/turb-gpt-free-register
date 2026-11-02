@@ -44,14 +44,19 @@ class FundsCheck:
         }
 
 
-def _request_no(card_id: str, amount: float) -> str:
+def _request_no(card_id: str, amount: float, *, attempt_key: str = "") -> str:
     """可复现的充值请求号。
 
-    同一张卡、同一金额、同一天算出同一个号，让接口的幂等机制接住重试。
-    换成随机号会导致超时重试时真的扣两笔。
+    接口按 requestNo 幂等，所以同一次充值意图在重试时必须算出同一个号，
+    否则超时重试会变成两笔真实划账。
+
+    attempt_key 用来区分"不同的充值意图"：只用卡号+金额+日期会把同一天的
+    第二次合法充值误判成重试，VCC 返回成功却不划钱，卡余额永远涨不上去
+    （2026-11-02 实际发生过：09:00 充值成功，11:56 同号被幂等拦截后超时）。
+    调用方传入当前卡余额，余额变了就是一次新的充值意图。
     """
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
-    seed = f"{card_id}|{amount:.2f}|{day}".encode()
+    seed = f"{card_id}|{amount:.2f}|{day}|{attempt_key}".encode()
     return "autopay_" + hashlib.sha256(seed).hexdigest()[:24]
 
 
@@ -125,7 +130,9 @@ def ensure_funds(client: Any, card_id: str, cfg: Any, *,
             f"账户可用余额 {acct_bal:.2f} USD 不足以充值 {amount:.2f} USD"
             f"（卡内 {card_bal:.2f}，本次约需 {need:.2f}）。请先给 VCC 账户充值")
 
-    req_no = _request_no(card_id, amount)
+    # 请求号带上充值前的卡余额：真正的重试（余额没变）算出同一个号，被幂等
+    # 接住；而前一笔已花掉后的再次充值余额不同，是新的充值意图，不会被误拦。
+    req_no = _request_no(card_id, amount, attempt_key=f"{card_bal:.2f}")
     logger.warning("[funds] 卡 %s 余额 %.2f 不足，从账户充值 %.2f USD（req=%s）",
                    card_id[:8], card_bal, amount, req_no)
     try:
@@ -141,6 +148,13 @@ def ensure_funds(client: Any, card_id: str, cfg: Any, *,
     timeout = float(getattr(cfg, "VCC_RECHARGE_TIMEOUT", 90.0) or 90.0)
     final = client.wait_card_balance(card_id, need, timeout=timeout)
     if final < need:
+        # 余额一点没动通常意味着这个请求号被幂等判成了旧单，而不是转账在路上。
+        # 这两种情况的处置完全不同，必须在报错里说清楚，否则只会让人干等。
+        if abs(final - card_bal) < 0.01:
+            raise InsufficientFunds(
+                f"充值未生效：卡余额仍为 {final:.2f} USD（需 {need:.2f}），"
+                f"账户也未扣款。请求号 {req_no} 可能已被 VCC 判为重复单。"
+                "请到 VCC 后台核对该请求号，确认未扣款后再重试")
         raise InsufficientFunds(
             f"充值已提交但 {int(timeout)} 秒内未到账（当前 {final:.2f}，需 {need:.2f}）。"
             f"请求号 {req_no}，请到 VCC 后台核对，不要重复发起")
