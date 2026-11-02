@@ -145,6 +145,11 @@ VCC_CLOAK_SEED = ""
 # 注意：取卡号走 VCC 接口，始终直连以满足 IP 白名单，不受此开关影响。
 VCC_USE_ACCOUNT_PROXY = True
 
+# 支付成功后自动查一次套餐，确认 Team 是否真的生效。
+# 支付提交成功不等于套餐立刻落库，OpenAI 侧有处理延迟，所以要等一会儿再查。
+VCC_AUTO_PLAN_CHECK = True
+VCC_AUTO_PLAN_CHECK_DELAY = 30.0
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'VCC_AUTO_PAY_ENABLED': 'bool',
@@ -198,4 +203,6 @@ apply_env_overrides(globals(), {
     'VCC_CLOAK_GEOIP': 'bool',
     'VCC_CLOAK_SEED': 'str',
     'VCC_USE_ACCOUNT_PROXY': 'bool',
+    'VCC_AUTO_PLAN_CHECK': 'bool',
+    'VCC_AUTO_PLAN_CHECK_DELAY': 'float',
 })

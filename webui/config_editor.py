@@ -521,6 +521,16 @@ EDITABLE_FIELDS = [
         "help": "填表和提交使用该账号注册时的代理；取卡号始终直连以满足VCC的IP白名单，不受此开关影响",
     },
     {
+        "key": "VCC_AUTO_PLAN_CHECK", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "支付后自动查套餐",
+        "help": "支付成功后自动查一次套餐，确认 Team 是否真的生效。关闭则只能手动查",
+    },
+    {
+        "key": "VCC_AUTO_PLAN_CHECK_DELAY", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "支付后查套餐延迟(秒)",
+        "help": "等多久再查，默认30秒。提交成功只代表扣款发出，OpenAI 侧写套餐有延迟，查太早还是旧值；0=立即查",
+    },
+    {
         "key": "ENABLE_HUMANIZE_DELAY", "file": "humanize.py", "type": "bool", "group": "人工节奏",
         "label": "启用随机停顿", "help": "在注册、OTP、授权等步骤之间加入随机等待，更接近人工操作节奏",
     },

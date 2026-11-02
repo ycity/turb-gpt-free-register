@@ -93,6 +93,58 @@ def _touch(sess: PaySession, **kw) -> None:
     sess.updated_at = time.time()
 
 
+def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
+    """支付成功后延迟查一次套餐，确认 Team 是否真的生效。
+
+    提交成功只代表扣款发出，OpenAI 侧写套餐有延迟，立刻查多半还是旧值。
+    用独立线程延时，不占用支付线程，也不让前端等。
+    """
+    if not bool(getattr(cfg, "VCC_AUTO_PLAN_CHECK", True)):
+        return
+    try:
+        delay = max(0.0, float(getattr(cfg, "VCC_AUTO_PLAN_CHECK_DELAY", 30.0) or 0.0))
+    except (TypeError, ValueError):
+        delay = 30.0
+
+    account_id = int(sess.account_id or 0)
+    if account_id <= 0:
+        return
+
+    def _run() -> None:
+        if delay:
+            time.sleep(delay)
+        try:
+            from core import db
+            from core.plan_check_service import enqueue_account_plan_check
+
+            acc = db.get_account(account_id)
+            if not acc:
+                logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 不存在", account_id)
+                return
+            token = str(acc.get("access_token") or "").strip()
+            if not token:
+                logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 没有 access_token",
+                               account_id)
+                return
+            res = enqueue_account_plan_check(
+                account_id=account_id,
+                email=str(acc.get("email") or ""),
+                access_token=token,
+                trigger="payment_auto",
+            )
+            if res.get("accepted"):
+                logger.info("[pay-session] 支付后已入队套餐查询：%s", acc.get("email"))
+            else:
+                logger.warning("[pay-session] 支付后套餐查询未入队：%s", res.get("error") or res)
+        except Exception as exc:  # noqa: BLE001 - 查套餐失败不影响已完成的支付
+            logger.warning("[pay-session] 支付后查套餐异常：%s: %s",
+                           type(exc).__name__, str(exc)[:160])
+
+    threading.Thread(target=_run, name=f"plan-after-pay-{account_id}",
+                     daemon=True).start()
+    logger.info("[pay-session] %s 支付成功，%.0fs 后自动查套餐", sess.sid, delay)
+
+
 def _shoot(page: Any, sess: PaySession, *, full: bool = True) -> None:
     """截图直接转 base64 存内存。截图含卡后四位和账单地址，不写磁盘。"""
     try:
@@ -396,6 +448,7 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
         else:
             shown = f"{currency} {amount:.2f}" if amount is not None else ""
             _touch(sess, state=ST_DONE, message=f"已提交支付 {shown}".strip())
+            _schedule_plan_check(sess, cfg)
         return
 
     if sess.state not in _TERMINAL:
