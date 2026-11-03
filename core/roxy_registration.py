@@ -1378,6 +1378,19 @@ def _email_otp_page_state(driver) -> dict:
         return {"url": getattr(driver, 'current_url', ''), "error": f"{type(exc).__name__}: {exc}"}
 
 
+def _is_login_route(driver) -> bool:
+    """当前是否落在登录路径上。
+
+    注册流程应当一路走 /create-account/*。一旦出现 /log-in，说明 OpenAI 认为
+    这个邮箱已有账号，再往下走只会用登录态去填注册验证码，必然被拒。
+    """
+    try:
+        url = str(driver.current_url or '').lower()
+    except Exception:
+        return False
+    return '/log-in' in url
+
+
 def _is_email_verification_page(driver) -> bool:
     try:
         url = str(driver.current_url or '').lower()
@@ -2014,6 +2027,11 @@ def _click_continue_with_password_if_present(driver) -> dict:
           const text = norm(el.innerText || el.textContent || '');
           const passwordContinue = /continuewithpassword|continuewithapassword|usepasswordtocontinue|continueusingpassword/.test(text)
             || /密码.*继续|密碼.*繼續|비밀번호.*계속|パスワード.*続行|パスワード.*つづける/.test(text);
+          // "Continue with password" 在登录页和注册页文案完全一样，只认文字会
+          // 把指向 /log-in/password 的登录按钮也点下去，流程就从"注册"滑进
+          // "登录已有账号"，最后卡在验证码被拒。显式排除登录路径。
+          const loginRoute = href.includes('/log-in') || attrs.includes('/log-in');
+          if (loginRoute) return false;
           return (
             href.includes('/create-account/password') ||
             attrs.includes('/create-account/password') ||
@@ -2709,6 +2727,13 @@ def run_roxy_registration(
                     current_otp = None
                     continue
             logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
+            # 走到这里却停在 /log-in，说明这个邮箱已经注册过：OpenAI 发的是
+            # 登录验证码，拿它去过注册流程必然被拒，再点"重新发送"只会把页面
+            # 搞回登录页。直接判定邮箱不可用，别浪费后面两轮重试。
+            if _is_login_route(driver):
+                raise RuntimeError(
+                    "邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: "
+                    f"url={getattr(driver, 'current_url', '')}")
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)
             logger.info("[Roxy注册][OTP] 已填写邮箱验证码")
