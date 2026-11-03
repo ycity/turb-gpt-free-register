@@ -4836,8 +4836,18 @@ async function _autoPayLoadSetup() {
         _autoPayFillAddrForm(s.billing || {});
       }
       if (s.card_id) {
-        const opt = [...$('#autoPayCardSelect').options].find(o => o.value === s.card_id);
-        if (opt) $('#autoPayCardSelect').value = s.card_id;
+        const sel2 = $('#autoPayCardSelect');
+        const opt = [...sel2.options].find(o => o.value === s.card_id);
+        // 上次那张卡可能已冻结或余额不足（option 被 disabled），这时不要硬选，
+        // 否则下拉显示着一张根本提交不了的卡。
+        if (opt && !opt.disabled) {
+          sel2.value = s.card_id;
+          if (s.last_card_id && s.last_card_id === s.card_id) {
+            $('#autoPayCardHint').textContent += '，已默认选中上次用的卡';
+          }
+        } else if (opt && opt.disabled && s.last_card_id === s.card_id) {
+          $('#autoPayCardHint').textContent += '，上次用的卡当前不可用，请另选';
+        }
       }
     }
   } catch (err) { /* 用表单现有值 */ }

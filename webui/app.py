@@ -1343,6 +1343,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             except Exception:
                 pass
 
+        # 记下这次用的卡，下次开弹窗默认选中它。配置里的 VCC_CARD_ID 是全局
+        # 兜底，换卡后每次还得手点一遍，实际用的那张才是更合理的默认值。
+        try:
+            used_card = str(data.get("card_id") or "").strip()
+            if used_card:
+                db.set_meta("pay_last_card_id", used_card)
+        except Exception:
+            logger.debug("记录上次支付卡片失败", exc_info=True)
+
         return jsonify({"ok": True, "url": url, "saved_address": saved_address,
                         "funds": funds_info, **meta, **sess.public()})
 
@@ -1465,8 +1474,16 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/pay/defaults")
     def api_pay_defaults():
-        """返回配置里的默认账单地址和选卡偏好，用于预填弹窗。"""
+        """返回默认账单地址和选卡偏好，用于预填弹窗。
+
+        选卡优先用上次真正支付过的那张，没有记录再回落到配置的 VCC_CARD_ID。
+        """
         from config import vcc as cfg
+        last_card = ""
+        try:
+            last_card = str(db.get_meta("pay_last_card_id") or "").strip()
+        except Exception:
+            logger.debug("读取上次支付卡片失败", exc_info=True)
         return jsonify({
             "ok": True,
             "billing": {
@@ -1478,7 +1495,9 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "line2": cfg.VCC_BILLING_LINE2 or "",
                 "postal": cfg.VCC_BILLING_POSTAL or "",
             },
-            "card_id": cfg.VCC_CARD_ID or "",
+            "card_id": last_card or (cfg.VCC_CARD_ID or ""),
+            "last_card_id": last_card,
+            "config_card_id": cfg.VCC_CARD_ID or "",
             "holder_id": cfg.VCC_HOLDER_ID or 0,
             "expected_amount": cfg.VCC_EXPECTED_AMOUNT,
             "expected_currency": cfg.VCC_EXPECTED_CURRENCY,
