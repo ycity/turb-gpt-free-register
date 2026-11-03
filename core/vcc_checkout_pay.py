@@ -330,6 +330,28 @@ def _select(page: Any, selector: str, value: str, *, label: str,
     filled[label] = False
 
 
+def _selected_state(page: Any) -> dict[str, str]:
+    """读州/省下拉当前选中项的 value 和显示文字。
+
+    Stripe 的州下拉 value 是代码（OR），label 是全称（Oregon）。校验必须两者
+    都看，否则按全称选中时会被误判成没选上。
+    """
+    try:
+        got = page.evaluate(
+            """(sel) => {
+                const el = document.querySelector(sel);
+                if (!el) return null;
+                const opt = el.selectedOptions && el.selectedOptions[0];
+                return {
+                    value: String(el.value || ''),
+                    label: String(opt ? (opt.textContent || '') : '').trim(),
+                };
+            }""", SEL_STATE) or {}
+    except Exception:  # noqa: BLE001
+        got = {}
+    return {"value": str(got.get("value") or ""), "label": str(got.get("label") or "")}
+
+
 def _check(page: Any, selector: str, *, label: str,
            filled: dict[str, bool], required: bool) -> None:
     try:
@@ -447,14 +469,15 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
     if want_state:
         _select(page, SEL_STATE, want_state, label="billing_state",
                 filled=filled, required=True)
-        actual = ""
-        try:
-            actual = page.input_value(SEL_STATE) or ""
-        except Exception:  # noqa: BLE001
-            actual = ""
-        if actual.strip().upper() != want_state.strip().upper():
+        # 下拉的 value 是州代码（OR），label 才是全称（Oregon）。配置两种写法都
+        # 允许，所以 value 和 label 任一对上就算选中；只比 value 会把按全称选中
+        # 的情况误判成失败，白白作废一个已经消耗掉优惠码的长链。
+        got = _selected_state(page)
+        want = want_state.strip().casefold()
+        if want not in (got["value"].strip().casefold(), got["label"].strip().casefold()):
             raise VccPayError(
-                f"账单州/省未选中（期望 {want_state}，页面实际 {actual or '空'}）。"
+                f"账单州/省未选中（期望 {want_state}，页面实际 "
+                f"value={got['value'] or '空'} label={got['label'] or '空'}）。"
                 "州/省会影响税费，已停止以免提交错误的账单地址")
     else:
         filled["billing_state"] = False

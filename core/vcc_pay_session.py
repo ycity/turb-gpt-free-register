@@ -731,8 +731,12 @@ def list_active() -> PaySession | None:
     return None
 
 
-def last_finished(max_age: float = 600.0) -> PaySession | None:
-    """最近结束的会话，用于页面重开时还能看到上一单的结果。"""
+def last_finished(max_age: float = 3600.0) -> PaySession | None:
+    """最近结束的会话，用于页面重开时还能看到上一单的结果。
+
+    保留期与 _reap 一致：原来只留 10 分钟，稍微离开一会儿回来就查不到上一单
+    结果了。能不能复用长链不看这里，那只取决于账号存着的长链本身。
+    """
     _reap()
     now = time.time()
     with _lock:
