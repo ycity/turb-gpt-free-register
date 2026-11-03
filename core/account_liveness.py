@@ -629,6 +629,25 @@ def is_checking(email: str) -> bool:
         return key in _RUNNING
 
 
+def _otp_blocker_hint(session: BrowserSession) -> str:
+    """收不到 OTP 时，指出真正的拦路原因。
+
+    OTP 超时的文案是"refresh_token 失效 / 邮箱被黑名单 / IP 风控"，但实测
+    绝大多数根本没走到发信那一步：要么登录页被 403 挡住，要么旧 token 已废
+    导致登录态建不起来。这种情况下 OpenAI 压根不会发信，照搬那句猜测会把人
+    引去查邮箱，而真正该看的是会话状态。
+    """
+    try:
+        if getattr(session, "blocked_until", 0) and time.time() < session.blocked_until:
+            remain = max(0, int(session.blocked_until - time.time()))
+            reason = str(getattr(session, "blocked_reason", "") or "")[:120]
+            return (f"会话已被熔断（剩余 {remain}s，{reason}）——登录请求没能发出去，"
+                    "OpenAI 自然不会发验证码，不是邮箱的问题")
+    except Exception:
+        pass
+    return ""
+
+
 def _validate_with_retry(
     session: BrowserSession,
     email: str,
@@ -642,11 +661,17 @@ def _validate_with_retry(
         try:
             if current_otp is None:
                 logger.info("[查活] 等待登录 OTP：%s（第 %s/%s 次）", email, attempt, max_otp_attempts)
-                current_otp = wait_for_otp(
-                    email,
-                    after_ts=otp_after_ts,
-                    email_source=email_source,
-                )
+                try:
+                    current_otp = wait_for_otp(
+                        email,
+                        after_ts=otp_after_ts,
+                        email_source=email_source,
+                    )
+                except Exception as otp_exc:
+                    hint = _otp_blocker_hint(session)
+                    if hint:
+                        raise RuntimeError(f"{hint}。原始错误：{str(otp_exc)[:160]}") from otp_exc
+                    raise
             result = validate_email_otp(session, current_otp, sentinel_header=None, so_header=None)
             return result
         except EmailOtpInvalidError as exc:

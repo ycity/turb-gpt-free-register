@@ -189,6 +189,21 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 break
 
             remaining = [item for item in candidates if item not in used_proxies]
+            switch_allowed = bool(getattr(
+                proxy_cfg, "LIVE_CHECK_SWITCH_PROXY_ON_FAILURE", False))
+            if not switch_allowed:
+                # 默认只用账号注册时那个出口。换 IP 换指纹反复登录同一账号本身
+                # 就像盗号，更容易踩风控；而且换出口后的 403 会盖掉真实状态
+                # （实测同一账号在注册代理上返回 account_deactivated，换出口
+                # 后只剩一个看不出所以然的 403）。
+                if remaining:
+                    _safe_append_log(
+                        email,
+                        "[查活] 本次失败，但已配置为不切换代理，保持注册代理不再重试"
+                        "（如需旧行为，打开 LIVE_CHECK_SWITCH_PROXY_ON_FAILURE）",
+                    )
+                break
+
             if remaining and route_attempt < max_routes:
                 next_proxy = random.choice(remaining)
                 _safe_append_log(

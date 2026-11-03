@@ -41,6 +41,14 @@ CLOAK_PROFILE_ROOT: str = ""
 # 资料目录闲置多少天后自动清理；0 表示不清理。
 CLOAK_PROFILE_MAX_IDLE_DAYS: int = 14
 
+# 资料目录和指纹是否按账号隔离。
+#   False（默认）：按代理出口复用。cf_clearance 能留下来，少撞人机验证，注册
+#       成功率高；代价是同一出口注册的所有账号共用一套 Canvas/WebGL/字体指纹
+#       和设备状态，在 OpenAI 看来就是一台机器在批量开号。
+#   True：每个账号一套独立指纹和资料目录。账号之间不再可关联，但每次都是全新
+#       设备，会更频繁地遇到人机验证，注册耗时和失败率都会上升。
+CLOAK_PROFILE_PER_ACCOUNT: bool = False
+
 # 遇到 Cloudflare 人机验证时最长安静等待多少秒（期间不刷新、不重复提交）。
 # 整页拦截常常要 40 秒以上，等待期不够会白白多折腾一轮；设 0 表示不等待，直接按
 # 原流程刷新重试。该项同时作用于 Roxy 和 Cloak 注册流程。
@@ -56,4 +64,4 @@ CLOAK_SELENIUM_TIMEOUT: int = 90
 CLOAK_KEEP_BROWSER_OPEN: bool = False
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_PERSIST_PROFILE': 'bool', 'CLOAK_PROFILE_ROOT': 'str', 'CLOAK_PROFILE_MAX_IDLE_DAYS': 'int', 'CHALLENGE_MAX_WAIT_SECONDS': 'float', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})
+apply_env_overrides(globals(), {'CLOAK_HEADLESS': 'bool', 'CLOAK_HUMANIZE': 'bool', 'CLOAK_GEOIP': 'bool', 'CLOAK_LOCALE': 'str', 'CLOAK_TIMEZONE': 'str', 'CLOAK_USE_PROXY': 'bool', 'CLOAK_LICENSE_KEY': 'str', 'CLOAK_FINGERPRINT_SEED': 'str', 'CLOAK_USER_DATA_DIR': 'str', 'CLOAK_PERSIST_PROFILE': 'bool', 'CLOAK_PROFILE_ROOT': 'str', 'CLOAK_PROFILE_MAX_IDLE_DAYS': 'int', 'CLOAK_PROFILE_PER_ACCOUNT': 'bool', 'CHALLENGE_MAX_WAIT_SECONDS': 'float', 'CLOAK_SELENIUM_TIMEOUT': 'int', 'CLOAK_KEEP_BROWSER_OPEN': 'bool'})

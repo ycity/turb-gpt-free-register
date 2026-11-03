@@ -45,7 +45,10 @@ def run_cloak_registration(
     data_saver: BrowserDataSaver | None = None
     network_traffic: dict | None = None
     try:
-        driver, opened = build_cloak_driver(proxy=proxy)
+        # 按账号隔离指纹时需要账号标识。注意邮箱可能要等页面出现输入框后才领取
+        # （_email_supplier_after_input），那种情况下这里拿到的是空串，会退回
+        # 临时资料目录——仍然不会和别的账号共用设备身份。
+        driver, opened = build_cloak_driver(proxy=proxy, identity=str(email or ""))
         try:
             traffic_tracker = PlaywrightTrafficTracker(driver.context, label="Cloak")
         except Exception as exc:

@@ -2,6 +2,7 @@
 """CloakBrowser 的 Selenium 风格轻量适配层。"""
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -479,12 +480,16 @@ def _close_quietly(target) -> None:
         logger.debug("[Cloak] 关闭浏览器上下文失败", exc_info=True)
 
 
-def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
+def build_cloak_driver(proxy: str | None = None,
+                       identity: str = "") -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser 并返回 Selenium 风格 driver。
 
     proxy=None  时按 config.proxy.PROXY_POOL 随机抽取；
     proxy=""    时显式禁用代理；
     proxy="..." 时使用指定代理。
+
+    identity（通常是注册邮箱）用于按账号隔离指纹和资料目录。默认空字符串，
+    行为与过去一致：同一代理出口共用一套设备身份。
     """
     proxy_relay = None
     proxy_pool_target = ""
@@ -511,6 +516,12 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
 
     launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
     seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
+    ident = str(identity or "").strip().lower()
+    if not seed and ident and bool(getattr(_cfg, "CLOAK_PROFILE_PER_ACCOUNT", False)):
+        # 按账号派生一个稳定的指纹种子：同一账号重开浏览器是同一台"设备"，
+        # 不同账号之间互不相同，避免整批号共用一套 Canvas/WebGL/字体指纹。
+        seed = hashlib.sha256(f"cloak-fp|{ident}".encode()).hexdigest()[:16]
+        logger.info("[Cloak] 按账号派生指纹种子：identity=%s seed=%s", ident, seed)
     if seed:
         launch_args.append(f"--fingerprint={seed}")
 
@@ -542,7 +553,8 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if not user_data_dir:
         from core import cloak_profile
         try:
-            profile_lease = cloak_profile.acquire(proxy_pool_target or proxy_url or "")
+            profile_lease = cloak_profile.acquire(
+                proxy_pool_target or proxy_url or "", identity=ident)
         except Exception as exc:
             logger.warning("[Cloak] 申请资料目录失败，本次使用临时上下文：%s: %s", type(exc).__name__, exc)
         if profile_lease is not None:

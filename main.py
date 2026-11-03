@@ -513,12 +513,20 @@ def run_registration(
         totp_secret = None
         if _twofa_cfg.ENABLE_2FA:
             # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
+            # 重认证会作废上面拿到的 access_token，所以无论成败都要用换回来的
+            # 新 token 覆盖，否则存档里留的是个已失效的 token。
+            refreshed: dict = {}
             try:
-                totp_secret = setup_2fa(session, email)
+                totp_secret = setup_2fa(session, email, token_out=refreshed)
             except Exception as exc:
                 logger.error(f"2FA 设置失败: {exc}")
                 logger.debug("2FA 错误详情:", exc_info=True)
                 logger.warning("将继续保存账号信息（不含 TOTP secret），可后续手动设置")
+            finally:
+                new_token = str(refreshed.get("access_token") or "").strip()
+                if new_token and new_token != access_token:
+                    access_token = new_token
+                    logger.info("[2FA] 已改用重认证后的新 accessToken 存档")
         else:
             logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
 

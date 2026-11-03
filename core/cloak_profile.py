@@ -73,9 +73,19 @@ def profile_root() -> Path:
     return root if root.is_absolute() else (_PROJECT_ROOT / root)
 
 
-def profile_key(proxy_target: str) -> str:
-    """按代理出口生成目录名；直连也有固定的一个目录。"""
+def profile_key(proxy_target: str, identity: str = "") -> str:
+    """生成资料目录名。
+
+    默认按代理出口分目录：cf_clearance 绑定出口 IP，同出口复用能少撞人机验证。
+    代价是同一出口上注册的所有账号共用一套指纹和设备状态，在 OpenAI 看来就是
+    一台机器在批量开号。传入 identity（通常是邮箱）可以把目录按账号隔离，
+    用来验证"独立设备身份能否降低封号率"。
+    """
     text = str(proxy_target or "").strip()
+    ident = str(identity or "").strip().lower()
+    if ident:
+        seed = f"{text}|{ident}" if text else f"direct|{ident}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
     if not text:
         return "direct"
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -122,13 +132,23 @@ def _take_lock_file(path: Path) -> Path | None:
     return lock_file
 
 
-def acquire(proxy_target: str) -> ProfileLease | None:
-    """取得该代理对应的资料目录；被占用或不可用时返回 None（调用方回退临时目录）。"""
+def acquire(proxy_target: str, identity: str = "") -> ProfileLease | None:
+    """取得资料目录；被占用或不可用时返回 None（调用方回退临时目录）。
+
+    identity 非空时按账号隔离目录，每个账号一套独立的指纹和设备状态。
+    """
     from config import cloakbrowser as cfg
 
     if not bool(getattr(cfg, "CLOAK_PERSIST_PROFILE", False)):
         return None
-    key = profile_key(proxy_target)
+    if not str(identity or "").strip() and bool(
+        getattr(cfg, "CLOAK_PROFILE_PER_ACCOUNT", False)
+    ):
+        # 开了按账号隔离却没拿到账号标识时，宁可用临时目录，也不要退回共享目录：
+        # 那等于悄悄把这次注册又并回了公用设备身份。
+        logger.info("[Cloak资料] 已开启按账号隔离但缺少账号标识，本次使用临时目录")
+        return None
+    key = profile_key(proxy_target, identity)
     local_lock = _local_lock_for(key)
     if not local_lock.acquire(blocking=False):
         logger.info("[Cloak资料] 资料目录正被同进程的其他任务使用，本次改用临时目录：key=%s", key)
@@ -139,7 +159,9 @@ def acquire(proxy_target: str) -> ProfileLease | None:
         local_lock.release()
         logger.info("[Cloak资料] 资料目录被占用或不可写，本次改用临时目录：key=%s", key)
         return None
-    logger.info("[Cloak资料] 复用资料目录：key=%s path=%s 已存在=%s", key, path, (path / "Default").exists())
+    logger.info("[Cloak资料] 复用资料目录：key=%s path=%s 已存在=%s scope=%s",
+                key, path, (path / "Default").exists(),
+                "账号" if str(identity or "").strip() else "代理出口")
     return ProfileLease(path=path, key=key, _local_lock=local_lock, _lock_file=lock_file)
 
 

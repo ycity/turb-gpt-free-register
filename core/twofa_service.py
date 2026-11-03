@@ -116,6 +116,23 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
         f.write(f"{stamp} [INFO] {line}\n")
 
 
+def _persist_refreshed_token(account_id: int, email: str, refreshed: dict) -> None:
+    """把 2FA 重认证换到的新 token 写回账号。
+
+    不写回的话，存档里留的是被 reauth 作废的旧 token，查活和查套餐都会收到
+    401 token_revoked——账号本身是好的，看起来却像被封了。
+    """
+    token = str((refreshed or {}).get("access_token") or "").strip()
+    if not token:
+        return
+    try:
+        if db.update_account_access_token(int(account_id), token):
+            _append_log(email, "[2FA] 已更新账号 accessToken（重认证后的新 token）")
+            logger.info("[2FA] 已回写新 accessToken：email=%s", email)
+    except Exception:
+        logger.exception("[2FA] 回写新 accessToken 失败: account_id=%s", account_id)
+
+
 def _run_twofa(
     *, account_id: int, email: str, access_token: str, proxy: str | None,
     trigger: str,
@@ -195,8 +212,13 @@ def _run_twofa(
             _append_log(email, f"[2FA] 已切换代理出口重试：attempt={attempt} target={label}")
             return replacement
 
-        secret = setup_2fa(session, email, access_token=access_token,
-                           on_challenge=_switch_proxy)
+        # 重认证会作废传进来的旧 token，不论 2FA 成败都要把新 token 写回去。
+        refreshed: dict = {}
+        try:
+            secret = setup_2fa(session, email, access_token=access_token,
+                               on_challenge=_switch_proxy, token_out=refreshed)
+        finally:
+            _persist_refreshed_token(account_id, email, refreshed)
         db.update_account_totp_secret(
             account_id,
             {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},

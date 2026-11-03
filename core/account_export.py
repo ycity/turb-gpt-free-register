@@ -702,6 +702,7 @@ def setup_2fa(
     otp_code: str | None = None,
     access_token: str | None = None,
     on_challenge=None,
+    token_out: dict | None = None,
 ) -> str:
     """
     完整的 2FA 设置流程。
@@ -714,6 +715,9 @@ def setup_2fa(
         email: 账号邮箱（用作 login_hint）
         otp_code: 邮箱验证码（None 则按上述策略获取）
         on_challenge: 可选，撞到 Cloudflare 质询时换出口用的回调
+        token_out: 可选的回传容器。重认证会作废调用方手里的旧 accessToken，
+            本流程换到的新 token 会写进 token_out["access_token"]，调用方
+            必须用它覆盖存档，否则存下来的就是一个已经失效的 token。
 
     Returns:
         TOTP secret（Base32 字符串），可直接用于 pyotp.TOTP() 生成 6 位动态码
@@ -840,6 +844,11 @@ def setup_2fa(
     logger.info("[2FA] 正在交换新 token...")
     new_token = _exchange_new_token(session, continue_url)
     logger.info("[2FA] 已拿到新 token")
+    # 重认证已经作废了调用方手里的旧 token，必须尽早回传：即便后面 enroll
+    # 或 activate 失败，存档里的旧 token 也已经不能用了，调用方需要拿新的
+    # 覆盖，否则账号看着注册成功、token 却是废的。
+    if token_out is not None:
+        token_out["access_token"] = new_token
     human_delay("api")
 
     # 阶段二：enroll + activate

@@ -60,6 +60,14 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
+# 查活失败后是否换别的出口重试。
+# 关闭（默认）：始终只用账号注册时那个代理，失败就失败。换出口意味着换 IP 和
+# 指纹，同一账号在不同出口之间反复登录本身就像盗号，更容易被判风控；而且
+# 换出口后拿到的 403 会掩盖真实状态（实测同一账号在注册代理上返回
+# account_deactivated，换出口后只剩一个看不出所以然的 403）。
+# 开启：沿用旧行为，网络类失败后从代理池随机换一个没用过的出口重试。
+LIVE_CHECK_SWITCH_PROXY_ON_FAILURE = False
+
 
 def _valid_port(value: str) -> bool:
     return value.isdigit() and 1 <= int(value) <= 65535

@@ -2006,6 +2006,27 @@ def get_account_by_email(email: str) -> dict | None:
         return _decorate_account(row) if row else None
 
 
+def update_account_access_token(acc_id: int, access_token: str) -> bool:
+    """覆盖账号的 accessToken。
+
+    2FA 的重认证会作废注册时那个 token，换到的新 token 必须写回来，否则存档
+    里留的是一个已失效的 token，查活/查套餐都会拿到 401 token_revoked。
+    """
+    token = str(access_token or "").strip()
+    if not token:
+        return False
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("access_token") == token:
+            return False
+        row["access_token"] = token
+        row["access_token_updated_at"] = _now()
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
 def update_account_note(acc_id: int, note: str) -> bool:
     """更新单个已注册账号备注。note 为空字符串时表示清空备注。"""
     with _LOCK:
