@@ -96,6 +96,12 @@ VCC_3DS_POLL_INTERVAL = 5.0
 # ---- 浏览器 ----
 VCC_HEADLESS = True
 VCC_PAGE_TIMEOUT = 60.0
+
+# 单个表单字段操作（fill / select / check）的超时，秒。
+# 这类操作一旦被遮挡就注定失败，代码会立刻退回 DOM 直写，所以没必要用
+# VCC_PAGE_TIMEOUT 那 60 秒去等：表单十几个字段，几个被遮挡就是好几分钟。
+# 页面导航、等表单出现这些仍然用 VCC_PAGE_TIMEOUT。
+VCC_FIELD_TIMEOUT = 6.0
 # 截图目录，留空则用 cache/vcc_pay/
 VCC_SCREENSHOT_DIR = ""
 
@@ -113,7 +119,7 @@ VCC_KEEP_OPEN_TIMEOUT = 1800.0
 # ---- WebUI 会话式支付 ----
 # 浏览器跑在服务端，填好表单后截图给人看，人点确认后由程序提交。
 # 会话最长存活时间（秒）：等待确认和等待 3DS 验证码都用这个上限。
-VCC_SESSION_TIMEOUT = 900.0
+VCC_SESSION_TIMEOUT = 2700.0
 # 点下提交后等页面落定的上限（秒）。Stripe 的处理中可能持续数分钟，
 # 超时只报告"结果未知"，绝不重复提交。
 VCC_SUBMIT_TIMEOUT = 180.0
@@ -187,6 +193,7 @@ apply_env_overrides(globals(), {
     'VCC_3DS_POLL_INTERVAL': 'float',
     'VCC_HEADLESS': 'bool',
     'VCC_PAGE_TIMEOUT': 'float',
+    'VCC_FIELD_TIMEOUT': 'float',
     'VCC_SCREENSHOT_DIR': 'str',
     'VCC_BROWSER_CHANNEL': 'str',
     'VCC_BROWSER_PATH': 'str',

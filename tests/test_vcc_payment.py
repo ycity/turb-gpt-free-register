@@ -322,7 +322,7 @@ class FillFallbackTest(unittest.TestCase):
         def scroll_into_view_if_needed(self, timeout=0):
             pass
 
-        def fill(self, _sel, _val):
+        def fill(self, _sel, _val, **_kw):
             if not self.fill_ok:
                 raise TimeoutError("intercepts pointer events")
 
@@ -386,7 +386,7 @@ class ExactFillTest(unittest.TestCase):
         def scroll_into_view_if_needed(self, timeout=0):
             pass
 
-        def fill(self, _sel, _val):
+        def fill(self, _sel, _val, **_kw):
             self.current = self.typed_result
 
         def input_value(self, _sel, timeout=0):

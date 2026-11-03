@@ -174,6 +174,20 @@ def _screenshot(page: Any, out_dir: Path, name: str, sink: list[str]) -> None:
         logger.debug("[vcc-pay] 截图失败：%s", exc)
 
 
+def _field_timeout_ms() -> int:
+    """单个字段操作的超时（毫秒）。
+
+    被遮挡的 fill/select 注定失败，之后立刻走 DOM 直写，所以不该拿
+    VCC_PAGE_TIMEOUT 那 60 秒去等——十几个字段里几个被遮挡就是好几分钟。
+    """
+    from config import vcc as _cfg
+    try:
+        val = float(getattr(_cfg, "VCC_FIELD_TIMEOUT", 6.0) or 6.0)
+    except (TypeError, ValueError):
+        val = 6.0
+    return int(max(1.0, val) * 1000)
+
+
 def _scroll_into_view(page: Any, selector: str) -> None:
     """把元素滚进视口。
 
@@ -246,7 +260,7 @@ def _fill(page: Any, selector: str, value: str, *, label: str,
         return
     try:
         _scroll_into_view(page, selector)
-        page.fill(selector, value)
+        page.fill(selector, value, timeout=_field_timeout_ms())
         if not exact or _value_matches(page, selector, value):
             filled[label] = True
             return
@@ -308,8 +322,10 @@ def _select(page: Any, selector: str, value: str, *, label: str,
             raise VccPayError(f"{label} 为空，无法选择")
         return
     for attempt in (
-        lambda: page.select_option(selector, value=value),
-        lambda: page.select_option(selector, label=value),
+        lambda: page.select_option(selector, value=value,
+                                   timeout=_field_timeout_ms()),
+        lambda: page.select_option(selector, label=value,
+                                   timeout=_field_timeout_ms()),
     ):
         try:
             _scroll_into_view(page, selector)
@@ -355,14 +371,14 @@ def _selected_state(page: Any) -> dict[str, str]:
 def _check(page: Any, selector: str, *, label: str,
            filled: dict[str, bool], required: bool) -> None:
     try:
-        if page.is_checked(selector):
+        if page.is_checked(selector, timeout=_field_timeout_ms()):
             filled[label] = True
             return
     except Exception:  # noqa: BLE001
         pass
     try:
         _scroll_into_view(page, selector)
-        page.check(selector)
+        page.check(selector, timeout=_field_timeout_ms())
         filled[label] = True
         return
     except Exception:  # noqa: BLE001
