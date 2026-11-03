@@ -947,6 +947,75 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
 # 看到更晚的就重置 settle 计时；连续无新邮件 settle 秒后才返回。
 
 
+def list_inbox(email: str, limit: int = 25) -> list[dict]:
+    """拉收件箱列表，供 WebUI 的简易邮箱查看。
+
+    和取 OTP 共用同一套抓取通道（Graph / IMAP / 远端），区别是不做
+    主题过滤、不等新邮件，原样返回最近若干封。
+    """
+    account = get_account_context(email)
+    if account is None:
+        raise OutlookClientError(f"找不到邮箱凭据：{email}")
+
+    http = _http_session()
+    errors: list[str] = []
+    messages: list[dict] = []
+    for protocol in ("graph", "imap"):
+        try:
+            got = _fetch_via(http, protocol, account) or []
+        except Exception as exc:  # noqa: BLE001 - 一个通道失败还有另一个
+            errors.append(f"{protocol}: {type(exc).__name__}: {str(exc)[:120]}")
+            continue
+        if got:
+            messages = got
+            break
+    if not messages and errors:
+        raise OutlookClientError("；".join(errors))
+
+    rows = []
+    for m in messages:
+        # 不要先过 _normalize_ms_message：它只认 Graph 的 body.content，
+        # 会把远端通道的 bodyHtml/bodyText 丢掉。这里直接按各通道字段兜。
+        item = m if isinstance(m, dict) else {}
+        try:
+            from core.otp_utils import extract_otp
+            otp = extract_otp(item) or ""
+        except Exception:  # noqa: BLE001 - 认不出验证码不影响看邮件
+            otp = ""
+        # 各通道字段名不统一：远端给 bodyHtml/bodyText，Graph 直连给
+        # body.content，IMAP 又是另一套。
+        body_obj = item.get("body") if isinstance(item.get("body"), dict) else {}
+        html = str(item.get("bodyHtml") or item.get("html")
+                   or body_obj.get("content") or item.get("content")
+                   or (item.get("body") if isinstance(item.get("body"), str) else "")
+                   or "")
+        text = str(item.get("bodyText") or item.get("text") or "")
+        preview = str(item.get("bodyPreview") or text or "")
+        # from 可能是字符串（远端），也可能是 {emailAddress:{address}}（Graph）
+        raw_from = item.get("from")
+        if isinstance(raw_from, str):
+            from_email = raw_from
+        elif isinstance(raw_from, dict):
+            addr = (raw_from.get("emailAddress") or {}) if isinstance(
+                raw_from.get("emailAddress"), dict) else {}
+            from_email = str(addr.get("address") or item.get("fromEmail") or "")
+        else:
+            from_email = str(item.get("fromEmail") or "")
+        rows.append({
+            "id": str(item.get("id") or item.get("messageId") or ""),
+            "subject": str(item.get("subject") or "(无主题)"),
+            "from_name": str(item.get("fromName") or ""),
+            "from_email": from_email,
+            "date": str(item.get("receivedDateTime") or item.get("date") or ""),
+            "preview": preview[:200],
+            "html": html,
+            "text": text,
+            "otp": otp,
+        })
+    rows.sort(key=lambda r: str(r.get("date") or ""), reverse=True)
+    return rows[:max(1, min(100, int(limit or 25)))]
+
+
 def fetch_otp_with_account(
     account: OutlookAccount,
     after_ts: float | None = None,

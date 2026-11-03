@@ -75,7 +75,7 @@ class SourceWiringTest(unittest.TestCase):
     def test_frontend_skips_disabled_card(self):
         html = (Path(__file__).resolve().parents[1]
                 / "webui" / "templates" / "index.html").read_text(encoding="utf-8")
-        seg = html[html.index("if (s.card_id) {"):]
+        seg = html[html.index("// 选卡优先级"):]
         seg = seg[:seg.index("await _autoPayCheckFunds")]
         self.assertIn("!opt.disabled", seg,
                       "没排除不可用的卡，会默认选中一张提交不了的卡")

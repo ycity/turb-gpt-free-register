@@ -1290,7 +1290,8 @@ print('acquired' if lease else 'busy', flush=True)
              patch.object(module, '_configured_live_check_proxies', return_value=['proxy-a', 'proxy-b']), \
              patch.object(module, 'resolve_plan_check_route', return_value={'proxy': 'proxy-a'}), \
              patch.object(module, '_live_proxy_route', return_value={'proxy': 'proxy-b'}), \
-             patch.object(module, 'open_plan_check_proxy', return_value=(None, None)):
+             patch.object(module, 'open_plan_check_proxy', return_value=(None, None)), \
+             patch('config.proxy.LIVE_CHECK_SWITCH_PROXY_ON_FAILURE', True, create=True):
             queued = module.enqueue_account_live_check(account_id=2, email='expired@example.test', return_future=True)
             result = queued['future'].result(timeout=5)
         self.assertFalse(result['ok'])

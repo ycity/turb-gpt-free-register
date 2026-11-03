@@ -394,6 +394,7 @@ class AccountLivenessTests(unittest.TestCase):
              patch("config.proxy.PLAN_CHECK_PROXY", [proxy_a, proxy_b]), \
              patch("config.proxy.PLAN_CHECK_MAX_ATTEMPTS", 3), \
              patch.object(live_service.random, "choice", return_value=proxy_b), \
+             patch("config.proxy.LIVE_CHECK_SWITCH_PROXY_ON_FAILURE", True, create=True), \
              patch.object(live_service, "check_account_liveness", side_effect=[failed, success]) as check:
             result = live_service._run_live_check(
                 account_id=1,

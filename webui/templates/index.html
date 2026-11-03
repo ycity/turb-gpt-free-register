@@ -1586,7 +1586,8 @@
 
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
-    #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden) {
+    #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden),
+    #mailboxModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -1608,6 +1609,45 @@
     }
     #autoPayModal .outlook-import-body { overflow: auto; }
     #autoPayShot { user-select: none; -webkit-user-drag: none; }
+
+    /* ---- 简易收件箱：左列表 + 右详情 ---- */
+    #mailboxModal .outlook-import-dialog {
+      width: min(1100px, 100%); max-height: calc(100vh - 32px);
+    }
+    #mailboxModal .outlook-import-body { overflow: hidden; padding: 0; }
+    .mbx-wrap { display: flex; min-height: 440px; height: min(620px, calc(100vh - 230px)); }
+    .mbx-list {
+      width: 320px; flex: none; overflow-y: auto;
+      border-right: 1px solid #ebeef5; background: #fafbfc;
+    }
+    .mbx-item {
+      padding: 10px 12px; border-bottom: 1px solid #f0f2f5; cursor: pointer;
+    }
+    .mbx-item:hover { background: #f2f6fc; }
+    .mbx-item.active { background: #ecf5ff; border-left: 3px solid #409eff; padding-left: 9px; }
+    .mbx-subj {
+      font-size: 13px; font-weight: 600; color: #303133; line-height: 1.35;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .mbx-meta { margin-top: 4px; font-size: 11px; color: #909399; display: flex; gap: 8px; }
+    .mbx-meta .mbx-from { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mbx-code {
+      display: inline-block; margin-top: 5px; padding: 1px 7px; border-radius: 4px;
+      background: #f0f9eb; color: #529b2e; font-size: 12px; font-weight: 700;
+      letter-spacing: 1px; font-family: ui-monospace, Menlo, Consolas, monospace;
+    }
+    .mbx-detail { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .mbx-detail-head {
+      padding: 14px 16px; border-bottom: 1px solid #ebeef5; background: #fff;
+    }
+    .mbx-detail-head h4 { margin: 0 0 6px; font-size: 15px; color: #303133; line-height: 1.4; }
+    .mbx-detail-sub { font-size: 12px; color: #909399; }
+    .mbx-detail-body { flex: 1; overflow: auto; padding: 0; background: #fff; }
+    .mbx-detail-body iframe { width: 100%; height: 100%; border: 0; display: block; }
+    .mbx-empty {
+      display: flex; align-items: center; justify-content: center; height: 100%;
+      color: #909399; font-size: 13px; padding: 20px; text-align: center;
+    }
     .outlook-import-head-main { min-width: 0; flex: 1; }
     .outlook-import-head h3 {
       margin: 0; font-size: 18px; font-weight: 700; color: #303133; line-height: 1.3;
@@ -2971,6 +3011,38 @@
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnCancelTeamCheckout">关闭</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitTeamCheckout">立即生成长链接</button>
+    </div>
+  </div>
+</div>
+<div id="mailboxModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="mailboxTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="mailboxTitle">收件箱</h3>
+        <p id="mailboxHint">读取该账号邮箱最近的邮件，验证码会自动识别并高亮。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseMailbox" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="mbx-wrap">
+        <div class="mbx-list" id="mailboxList">
+          <div class="mbx-empty">加载中…</div>
+        </div>
+        <div class="mbx-detail">
+          <div class="mbx-detail-head" id="mailboxDetailHead" style="display:none;">
+            <h4 id="mailboxDetailSubject"></h4>
+            <div class="mbx-detail-sub" id="mailboxDetailMeta"></div>
+          </div>
+          <div class="mbx-detail-body" id="mailboxDetailBody">
+            <div class="mbx-empty">选择左侧邮件查看内容</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="outlook-import-foot">
+      <span class="muted" id="mailboxFootInfo" style="margin-right:auto;font-size:12px;"></span>
+      <button type="button" class="jobs-tb-btn" id="btnMailboxRefresh">刷新</button>
+      <button type="button" class="jobs-tb-btn" id="btnMailboxClose2">关闭</button>
     </div>
   </div>
 </div>
@@ -4745,6 +4817,7 @@ function _autoPayFillAddrForm(a) {
 }
 
 let _autoPayAddrCache = [];
+let _autoPayCardCache = [];
 
 async function _autoPayCheckFunds() {
   const box = $('#autoPayFunds');
@@ -4792,11 +4865,13 @@ async function _autoPayLoadSetup() {
   // 卡片：直接问 VCC，余额和状态都是实时的
   const sel = $('#autoPayCardSelect');
   sel.innerHTML = '<option value="">加载中…</option>';
+  _autoPayCardCache = [];
   try {
     const r = await fetch('/api/pay/cards');
     const s = await r.json();
     if (!s.ok) throw new Error(s.error || '查询失败');
     const cards = s.cards || [];
+    _autoPayCardCache = cards;
     if (!cards.length) {
       sel.innerHTML = '<option value="">（没有可用卡）</option>';
       $('#autoPayCardHint').textContent = '未查询到卡片';
@@ -4835,19 +4910,44 @@ async function _autoPayLoadSetup() {
       } else {
         _autoPayFillAddrForm(s.billing || {});
       }
-      if (s.card_id) {
-        const sel2 = $('#autoPayCardSelect');
-        const opt = [...sel2.options].find(o => o.value === s.card_id);
-        // 上次那张卡可能已冻结或余额不足（option 被 disabled），这时不要硬选，
-        // 否则下拉显示着一张根本提交不了的卡。
-        if (opt && !opt.disabled) {
-          sel2.value = s.card_id;
-          if (s.last_card_id && s.last_card_id === s.card_id) {
-            $('#autoPayCardHint').textContent += '，已默认选中上次用的卡';
-          }
-        } else if (opt && opt.disabled && s.last_card_id === s.card_id) {
-          $('#autoPayCardHint').textContent += '，上次用的卡当前不可用，请另选';
+      // 选卡优先级：上次用过的 > 配置值 > 余额够付的第一张。
+      // 前两者都可能指向一张余额不足或已冻结的卡（配置是写死的，卡会被花光），
+      // 那样弹窗一打开就摆着一张提交不了的卡，还得手动换。
+      const sel2 = $('#autoPayCardSelect');
+      const need = Number(s.expected_amount || 0) > 0 && Number(s.usd_rate || 0) > 0
+        ? Number(s.expected_amount) / Number(s.usd_rate) : 0;
+      const pickable = (cid) => {
+        if (!cid) return null;
+        const opt = [...sel2.options].find(o => o.value === cid);
+        return (opt && !opt.disabled) ? opt : null;
+      };
+      const affordable = (_autoPayCardCache || []).find(
+        c => c.usable && Number(c.balance || 0) >= need && pickable(c.card_id));
+
+      let chosen = '';
+      let why = '';
+      if (pickable(s.card_id)) {
+        const c = (_autoPayCardCache || []).find(x => x.card_id === s.card_id);
+        const enough = !need || Number((c || {}).balance || 0) >= need;
+        if (enough) {
+          chosen = s.card_id;
+          why = (s.last_card_id && s.last_card_id === s.card_id)
+            ? '，已默认选中上次用的卡' : '';
+        } else if (affordable) {
+          // 上次/配置那张钱不够，自动换一张够付的，并说明原因
+          chosen = affordable.card_id;
+          why = `，上次用的卡余额不足，已改选 ${affordable.mask}`;
+        } else {
+          chosen = s.card_id;
+          why = '，注意：所有卡余额都不足，发起时会尝试自动充值';
         }
+      } else if (affordable) {
+        chosen = affordable.card_id;
+        why = `，已自动选中余额充足的 ${affordable.mask}`;
+      }
+      if (chosen) {
+        sel2.value = chosen;
+        if (why) $('#autoPayCardHint').textContent += why;
       }
     }
   } catch (err) { /* 用表单现有值 */ }
@@ -5128,13 +5228,125 @@ function _autoPayBind() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _autoPayBind);
 else _autoPayBind();
 
-function _accountsV2MoreMenu(r) {
-  const parts = [
+let _mailboxEmail = '';
+let _mailboxMails = [];
+
+function _mailboxFmtDate(s) {
+  if (!s) return '';
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s).slice(0, 19).replace('T', ' ');
+  const pad = (n) => String(n).padStart(2, '0');
+  const sameDay = (new Date()).toDateString() === d.toDateString();
+  return sameDay
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function _mailboxRenderList() {
+  const box = $('#mailboxList');
+  if (!_mailboxMails.length) {
+    box.innerHTML = '<div class="mbx-empty">收件箱为空</div>';
+    return;
+  }
+  box.innerHTML = _mailboxMails.map((m, i) => `
+    <div class="mbx-item" data-mbx-index="${i}">
+      <div class="mbx-subj">${esc(m.subject || '(无主题)')}</div>
+      <div class="mbx-meta">
+        <span class="mbx-from">${esc(m.from_name || m.from_email || '')}</span>
+        <span>${esc(_mailboxFmtDate(m.date))}</span>
+      </div>
+      ${m.otp ? `<span class="mbx-code">${esc(m.otp)}</span>` : ''}
+    </div>`).join('');
+}
+
+function _mailboxShow(idx) {
+  const m = _mailboxMails[idx];
+  if (!m) return;
+  document.querySelectorAll('#mailboxList .mbx-item').forEach((el, i) => {
+    el.classList.toggle('active', i === idx);
+  });
+  $('#mailboxDetailHead').style.display = '';
+  $('#mailboxDetailSubject').textContent = m.subject || '(无主题)';
+  const who = m.from_name ? `${m.from_name} <${m.from_email}>` : (m.from_email || '未知发件人');
+  $('#mailboxDetailMeta').textContent = `${who} · ${_mailboxFmtDate(m.date)}`;
+
+  // 邮件正文是外部 HTML，必须隔离在 sandbox iframe 里，不能直接塞进页面。
+  const body = $('#mailboxDetailBody');
+  body.innerHTML = '';
+  const frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', '');
+  const plain = m.text || m.preview || '';
+  frame.srcdoc = m.html
+    || `<pre style="white-space:pre-wrap;word-break:break-word;font:13px/1.6 system-ui;padding:14px;margin:0;">${esc(plain || '(无正文)')}</pre>`;
+  body.appendChild(frame);
+
+  if (m.otp) {
+    copyText(m.otp);
+    showToast(`验证码 ${m.otp} 已复制`, 3000);
+  }
+}
+
+async function _mailboxLoad() {
+  const box = $('#mailboxList');
+  box.innerHTML = '<div class="mbx-empty">加载中…</div>';
+  $('#mailboxFootInfo').textContent = _mailboxEmail;
+  try {
+    const r = await fetch('/api/mailbox/list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: _mailboxEmail, limit: 30 }),
+    });
+    const s = await r.json();
+    if (!s.ok) {
+      box.innerHTML = `<div class="mbx-empty">读取失败：${esc(s.error || '未知错误')}</div>`;
+      return;
+    }
+    _mailboxMails = s.mails || [];
+    _mailboxRenderList();
+    $('#mailboxFootInfo').textContent = `${_mailboxEmail} · 共 ${s.count} 封`;
+    if (_mailboxMails.length) _mailboxShow(0);
+  } catch (err) {
+    box.innerHTML = `<div class="mbx-empty">请求失败：${esc(err.message)}</div>`;
+  }
+}
+
+function openMailbox(email) {
+  if (!email) { showToast('该账号没有邮箱'); return; }
+  closeAccountsV2MoreMenus();
+  _mailboxEmail = email;
+  _mailboxMails = [];
+  $('#mailboxTitle').textContent = '收件箱 — ' + email;
+  $('#mailboxDetailHead').style.display = 'none';
+  $('#mailboxDetailBody').innerHTML = '<div class="mbx-empty">选择左侧邮件查看内容</div>';
+  $('#mailboxModal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  _mailboxLoad();
+}
+
+function _mailboxBind() {
+  const close = () => {
+    $('#mailboxModal').classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  const x = $('#btnCloseMailbox'); if (x) x.onclick = close;
+  const c = $('#btnMailboxClose2'); if (c) c.onclick = close;
+  const rf = $('#btnMailboxRefresh'); if (rf) rf.onclick = _mailboxLoad;
+  const list = $('#mailboxList');
+  if (list) list.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-mbx-index]');
+    if (item) _mailboxShow(parseInt(item.dataset.mbxIndex, 10));
+  });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _mailboxBind);
+else _mailboxBind();
+
+function _accountsV2MoreMenu(r) {  const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
     `<button type="button" data-account-copy-secret="login_credentials" data-account-id="${esc(r.id)}" title="复制邮箱、注册密码和 2FA 密钥">复制登录凭据</button>`,
     `<button type="button" data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button>`,
     `<button type="button" data-account-change-email="${esc(r.id)}" title="从指定邮箱来源领取新邮箱并换绑">换绑邮箱</button>`,
     `<button type="button" data-account-change-email-log="${esc(r.id)}" title="查看最近一次邮箱换绑日志">换绑日志</button>`,
+    `<button type="button" onclick="openMailbox('${esc(r.email)}'); return false;" title="打开该账号邮箱的收件箱，查看验证码和邮件原文">收件箱</button>`,
     `<button type="button" onclick="checkSelectedLive([Number('${esc(r.id)}')], this); return false;" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活刷新AT</button>`,
     `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,

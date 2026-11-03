@@ -1501,6 +1501,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             "holder_id": cfg.VCC_HOLDER_ID or 0,
             "expected_amount": cfg.VCC_EXPECTED_AMOUNT,
             "expected_currency": cfg.VCC_EXPECTED_CURRENCY,
+            # 前端据此估算这次大概要多少 USD，好挑一张余额够的卡
+            "usd_rate": getattr(cfg, "VCC_USD_RATE", 0) or 0,
         })
 
     @app.get("/api/pay/active")
@@ -3317,6 +3319,104 @@ def create_app(auth_code: str | None = None) -> Flask:
                 warning = f"可用邮箱仅 {pool.get('available', 0)} 个，少于任务数 {count}，不足的会失败"
         jobs = svc.submit_registration(count=count, workers=workers)
         return jsonify({"ok": True, "submitted": len(jobs), "jobs": jobs, "warning": warning, "workers": workers})
+
+    @app.post("/api/mailbox/list")
+    def api_mailbox_list():
+        """读某个账号邮箱的收件箱。Body: {email | account_id, limit}
+
+        手工处理账号时经常要看邮件原文（验证码、安全提醒、改密通知），
+        光给一个 6 位数不够用。这里返回列表+正文，前端渲染成简易收件箱。
+        """
+        data = request.get_json(silent=True) or {}
+        email = str(data.get("email") or "").strip()
+        if not email and data.get("account_id") is not None:
+            try:
+                acc = db.get_account(int(data["account_id"]))
+            except (TypeError, ValueError):
+                acc = None
+            email = str((acc or {}).get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "缺少 email 或 account_id"}), 400
+        try:
+            limit = max(1, min(100, int(data.get("limit") or 25)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "limit 非法"}), 400
+
+        from core.email_provider import resolve_email_source
+
+        try:
+            source = resolve_email_source(email)
+        except Exception:
+            source = ""
+        if source and source != "outlook":
+            return jsonify({
+                "ok": False, "email": email, "source": source,
+                "error": f"暂只支持 outlook 邮箱的收件箱查看，当前来源：{source}",
+            }), 200
+
+        from core.outlook_client import list_inbox
+
+        try:
+            mails = list_inbox(email, limit=limit)
+        except Exception as exc:
+            return jsonify({
+                "ok": False, "email": email, "source": source,
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            }), 200
+        return jsonify({"ok": True, "email": email, "source": source,
+                        "count": len(mails), "mails": mails})
+
+    @app.post("/api/otp/fetch")
+    def api_otp_fetch():
+        """手动取一次邮箱验证码。Body: {email | account_id, fresh_only, max_wait}
+
+        手工操作账号（补 2FA、换绑、人工登录）时需要看验证码，但现有通道只服务
+        于自动流程：manual-otp 是"人往里填"，不是"把收到的码读出来"。这里直接
+        读邮箱，和注册流程用同一套取码实现，省得去邮箱网页翻。
+
+        fresh_only=True 只认本次请求之后到达的新邮件，避免把上一封过期的旧码
+        当成新的用。
+        """
+        data = request.get_json(silent=True) or {}
+        email = str(data.get("email") or "").strip()
+        if not email and data.get("account_id") is not None:
+            try:
+                acc = db.get_account(int(data["account_id"]))
+            except (TypeError, ValueError):
+                acc = None
+            email = str((acc or {}).get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "缺少 email 或 account_id"}), 400
+
+        try:
+            max_wait = max(5, min(180, int(data.get("max_wait") or 60)))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "max_wait 非法"}), 400
+
+        # 只要新邮件时，用当前时刻作为分界；否则放开取最新一封。
+        after_ts = time.time() if data.get("fresh_only") else 0.0
+
+        from core.email_provider import resolve_email_source, wait_for_otp
+
+        source = None
+        try:
+            source = resolve_email_source(email)
+        except Exception:
+            source = None
+
+        try:
+            # force_service=True：绕过"等人工填码"的通道，直接读邮箱。
+            code = wait_for_otp(email, after_ts=after_ts, max_wait=max_wait,
+                                email_source=source, force_service=True)
+        except Exception as exc:
+            return jsonify({
+                "ok": False,
+                "email": email,
+                "source": source,
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            }), 200
+        return jsonify({"ok": True, "email": email, "source": source,
+                        "code": code, "fresh_only": bool(data.get("fresh_only"))})
 
     @app.get("/api/manual-otp/waiting")
     def api_manual_otp_waiting():
