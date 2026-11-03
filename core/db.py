@@ -2268,24 +2268,35 @@ def update_account_totp_secret(acc_id: int, result: dict | None = None) -> bool:
         return True
 
 
-def recover_interrupted_totp_setups() -> int:
-    """服务启动时恢复上次进程中断的 2FA 设置状态。"""
+def recover_interrupted_totp_setups() -> list[dict]:
+    """服务启动时恢复上次进程中断的 2FA 设置状态。
+
+    返回被中断的账号列表，便于调用方重新入队：2FA 跑在后台线程里，一次
+    部署重启就会把它打断（线上 #42 就是这么丢的），留个 failed 等人手动点
+    很容易被忽略。
+    """
     with _LOCK:
         rows = _load_accounts()
-        recovered = 0
+        interrupted: list[dict] = []
         now = _now()
         for row in rows:
             if row.get("totp_setup_status") not in {"queued", "running"}:
                 continue
             row["totp_setup_status"] = "failed"
             row["totp_setup_ok"] = False
-            row["totp_setup_error"] = "WebUI 重启导致 2FA 设置中断，请重新开启"
+            row["totp_setup_error"] = "WebUI 重启导致 2FA 设置中断，已自动重新排队"
             row["totp_setup_completed_at"] = now
             row["updated_at"] = now
-            recovered += 1
-        if recovered:
+            interrupted.append({
+                "id": int(row.get("id") or 0),
+                "email": str(row.get("email") or ""),
+                "access_token": str(row.get("access_token") or ""),
+                "proxy_used": str(row.get("proxy_used") or ""),
+                "trigger": str(row.get("totp_setup_trigger") or "registration_auto"),
+            })
+        if interrupted:
             _save_accounts(rows)
-        return recovered
+        return interrupted
 
 
 def totp_setup_activity() -> dict:

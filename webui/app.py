@@ -310,6 +310,38 @@ def _job_status_counts(rows: list[dict]) -> dict:
     return counts
 
 
+def _requeue_interrupted_totp(rows: list[dict]) -> None:
+    """把被重启打断的 2FA 重新排队。
+
+    2FA 跑在后台线程，一次部署重启就会把它打断，而注册时的"空闲检查"只看
+    注册任务，看不到正在跑的 2FA（线上 #42 就是这么丢的）。留个 failed 等人
+    手动点很容易被忽略，这里直接重排。
+    """
+    from core.twofa_service import enqueue_account_totp_setup
+
+    for row in rows:
+        email = str(row.get("email") or "")
+        token = str(row.get("access_token") or "")
+        if not email or not token:
+            logger.warning("[2FA] 中断恢复跳过（缺邮箱或 token）：%s", email or row.get("id"))
+            continue
+        try:
+            res = enqueue_account_totp_setup(
+                account_id=int(row.get("id") or 0),
+                email=email,
+                access_token=token,
+                trigger=str(row.get("trigger") or "registration_auto"),
+                proxy=str(row.get("proxy_used") or "") or None,
+            )
+        except Exception:
+            logger.exception("[2FA] 中断恢复重新入队失败：%s", email)
+            continue
+        if res.get("accepted"):
+            logger.warning("[2FA] 已自动重新排队被重启打断的设置：%s", email)
+        else:
+            logger.warning("[2FA] 重新排队被拒：%s %s", email, res.get("error") or "")
+
+
 def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, running_fn=None) -> dict:
     if not path.exists():
         return {"ok": True, "log": "", "running": bool(default_running)}
@@ -458,7 +490,9 @@ def create_app(auth_code: str | None = None) -> Flask:
                 logger.warning("已恢复 %s 个因 WebUI 重启中断的 Codex Agent Token 状态", recovered_codex_agents)
             recovered_totp_setups = db.recover_interrupted_totp_setups()
             if recovered_totp_setups:
-                logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态", recovered_totp_setups)
+                logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态",
+                               len(recovered_totp_setups))
+                _requeue_interrupted_totp(recovered_totp_setups)
             recovered_email_changes = db.recover_interrupted_email_changes()
             if recovered_email_changes:
                 logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
@@ -3417,6 +3451,54 @@ def create_app(auth_code: str | None = None) -> Flask:
             }), 200
         return jsonify({"ok": True, "email": email, "source": source,
                         "code": code, "fresh_only": bool(data.get("fresh_only"))})
+
+    @app.get("/api/busy")
+    def api_busy():
+        """重启前的安全检查：汇总所有会被重启打断的后台活动。
+
+        光看注册任务不够——2FA、查活、支付这些都跑在后台线程里，重启会直接
+        打断（线上 #42 的 2FA 就是这么丢的）。
+        """
+        detail: dict = {}
+        busy = False
+
+        try:
+            counts = db.job_status_counts() or {}
+            n = int(counts.get("active") or 0)
+            detail["registration_jobs"] = n
+            busy = busy or n > 0
+        except Exception:
+            detail["registration_jobs"] = "查询失败"
+
+        try:
+            act = db.totp_setup_activity() or {}
+            n = int(act.get("pending") or 0)
+            detail["totp_setups"] = n
+            detail["totp_pending_since"] = act.get("pending_since")
+            busy = busy or n > 0
+        except Exception:
+            detail["totp_setups"] = "查询失败"
+
+        try:
+            from core.vcc_pay_session import list_active
+            # list_active 返回单个会话或 None，不是列表
+            n = 1 if list_active() else 0
+            detail["pay_sessions"] = n
+            busy = busy or n > 0
+        except Exception:
+            detail["pay_sessions"] = "查询失败"
+
+        for label, expr in (("live_checks", "live_check_status"),
+                            ("plan_checks", "plan_check_status")):
+            try:
+                rows = [a for a in db.list_accounts(limit=500)
+                        if str(a.get(expr) or "").lower() in {"queued", "running"}]
+                detail[label] = len(rows)
+                busy = busy or bool(rows)
+            except Exception:
+                detail[label] = "查询失败"
+
+        return jsonify({"ok": True, "busy": busy, "detail": detail})
 
     @app.get("/api/manual-otp/waiting")
     def api_manual_otp_waiting():
