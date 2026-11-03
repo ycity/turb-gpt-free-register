@@ -330,6 +330,10 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
                 log_logger.info(f"[Job {job_id}] 成功: {result.get('email')}")
+                try:
+                    db.clear_outlook_failures(str(result.get("email") or ""))
+                except Exception:
+                    log_logger.debug("[Job %s] 清理邮箱失败计数失败", job_id, exc_info=True)
             else:
                 # 注意：失败也可能伴随 account_id（如 Codex 失败但账号已注册成功）
                 err = (result or {}).get("error") if isinstance(result, dict) else "unknown"

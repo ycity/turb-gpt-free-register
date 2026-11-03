@@ -1435,7 +1435,21 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
             return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
             """)
             if btn:
-                text = str(btn.text or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
+                # 读按钮文字只是为了写日志，取不到也必须照常点下去。
+                # 这里曾因 CloakElement 没有 .text 抛 AttributeError，被外层
+                # except 吞掉后当成"没找到按钮"，空转到超时——按钮其实一直都在。
+                text = ""
+                for getter in (
+                    lambda: getattr(btn, "text", "") or "",
+                    lambda: btn.get_attribute("value") or "",
+                    lambda: btn.get_attribute("data-dd-action-name") or "",
+                ):
+                    try:
+                        text = str(getter()).strip()
+                    except Exception:  # noqa: BLE001
+                        text = ""
+                    if text:
+                        break
                 _human_click(driver, btn, label="resend_otp")
                 logger.info("%s[OTP] 已点击重新发送验证码按钮：%s", _log_prefix(driver), text or '-')
                 time.sleep(random.uniform(1.1, 2.4) if _browser_actions_enabled() else 1.5)

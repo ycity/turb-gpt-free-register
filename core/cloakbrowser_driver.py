@@ -83,6 +83,20 @@ class CloakElement:
         except Exception:
             return ""
 
+    @property
+    def text(self) -> str:
+        """元素可见文字。对齐 Selenium 的 WebElement.text。
+
+        缺了这个属性会让调用方直接抛 AttributeError。实测后果不是报错退出，
+        而是异常被上层 except 吞掉、按钮当成没找到，循环空转到超时——
+        2026-11-02/03 的自动注册就是这样连续失败 28 次。
+        """
+        try:
+            return str(self._eval(
+                "el => (el.innerText || el.textContent || '')") or "").strip()
+        except Exception:
+            return ""
+
     def send_keys(self, *values: str) -> None:
         # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')、Keys.BACKSPACE 及逐字符追加输入。
         text = "".join(str(v or "") for v in values)

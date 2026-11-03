@@ -2734,6 +2734,18 @@ def claim_next_outlook() -> dict | None:
         return _decorate_outlook(row)
 
 
+def clear_outlook_failures(email: str) -> bool:
+    """注册成功后清掉失败计数，别让偶发失败累积成停用。"""
+    with _LOCK:
+        rows = _load_outlook()
+        row = _find_by_email(rows, email)
+        if row is None or not row.get("consecutive_failures"):
+            return False
+        row["consecutive_failures"] = 0
+        _save_outlook(rows)
+        return True
+
+
 def release_outlook(email: str, status: str = "available", note: str | None = None) -> None:
     """把账号状态改回 available，或标记为 used/failed/disabled。"""
     with _LOCK:
@@ -2751,8 +2763,18 @@ def release_outlook(email: str, status: str = "available", note: str | None = No
         _save_outlook(rows)
 
 
+#: 同一邮箱连续失败多少次后停用，不再放回池子。
+#: 领取按 id 升序，所以一个反复失败的邮箱会被每一轮都选中，把整个自动注册
+#: 卡死（2026-11-02/03 就有一个邮箱连卡 28 轮）。
+_EMAIL_MAX_CONSECUTIVE_FAILURES = 3
+
+
 def release_unconsumed_outlook(email: str, note: str | None = None) -> bool:
-    """原子回收未生成本地账号且仍为 used 的 Outlook 邮箱。"""
+    """原子回收未生成本地账号且仍为 used 的 Outlook 邮箱。
+
+    连续失败达到上限就停用而不是放回：否则它会一直是 id 最小的 available，
+    被永远优先领取，后面的邮箱一个都轮不到。
+    """
     with _LOCK:
         if _find_by_email(_load_accounts(), email) is not None:
             return False
@@ -2760,10 +2782,21 @@ def release_unconsumed_outlook(email: str, note: str | None = None) -> bool:
         row = _find_by_email(rows, email)
         if row is None or row.get("status") != "used":
             return False
-        row["status"] = "available"
-        row["used_at"] = None
-        if note is not None:
-            row["note"] = note
+        try:
+            fails = int(row.get("consecutive_failures") or 0) + 1
+        except (TypeError, ValueError):
+            fails = 1
+        row["consecutive_failures"] = fails
+        if fails >= _EMAIL_MAX_CONSECUTIVE_FAILURES:
+            row["status"] = "disabled"
+            row["used_at"] = row.get("used_at") or _now()
+            row["note"] = (f"连续失败 {fails} 次已停用，不再自动领取。"
+                           f"最后一次：{str(note or '')[:160]}")
+        else:
+            row["status"] = "available"
+            row["used_at"] = None
+            if note is not None:
+                row["note"] = f"[失败 {fails}/{_EMAIL_MAX_CONSECUTIVE_FAILURES}] {note}"
         _save_outlook(rows)
         return True
 
