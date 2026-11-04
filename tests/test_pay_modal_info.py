@@ -34,17 +34,26 @@ class InfoBarTest(unittest.TestCase):
     def test_shows_email_and_proxy(self):
         seg = _fn("_autoPayRenderWho")
         self.assertIn("acc.email", seg)
-        self.assertIn("acc.proxy_used", seg)
+        self.assertIn("acc.register_proxy_name", seg)
 
-    def test_proxy_credentials_masked(self):
-        """常驻显示，绝不能把代理密码摊在屏幕上。"""
-        seg = _fn("_autoPayMaskProxy")
-        self.assertIn("hostname", seg)
-        self.assertNotIn("u.password", seg)
-        self.assertNotIn("u.username", seg)
+    def test_uses_field_the_api_actually_returns(self):
+        """列表接口不下发 proxy_used（含代理密码），读它只会拿到 undefined，
+        结果所有账号都显示成"直连"。注释里提到它没关系，代码里不能再读。"""
+        code = "\n".join(
+            ln for ln in _fn("_autoPayRenderWho").splitlines()
+            if not ln.lstrip().startswith("//"))
+        self.assertNotIn("acc.proxy_used", code)
 
-    def test_direct_connection_labeled(self):
-        self.assertIn("直连", _fn("_autoPayMaskProxy"))
+    def test_no_credentials_in_output(self):
+        """代理名是池里的别名，天然不含密码。"""
+        seg = _fn("_autoPayRenderWho")
+        for leak in ("password", "username", "@"):
+            self.assertNotIn(f"acc.{leak}", seg)
+
+    def test_missing_proxy_labeled_without_claiming_direct(self):
+        """拿不到代理名时别断言是直连——也可能是代理已从池中删除。"""
+        seg = _fn("_autoPayRenderWho")
+        self.assertIn("未绑定代理", seg)
 
     def test_values_escaped(self):
         seg = _fn("_autoPayRenderWho")

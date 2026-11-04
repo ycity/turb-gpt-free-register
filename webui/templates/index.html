@@ -4805,19 +4805,6 @@ async function _autoPayPoll() {
   }
 }
 
-function _autoPayMaskProxy(url) {
-  // 常驻显示，不能把代理密码摊在屏幕上
-  const s = String(url || '').trim();
-  if (!s) return '直连（未绑定代理）';
-  try {
-    const u = new URL(s);
-    return `${u.hostname}:${u.port || '-'}`;
-  } catch (e) {
-    const tail = s.split('@').pop();
-    return tail || s;
-  }
-}
-
 function _autoPayRenderWho(id) {
   const box = $('#autoPayWho');
   if (!box) return;
@@ -4825,7 +4812,10 @@ function _autoPayRenderWho(id) {
     ? ACCOUNTS.find(a => Number(a.id) === Number(id)) : null) || {};
   const email = String(acc.email || '').trim();
   if (!email) { box.classList.add('hidden'); return; }
-  const proxy = _autoPayMaskProxy(acc.proxy_used);
+  // 列表接口不下发 proxy_used（里面带代理密码），只给代理池里的名称。
+  // 之前读 acc.proxy_used 拿到 undefined，于是一律显示成"直连"。
+  const proxyName = String(acc.register_proxy_name || '').trim();
+  const proxy = proxyName || '未绑定代理（注册时直连或代理已从池中删除）';
   const plan = String(acc.current_plan_type || acc.plan_type || '').trim();
   box.classList.remove('hidden');
   box.innerHTML =
