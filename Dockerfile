@@ -46,6 +46,9 @@ http://dl.google.com/linux/chrome/deb/ stable main" \
 # 浏览器装进已挂载的 cache 目录，docker restart 后不丢。
 # /root/.cache 没有挂载，装那里重启即失效。
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/cache/ms-playwright
+# 同理，CloakBrowser 的 license.key 和内核也要落在挂载的 cache 里，
+# 否则容器重建后 cloakbrowser login 的结果就没了。
+ENV CLOAKBROWSER_CACHE_DIR=/app/cache/cloakbrowser
 
 COPY . .
 

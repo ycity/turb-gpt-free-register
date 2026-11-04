@@ -27,6 +27,10 @@ services:
       # 浏览器装在挂载的 cache 卷里，容器重建也不用重新下载。
       # 不指向 /root/.cache：那里没有挂载，重启就丢。
       - PLAYWRIGHT_BROWSERS_PATH=/app/cache/ms-playwright
+      # CloakBrowser 的 license.key 和下载的内核默认落在 ~/.cloakbrowser，
+      # 而 /root 没有挂载：容器一重建就丢，注册会直接报 LicenseError。
+      # 指到挂载的 cache 卷里，重建后 license 和内核都还在。
+      - CLOAKBROWSER_CACHE_DIR=/app/cache/cloakbrowser
       # 有头 Chrome 用的虚拟显示：Stripe 提交时会弹 hCaptcha，
       # 无头浏览器几乎必被拦，必须有头 + 真人远程点击才过得去。
       - DISPLAY=:99

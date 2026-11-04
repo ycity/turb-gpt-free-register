@@ -76,6 +76,16 @@ finally:
     fi
 fi
 
+# CloakBrowser 的 license 丢了就只会在注册跑到一半时报 LicenseError，
+# 日志里混在一堆注册输出里很难注意到，所以启动时先喊一嗓子。
+CLOAK_DIR="${CLOAKBROWSER_CACHE_DIR:-/root/.cloakbrowser}"
+if [ -s "${CLOAK_DIR}/license.key" ]; then
+    echo "[entrypoint] CloakBrowser license 就位：${CLOAK_DIR}/license.key"
+else
+    echo "[entrypoint] WARNING: 找不到 ${CLOAK_DIR}/license.key —— CloakBrowser 起不来，" >&2
+    echo "[entrypoint]          注册会报 LicenseError。修复：docker exec -it <容器> cloakbrowser login" >&2
+fi
+
 python web.py --host 0.0.0.0 --port 5000 &
 WEB_PID=$!
 wait "$WEB_PID"
