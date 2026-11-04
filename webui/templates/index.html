@@ -3143,6 +3143,13 @@
         </label>
         <div id="autoPayFunds" class="hidden" style="margin:-4px 0 8px;padding:8px;border-radius:6px;font-size:13px;"></div>
 
+        <label class="outlook-import-field">
+          <span>支付出口 <small class="muted" id="autoPayProxyHint">默认走注册时的代理</small></span>
+          <select id="autoPayProxySelect">
+            <option value="">— 用注册代理 —</option>
+          </select>
+        </label>
+
         <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">③ 账单地址</div>
         <label class="outlook-import-field">
           <span>账单地址 <small class="muted" id="autoPayAddrHint"></small></span>
@@ -4946,6 +4953,50 @@ function _autoPayFillAddrForm(a) {
 let _autoPayAddrCache = [];
 let _autoPayCardCache = [];
 let _autoPayCardLinks = {};
+let _autoPayProxyCache = [];
+
+// 支付出口选择。怀疑账单地址国家和出口国家不一致会被 Stripe 拒，
+// 所以要能在不动注册代理的前提下临时换一个出口重试。
+async function _autoPayLoadProxies() {
+  const sel = $('#autoPayProxySelect');
+  if (!sel) return;
+  try {
+    const r = await fetch('/api/proxy-pool');
+    const s = await r.json();
+    _autoPayProxyCache = (s.items || []).filter(p => p.enabled && p.valid);
+  } catch (err) {
+    return;  // 出口选择是辅助功能，拉不到就只用注册代理
+  }
+  // 按国家分组，方便挑一个和账单地址同国家的
+  const byCc = {};
+  _autoPayProxyCache.forEach(p => {
+    const cc = ((p.test || {}).country || '??').toUpperCase();
+    (byCc[cc] = byCc[cc] || []).push(p);
+  });
+  const groups = Object.keys(byCc).sort().map(cc => {
+    const opts = byCc[cc].map(p => {
+      const city = (p.test || {}).city || '';
+      return `<option value="${esc(p.name)}">${esc(p.name)}${city ? ' — ' + esc(city) : ''}</option>`;
+    }).join('');
+    return `<optgroup label="${esc(cc)}（${byCc[cc].length}）">${opts}</optgroup>`;
+  }).join('');
+  sel.innerHTML = '<option value="">— 用注册代理 —</option>' + groups;
+}
+
+function _autoPayProxyHintSync() {
+  const sel = $('#autoPayProxySelect');
+  const hint = $('#autoPayProxyHint');
+  if (!sel || !hint) return;
+  if (!sel.value) { hint.textContent = '默认走注册时的代理'; return; }
+  const p = _autoPayProxyCache.find(x => x.name === sel.value) || {};
+  const cc = ((p.test || {}).country || '?').toUpperCase();
+  const addr = _autoPayAddrCache.find(
+    a => String(a.id) === $('#autoPayAddrSelect').value);
+  const want = String((addr || {}).country || '').toUpperCase();
+  hint.textContent = (want && cc !== want)
+    ? `出口 ${cc}，账单地址 ${want} —— 国家不一致`
+    : `出口 ${cc}${want ? '，与账单地址一致' : ''}`;
+}
 
 // 按"这张卡用过 / 没用过"把地址分两组渲染，用过的排前面。
 function _autoPayRenderAddrOptions(cardId) {
@@ -5073,6 +5124,8 @@ async function _autoPayLoadSetup() {
     _autoPayCardLinks = s.card_links || {};
     _autoPayRenderAddrOptions(addrSel.value);
   } catch (err) { /* 地址簿是锦上添花，失败不挡流程 */ }
+
+  await _autoPayLoadProxies();
 
   // 没存过地址时用配置里的默认值兜底
   try {
@@ -5476,6 +5529,8 @@ async function _autoPayStart() {
     holder_id: Number(opt && opt.dataset.holder) || 0,
     billing: addr,
     save_address: $('#autoPaySaveAddr').checked,
+    // 留空则后端继续用注册代理
+    pay_proxy_name: $('#autoPayProxySelect').value,
     // 长链参数
     provider: $('#apProvider').value,
     promo_code: $('#apPromoCode').value.trim(),
@@ -5591,8 +5646,12 @@ function _autoPayBind() {
   const cardSel = $('#autoPayCardSelect');
   if (cardSel) cardSel.onchange = () => {
     _autoPayApplyCardAddress();
+    _autoPayProxyHintSync();
     _autoPayCheckFunds();
   };
+
+  const proxySel = $('#autoPayProxySelect');
+  if (proxySel) proxySel.onchange = _autoPayProxyHintSync;
 
   const addrSel = $('#autoPayAddrSelect');
   if (addrSel) addrSel.onchange = () => {
@@ -5606,6 +5665,7 @@ function _autoPayBind() {
     } else {
       $('#autoPaySaveAddr').checked = true;
     }
+    _autoPayProxyHintSync();
   };
 
   const btnHuman = $('#btnAutoPayHumanDone');

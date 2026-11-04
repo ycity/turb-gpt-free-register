@@ -117,6 +117,24 @@ def list_pool() -> dict:
     }
 
 
+def resolve_by_name(name: str) -> str:
+    """按池里的名称取回完整代理地址（含密码）。
+
+    列表接口只下发脱敏地址，前端选出口时只能回传名称，由这里还原。
+    只认已启用的条目：停用的出口不该被支付偷偷用上。
+    """
+    want = _clean_name(name)
+    if not want:
+        return ""
+    for raw in _current_lines():
+        url, item_name, enabled = split_proxy_pool_line(raw)
+        if not url or not enabled:
+            continue
+        if _clean_name(item_name) == want:
+            return normalize_proxy_url(url)
+    return ""
+
+
 def save_pool(items, *, version: str | None = None) -> dict:
     """整表保存。
 
