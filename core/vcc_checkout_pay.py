@@ -700,10 +700,14 @@ def pay_checkout(checkout_url: str, *, email: str, proxy: str = "",
             if not name:
                 raise VccPayError("VCC_NAME_SOURCE=config 但 VCC_BILLING_NAME 为空")
         else:
-            holder = client.pick_cardholder(int(cfg.VCC_HOLDER_ID or 0))
-            name = str(holder.get("holderName") or "").strip() or " ".join(
-                p for p in (str(holder.get("firstName") or "").strip(),
-                            str(holder.get("lastName") or "").strip()) if p)
+            # 卡行自带 holderName，且它就是卡面姓名；持卡人表可能查不到这个
+            # holderId（老卡的持卡人记录会从列表里消失），所以优先用卡自己的。
+            name = str(card_row.get("holderName") or "").strip()
+            if not name:
+                holder = client.pick_cardholder(int(cfg.VCC_HOLDER_ID or 0))
+                name = str(holder.get("holderName") or "").strip() or " ".join(
+                    p for p in (str(holder.get("firstName") or "").strip(),
+                                str(holder.get("lastName") or "").strip()) if p)
             if not name:
                 raise VccPayError("持卡人姓名为空，请改用 VCC_BILLING_NAME")
 
