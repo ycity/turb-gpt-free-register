@@ -477,9 +477,14 @@ EDITABLE_FIELDS = [
         "label": "等待人工提交(秒)", "help": "交还窗口后最多等多久，默认1800秒。期间会阻塞提链流程",
     },
     {
+        "key": "VCC_USE_CLOAK", "file": "vcc.py", "type": "bool", "group": "自动支付",
+        "label": "支付用 CloakBrowser",
+        "help": "开=指纹伪装内核(默认)；关=走下面的浏览器通道。某些卡只在真 Chrome 下过得了 3DS，遇到 unable to authenticate your payment method 可关掉试试（需容器内已装 Chrome）",
+    },
+    {
         "key": "VCC_BROWSER_CHANNEL", "file": "vcc.py", "type": "str", "group": "自动支付",
         "label": "本机浏览器通道",
-        "help": "chrome 或 msedge。要开窗口就必须填，Playwright 自带内核是无头版开不出窗口",
+        "help": "chrome 或 msedge，仅在上面关掉 CloakBrowser 时生效。Playwright 自带内核是打过补丁的 Chromium，风控认得出来",
     },
     {
         "key": "VCC_BROWSER_PATH", "file": "vcc.py", "type": "str", "group": "自动支付",

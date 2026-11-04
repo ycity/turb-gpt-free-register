@@ -27,7 +27,20 @@ RUN pip install --no-cache-dir \
     python -m playwright install-deps chromium && \
     pip install --no-cache-dir websockify && \
     apt-get update && \
-    apt-get install -y --no-install-recommends xvfb x11vnc novnc && \
+    apt-get install -y --no-install-recommends xvfb x11vnc novnc wget gnupg ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# 真 Google Chrome。Playwright 自带的是打了补丁的 Chromium，Stripe 风控和发卡行
+# 3DS 认得出来，表现为 "unable to authenticate your payment method"。
+# 装成 channel=chrome 后 VCC_BROWSER_CHANNEL=chrome 即可切过去。
+RUN mkdir -p /etc/apt/keyrings && \
+    wget -qO /etc/apt/keyrings/google-chrome.asc \
+        https://dl.google.com/linux/linux_signing_key.pub && \
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.asc] \
+http://dl.google.com/linux/chrome/deb/ stable main" \
+        > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
 
 # 浏览器装进已挂载的 cache 目录，docker restart 后不丢。

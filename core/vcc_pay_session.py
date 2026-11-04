@@ -228,11 +228,19 @@ def _try_cloak_browser(cfg, proxy: str, sess):
 
 
 def _plain_browser(pw, cfg, proxy: str):
-    """裸 Playwright 回退路径。"""
+    """裸 Playwright 回退路径。
+
+    默认内核是 Playwright 打过补丁的 Chromium，Stripe 和发卡行 3DS 认得出来。
+    配 VCC_BROWSER_CHANNEL=chrome 可改用系统装的真 Google Chrome——指纹不如
+    CloakBrowser 完整，但内核是真的，有些卡只在真 Chrome 下过得了认证。
+    """
     from core.vcc_checkout_pay import build_proxy_option
 
     launch: dict[str, Any] = {
         "headless": not bool(getattr(cfg, "VCC_SERVER_HEADED", False)),
+        # 没有这些，navigator.webdriver 直接为 true，风控一眼看穿
+        "args": ["--disable-blink-features=AutomationControlled"],
+        "ignore_default_args": ["--enable-automation"],
     }
     channel = (getattr(cfg, "VCC_BROWSER_CHANNEL", "") or "").strip()
     exec_path = (getattr(cfg, "VCC_BROWSER_PATH", "") or "").strip()
@@ -312,8 +320,30 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
     try:
         if proxy:
             logger.info("[pay-session] %s 浏览器走代理", sess.sid)
-        context = browser.new_context(viewport={"width": VIEWPORT_W,
-                                                "height": VIEWPORT_H})
+        context_kwargs: dict[str, Any] = {"viewport": {"width": VIEWPORT_W,
+                                                       "height": VIEWPORT_H}}
+        if pw_ctx is not None:
+            # CloakBrowser 自己按出口 IP 配时区语言；裸路径得自己补，
+            # 否则代理在美国而浏览器报 UTC，风控一眼就看出来。
+            try:
+                from core.cloakbrowser_driver import _build_cloak_locale_options
+                loc = _build_cloak_locale_options(proxy or None)
+                if loc.get("locale"):
+                    context_kwargs["locale"] = loc["locale"]
+                if loc.get("timezone"):
+                    context_kwargs["timezone_id"] = loc["timezone"]
+                if loc.get("accept_language"):
+                    context_kwargs["extra_http_headers"] = {
+                        "Accept-Language": loc["accept_language"]}
+                logger.info("[pay-session] %s 裸浏览器语言时区：locale=%s tz=%s",
+                            sess.sid, loc.get("locale") or "默认",
+                            loc.get("timezone") or "默认")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[pay-session] 构建语言时区失败：%s", exc)
+        context = browser.new_context(**context_kwargs)
+        if pw_ctx is not None:
+            context.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
         page = context.new_page()
         page.set_default_timeout(int(cfg.VCC_PAGE_TIMEOUT * 1000))
         page.goto(checkout_url, wait_until="domcontentloaded")
