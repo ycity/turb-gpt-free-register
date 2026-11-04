@@ -9,6 +9,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 
+# cloakbrowser 钉死 0.6.4：0.7.0 起免费 binary 也要先领 license key，
+# 容器重建时 pip 把 >=0.4.10 解析成 0.7.0，注册直接报 LicenseError。
+# 0.6.4 直接跑免费 binary(v146)，无需任何 key。拿到 key 后可解除钉死。
 RUN pip install --no-cache-dir \
     curl_cffi>=0.15.0 \
     "wreq>=0.13.0,<0.14" \
@@ -20,7 +23,7 @@ RUN pip install --no-cache-dir \
     cryptography>=41 \
     python-dotenv>=1.0.0 \
     PySocks>=1.7.1 \
-    "cloakbrowser[geoip]>=0.4.10" \
+    "cloakbrowser[geoip]==0.6.4" \
     "playwright>=1.49.0" \
     "playwright-stealth>=2.0.3" \
     "selenium>=4.20.0" && \
