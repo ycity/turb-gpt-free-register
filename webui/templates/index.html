@@ -1608,6 +1608,19 @@
       width: min(1040px, 100%); max-height: calc(100vh - 32px);
     }
     #autoPayModal .outlook-import-body { overflow: auto; }
+    /* 账号/代理常驻条：支付期间一直可见，避免看截图时不确定是哪个号 */
+    .ap-who {
+      display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center;
+      margin: 0 0 12px; padding: 8px 12px;
+      background: #f5f7fa; border: 1px solid #ebeef5; border-radius: 6px;
+      font-size: 12px; color: #606266;
+    }
+    .ap-who .ap-who-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+    .ap-who b { font-weight: 600; color: #909399; }
+    .ap-who .mono {
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      color: #303133; overflow-wrap: anywhere;
+    }
     #autoPayShot { user-select: none; -webkit-user-drag: none; }
 
     /* ---- 简易收件箱：左列表 + 右详情 ---- */
@@ -3067,6 +3080,7 @@
       <button type="button" class="outlook-import-close" id="btnCloseAutoPay" aria-label="关闭">×</button>
     </div>
     <div class="outlook-import-body">
+      <div id="autoPayWho" class="ap-who hidden"></div>
       <input type="hidden" id="autoPayAccountId">
       <input type="hidden" id="autoPaySessionId">
 
@@ -4774,8 +4788,38 @@ async function _autoPayPoll() {
   }
 }
 
+function _autoPayMaskProxy(url) {
+  // 常驻显示，不能把代理密码摊在屏幕上
+  const s = String(url || '').trim();
+  if (!s) return '直连（未绑定代理）';
+  try {
+    const u = new URL(s);
+    return `${u.hostname}:${u.port || '-'}`;
+  } catch (e) {
+    const tail = s.split('@').pop();
+    return tail || s;
+  }
+}
+
+function _autoPayRenderWho(id) {
+  const box = $('#autoPayWho');
+  if (!box) return;
+  const acc = (typeof ACCOUNTS !== 'undefined'
+    ? ACCOUNTS.find(a => Number(a.id) === Number(id)) : null) || {};
+  const email = String(acc.email || '').trim();
+  if (!email) { box.classList.add('hidden'); return; }
+  const proxy = _autoPayMaskProxy(acc.proxy_used);
+  const plan = String(acc.current_plan_type || acc.plan_type || '').trim();
+  box.classList.remove('hidden');
+  box.innerHTML =
+    `<span class="ap-who-item"><b>账号</b><span class="mono">${esc(email)}</span></span>` +
+    `<span class="ap-who-item"><b>代理</b><span class="mono">${esc(proxy)}</span></span>` +
+    (plan ? `<span class="ap-who-item"><b>当前套餐</b><span>${esc(plan)}</span></span>` : '');
+}
+
 function _autoPayOpenModal(id, { setup = true } = {}) {
   $('#autoPayAccountId').value = id || '';
+  _autoPayRenderWho(id);
   $('#autoPayShotBox').classList.add('hidden');
   $('#autoPaySummary').classList.add('hidden');
   $('#autoPayOtpBox').classList.add('hidden');

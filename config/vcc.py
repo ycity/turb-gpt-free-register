@@ -102,6 +102,12 @@ VCC_PAGE_TIMEOUT = 60.0
 # VCC_PAGE_TIMEOUT 那 60 秒去等：表单十几个字段，几个被遮挡就是好几分钟。
 # 页面导航、等表单出现这些仍然用 VCC_PAGE_TIMEOUT。
 VCC_FIELD_TIMEOUT = 6.0
+
+# 等支付表单出现的超时，秒。
+# 页面本身 1 秒内就能加载完，表单正常也就随后 1-2 秒渲染出来。给 60 秒只会让
+# 失效长链白等满一分钟；过期的长链不报错，只是表单永远不出现。
+# 调大它对慢网络没什么帮助——真正的慢在页面导航，那一步用 VCC_PAGE_TIMEOUT。
+VCC_FORM_TIMEOUT = 12.0
 # 截图目录，留空则用 cache/vcc_pay/
 VCC_SCREENSHOT_DIR = ""
 
@@ -194,6 +200,7 @@ apply_env_overrides(globals(), {
     'VCC_HEADLESS': 'bool',
     'VCC_PAGE_TIMEOUT': 'float',
     'VCC_FIELD_TIMEOUT': 'float',
+    'VCC_FORM_TIMEOUT': 'float',
     'VCC_SCREENSHOT_DIR': 'str',
     'VCC_BROWSER_CHANNEL': 'str',
     'VCC_BROWSER_PATH': 'str',

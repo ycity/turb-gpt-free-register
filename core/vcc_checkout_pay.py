@@ -417,6 +417,58 @@ def read_total(page: Any) -> tuple[str, float | None]:
     return "", None
 
 
+def _expired_text(page: Any) -> str:
+    """读页面正文，命中过期标记就返回那段文字；否则空串。"""
+    try:
+        text = (page.inner_text("body", timeout=1500) or "").strip()
+    except Exception:  # noqa: BLE001 - 读不到就当作还没渲染完
+        return ""
+    low = text.lower()
+    return text if any(mark in low for mark in _EXPIRED_MARKERS) else ""
+
+
+def _wait_form_or_fail(page: Any, cfg: Any) -> None:
+    """等支付表单出现，但别为一条已经作废的长链白等满超时。
+
+    过期的长链不会报错，只是页面渲染成一句 "you're all done here"，表单永远
+    不出现。原先只在 wait_for_selector 超时之后才去看这段文字，于是每次都要
+    先空等 VCC_PAGE_TIMEOUT（实测 60 秒，而页面本身 1 秒就加载完了）。
+    这里改成边等边查：表单出现就立刻返回，识别出过期文案就立刻失败。
+    """
+    total = float(getattr(cfg, "VCC_FORM_TIMEOUT", 0) or 0)
+    if total <= 0:
+        total = float(getattr(cfg, "VCC_PAGE_TIMEOUT", 60.0) or 60.0)
+    deadline = time.monotonic() + total
+    step_ms = 700
+
+    while True:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        try:
+            page.wait_for_selector(
+                SEL_FORM, timeout=int(min(step_ms, remain * 1000)))
+            return
+        except Exception:  # noqa: BLE001 - 这一轮没等到，继续看是不是过期了
+            pass
+        hit = _expired_text(page)
+        if hit:
+            raise VccPayError(
+                "结账会话已过期或已完成，支付表单不会再出现。"
+                "这条长链已作废，需要重新生成（会消耗一个新的优惠码）")
+
+    text = ""
+    try:
+        text = (page.inner_text("body") or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    if not text:
+        raise VccPayError(
+            "结账页空白，页面资源没能加载完（常见于代理不稳定）。"
+            "长链本身可能还有效，可稍后重试或换代理")
+    raise VccPayError(f"等不到支付表单，页面当前显示：{text[:80]}")
+
+
 def fill_checkout(page: Any, *, card: dict[str, str], email: str,
                   billing: dict[str, str], cfg: Any,
                   result: PayResult, out_dir: Path) -> None:
@@ -426,28 +478,7 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
         raise VccPayError(
             f"结账页变体为 {variant}，当前仅适配 classic；已停止以免误填")
     result.stage = "fill"
-    try:
-        page.wait_for_selector(SEL_FORM, timeout=int(cfg.VCC_PAGE_TIMEOUT * 1000))
-    except Exception as exc:
-        # 裸抛 Playwright 的 "waiting for locator(...) to be visible" 看不出原因。
-        # 绝大多数情况是结账会话已过期（页面只剩一句 all done），这时重试没有
-        # 意义，必须重新生成长链——把这点直接说出来。
-        text = ""
-        try:
-            text = (page.inner_text("body") or "").strip()
-        except Exception:
-            pass
-        low = text.lower()
-        if any(mark in low for mark in _EXPIRED_MARKERS):
-            raise VccPayError(
-                "结账会话已过期或已完成，支付表单不会再出现。"
-                "这条长链已作废，需要重新生成（会消耗一个新的优惠码）") from exc
-        if not text:
-            raise VccPayError(
-                "结账页空白，页面资源没能加载完（常见于代理不稳定）。"
-                "长链本身可能还有效，可稍后重试或换代理") from exc
-        raise VccPayError(
-            f"等不到支付表单，页面当前显示：{text[:80]}") from exc
+    _wait_form_or_fail(page, cfg)
 
     filled = result.filled
     _fill(page, SEL_EMAIL, email, label="email", filled=filled)
