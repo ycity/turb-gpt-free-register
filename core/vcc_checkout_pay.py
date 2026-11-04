@@ -207,19 +207,32 @@ def _fill_via_dom(page: Any, selector: str, value: str) -> bool:
     humanize 模式下相邻控件（例如国家下拉）可能盖住输入框拦截指针事件，
     真实点击永远落不上去。此时退回 DOM 写入：值和事件都是真的，只是少了
     鼠标轨迹，对这种普通文本框没有风控意义。
+
+    复用旧长链时 Stripe 会把已填过的 email / 地址锁成 disabled+readonly，
+    直接 setter 写入会被 React 回滚，所以先摘掉锁、写完再还原。
     """
     try:
         return bool(page.evaluate(
             """([sel, val]) => {
                 const el = document.querySelector(sel);
                 if (!el) return false;
+                // 复用长链时字段被锁死，解锁后才写得进去
+                const wasDisabled = el.disabled;
+                const wasReadOnly = el.readOnly;
+                if (wasDisabled) el.disabled = false;
+                if (wasReadOnly) el.readOnly = false;
                 const proto = el instanceof HTMLTextAreaElement
                     ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
                 const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
                 setter.call(el, val);
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+                const ok = el.value === val;
+                // 还原原状：锁是 Stripe 自己加的，留着改动可能触发它的校验
+                if (wasDisabled) el.disabled = true;
+                if (wasReadOnly) el.readOnly = true;
+                return ok;
             }""", [selector, value]))
     except Exception:  # noqa: BLE001
         return False
@@ -282,17 +295,68 @@ def _fill(page: Any, selector: str, value: str, *, label: str,
     filled[label] = False
 
 
+def _expand_manual_address(page: Any) -> bool:
+    """复用旧长链时把折叠的地址表单展开。
+
+    上一个长链填过地址的话，Stripe 会把账单地址收成一行只读摘要，底下
+    line1/city/state/postal 这些 input 压根没渲染，光解 disabled 没用。
+    页面提供「Enter address manually」入口，点开才会出现完整表单。
+
+    返回是否执行了展开动作；表单本来就是展开的返回 False。
+    """
+    try:
+        if page.locator(SEL_LINE1).first.is_visible(timeout=1200):
+            return False
+    except Exception:  # noqa: BLE001 - 不可见或不存在都按需要展开处理
+        pass
+
+    for name in ("Enter address manually", "Enter address",
+                 "手动输入地址", "手动填写地址"):
+        try:
+            link = page.get_by_text(name, exact=False).first
+            if not link.is_visible(timeout=800):
+                continue
+            link.click(timeout=_field_timeout_ms())
+            page.wait_for_selector(SEL_LINE1, timeout=_field_timeout_ms())
+            logger.info("[vcc-pay] 复用长链地址被折叠，已点开「%s」", name)
+            return True
+        except Exception:  # noqa: BLE001 - 换下一个文案
+            continue
+
+    # 文案没匹配上就直接点 DOM 里那个入口
+    try:
+        clicked = page.evaluate(
+            """() => {
+                const hit = [...document.querySelectorAll('a,button,[role=button]')]
+                    .find(e => /enter address manually|手动(输入|填写)地址/i
+                        .test((e.textContent || '').trim()));
+                if (!hit) return false;
+                hit.click();
+                return true;
+            }""")
+        if clicked:
+            page.wait_for_selector(SEL_LINE1, timeout=_field_timeout_ms())
+            logger.info("[vcc-pay] 复用长链地址被折叠，已通过 DOM 点开手动地址")
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def _select_via_dom(page: Any, selector: str, value: str) -> bool:
     """绕过指针直接选中下拉项。
 
     和 _fill_via_dom 同理：humanize 要真实点击，被遮挡就永远点不上。
-    按 value 找不到时退而按可见文本匹配。
+    按 value 找不到时退而按可见文本匹配。复用旧长链时下拉同样会被锁，
+    所以也要先摘 disabled。
     """
     try:
         return bool(page.evaluate(
             """([sel, val]) => {
                 const el = document.querySelector(sel);
                 if (!el) return false;
+                const wasDisabled = el.disabled;
+                if (wasDisabled) el.disabled = false;
                 const want = String(val).trim().toLowerCase();
                 let hit = -1;
                 for (let i = 0; i < el.options.length; i++) {
@@ -304,10 +368,11 @@ def _select_via_dom(page: Any, selector: str, value: str) -> bool:
                         if (el.options[i].text.trim().toLowerCase() === want) { hit = i; break; }
                     }
                 }
-                if (hit < 0) return false;
+                if (hit < 0) { if (wasDisabled) el.disabled = true; return false; }
                 el.selectedIndex = hit;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
+                if (wasDisabled) el.disabled = true;
                 return true;
             }""", [selector, value]))
     except Exception:  # noqa: BLE001
@@ -481,7 +546,9 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
     _wait_form_or_fail(page, cfg)
 
     filled = result.filled
-    _fill(page, SEL_EMAIL, email, label="email", filled=filled)
+    # 复用旧长链时 email 已被 Stripe 锁死且就是本账号的地址，覆盖不上也无妨，
+    # 不该为它中断整条支付流程——地址才是必须填对的。
+    _fill(page, SEL_EMAIL, email, label="email", filled=filled, required=False)
     # 支付三要素差一位就作废，且 Stripe 会自动插空格与逐字输入抢光标，必须回读校验
     _fill(page, SEL_CARD_NUMBER, card["number"], label="card_number",
           filled=filled, exact=True)
@@ -490,6 +557,10 @@ def fill_checkout(page: Any, *, card: dict[str, str], email: str,
     _fill(page, SEL_CARD_CVC, card["cvc"], label="card_cvc",
           filled=filled, exact=True)
     _fill(page, SEL_BILLING_NAME, billing["name"], label="billing_name", filled=filled)
+
+    # 复用旧长链时账单地址会被收成只读摘要，底下的输入框根本没渲染，
+    # 必须先点开手动地址入口。地址错了税费和风控都不对，不能跳过。
+    _expand_manual_address(page)
 
     # 国家必须先选：省份下拉按国家重新渲染，顺序反了会选不到州。
     # 重渲染期间下拉会盖住下方输入框拦截指针，humanize 模式下点不进去，
