@@ -3148,6 +3148,9 @@
           <select id="autoPayProxySelect">
             <option value="">— 用注册代理 —</option>
           </select>
+          <small class="muted" style="font-size:11px;margin-top:2px;display:block;">
+            开始填表后这块会隐藏，要换出口得先「取消并关闭」再重开（长链可复用，不会重复消耗优惠码）
+          </small>
         </label>
 
         <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">③ 账单地址</div>
@@ -3250,6 +3253,10 @@
       <label class="outlook-import-field" style="margin-bottom:10px;">
         <select id="manualPayAddr"></select>
       </label>
+
+      <div style="margin:0 0 12px;padding:8px 10px;border-radius:6px;background:#f8fafc;border:1px solid #e5e9ef;font-size:12px;color:#475569;">
+        <b>出口提示</b>：<span id="manualPayProxyTip">—</span>
+      </div>
 
       <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
         ④ 填表脚本 <small class="muted">F12 → Console 粘贴执行；不会自动提交</small>
@@ -4887,7 +4894,13 @@ function _autoPayRenderWho(id) {
   // 列表接口不下发 proxy_used（里面带代理密码），只给代理池里的名称。
   // 之前读 acc.proxy_used 拿到 undefined，于是一律显示成"直连"。
   const proxyName = String(acc.register_proxy_name || '').trim();
-  const proxy = proxyName || '未绑定代理（注册时直连或代理已从池中删除）';
+  const regProxy = proxyName || '未绑定代理（注册时直连或代理已从池中删除）';
+  // 本单改过出口就显示实际在用的那个：会话跑起来后配置区会整块隐藏，
+  // 信息栏是唯一还能看到"这单走哪个出口"的地方。
+  const picked = String(_autoPayUsedProxyName || '').trim();
+  const proxy = picked
+    ? `${picked}（本单指定，注册代理为 ${regProxy}）`
+    : regProxy;
   const plan = String(acc.current_plan_type || acc.plan_type || '').trim();
   box.classList.remove('hidden');
   box.innerHTML =
@@ -4898,6 +4911,8 @@ function _autoPayRenderWho(id) {
 
 function _autoPayOpenModal(id, { setup = true } = {}) {
   $('#autoPayAccountId').value = id || '';
+  // 新开弹窗先清掉上一单的出口，否则信息栏会串台
+  if (setup) _autoPayUsedProxyName = '';
   _autoPayRenderWho(id);
   $('#autoPayShotBox').classList.add('hidden');
   $('#autoPaySummary').classList.add('hidden');
@@ -4954,6 +4969,8 @@ let _autoPayAddrCache = [];
 let _autoPayCardCache = [];
 let _autoPayCardLinks = {};
 let _autoPayProxyCache = [];
+// 本单实际指定的出口名；会话跑起来后配置区隐藏，靠它在信息栏里显示
+let _autoPayUsedProxyName = '';
 
 // 支付出口选择。怀疑账单地址国家和出口国家不一致会被 Stripe 拒，
 // 所以要能在不动注册代理的前提下临时换一个出口重试。
@@ -5470,6 +5487,19 @@ async function _manualPayOpen() {
              (as.options[0] && as.options[0].value) || '';
   $('#manualPayAddrHint').textContent = mine.length ? '已选该卡上次用的地址' : '';
 
+  // 手动支付走的是人自己的浏览器和网络，和服务端出口无关；
+  // 这里提示账单地址国家，方便判断是否需要自己挂梯子到同一国家。
+  const tip = $('#manualPayProxyTip');
+  if (tip) {
+    const a = _autoPayAddrCache.find(x => String(x.id) === as.value);
+    const cc = String((a || {}).country || '').toUpperCase();
+    const used = String(_autoPayUsedProxyName || '').trim();
+    tip.textContent = cc
+      ? `账单地址在 ${cc}；手动支付走你本机网络，服务端出口（${used || '注册代理'}）不生效。`
+        + `若怀疑地区不匹配，请自行把本机出口切到 ${cc}。`
+      : '手动支付走你本机网络，服务端出口不生效。';
+  }
+
   await _manualPayRender();
 }
 
@@ -5513,6 +5543,10 @@ async function _autoPayStart() {
   if (!cardId) { showToast('请选择支付卡片'); return; }
   const opt = $('#autoPayCardSelect').selectedOptions[0];
 
+  // 固化本单出口：配置区马上会被隐藏，之后只能从这个变量读
+  _autoPayUsedProxyName = $('#autoPayProxySelect').value || '';
+  _autoPayRenderWho(id);
+
   // 余额不够就别发起了：长链一生成就消耗优惠码
   if (!(await _autoPayCheckFunds())) {
     showToast('余额不足，无法发起支付');
@@ -5530,7 +5564,7 @@ async function _autoPayStart() {
     billing: addr,
     save_address: $('#autoPaySaveAddr').checked,
     // 留空则后端继续用注册代理
-    pay_proxy_name: $('#autoPayProxySelect').value,
+    pay_proxy_name: _autoPayUsedProxyName,
     // 长链参数
     provider: $('#apProvider').value,
     promo_code: $('#apPromoCode').value.trim(),

@@ -105,7 +105,9 @@ class FrontendProxyPickerTest(unittest.TestCase):
         self.assertIn("国家不一致", body)
 
     def test_sends_name_on_submit(self):
-        self.assertIn("pay_proxy_name: $('#autoPayProxySelect').value", HTML)
+        """提交时用固化后的值：下拉在会话开始后会被隐藏。"""
+        self.assertIn("pay_proxy_name: _autoPayUsedProxyName", HTML)
+        self.assertIn("_autoPayUsedProxyName = $('#autoPayProxySelect').value", HTML)
 
     def test_hint_refreshes_on_address_change(self):
         idx = HTML.index("addrSel.onchange")
