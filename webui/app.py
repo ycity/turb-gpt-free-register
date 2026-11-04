@@ -1477,6 +1477,100 @@ def create_app(auth_code: str | None = None) -> Flask:
         cards.sort(key=lambda c: (not c["usable"], -c["balance"]))
         return jsonify({"ok": True, "cards": cards})
 
+    @app.get("/api/pay/card-secrets")
+    def api_pay_card_secrets():
+        """取卡号/有效期/CVV，供手动支付时生成填表脚本。
+
+        这是卡片三要素明文，只在人主动打开手动支付面板时才请求，不写日志。
+        """
+        card_id = (request.args.get("card_id") or "").strip()
+        if not card_id:
+            return jsonify({"ok": False, "error": "缺少 card_id"}), 400
+        try:
+            from core.vcc_client import VccError, build_client_from_config
+            client = build_client_from_config()
+            card = client.pick_card(card_id=card_id, min_balance=0.0)
+            sec = client.card_secrets(card_id)
+        except VccError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 502
+        except Exception as exc:
+            logger.exception("取卡片密文异常")
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({
+            "ok": True,
+            "number": str(sec.get("number") or ""),
+            "exp_month": str(sec.get("exp_month") or ""),
+            "exp_year": str(sec.get("exp_year") or ""),
+            "cvc": str(sec.get("cvc") or ""),
+            "holder_name": str(card.get("holderName") or ""),
+            "mask": str(card.get("cardNoMask") or ""),
+        })
+
+    @app.post("/api/pay/manual-done")
+    def api_pay_manual_done():
+        """人在自己浏览器里付完后的收尾：登记优惠码、记卡和地址、查套餐。
+
+        手动支付不经过会话状态机，这些记录原本会丢。
+        """
+        data = request.get_json(silent=True) or {}
+        try:
+            account_id = int(data.get("account_id") or 0)
+        except (TypeError, ValueError):
+            account_id = 0
+        if not account_id:
+            return jsonify({"ok": False, "error": "缺少 account_id"}), 400
+
+        acc = db.get_account(account_id) or {}
+        email = str(acc.get("email") or "")
+        done = []
+
+        promo = str(data.get("promo_code") or "").strip()
+        if promo:
+            try:
+                from core.team_checkout_service import record_used_promo_code
+                res = record_used_promo_code(promo, account_id=account_id,
+                                             account_email=email)
+                if res.get("ok"):
+                    done.append({"inserted": "优惠码已入池",
+                                 "updated": "优惠码已标记已用",
+                                 "already_used": "优惠码此前已登记"}
+                                .get(res.get("action"), "优惠码已登记"))
+                else:
+                    done.append(f"优惠码登记失败：{res.get('error')}")
+            except Exception as exc:
+                logger.warning("登记手动优惠码失败：%s", exc)
+                done.append("优惠码登记异常")
+
+        card_id = str(data.get("card_id") or "").strip()
+        if card_id:
+            try:
+                db.set_meta("pay_last_card_id", card_id)
+                addr_id = int(data.get("billing_address_id") or 0)
+                if addr_id:
+                    from core.billing_address_store import (link_card_address,
+                                                            mark_used)
+                    mark_used(addr_id)
+                    link_card_address(card_id, addr_id)
+                    done.append("已记住卡片与账单地址的对应")
+            except Exception:
+                logger.debug("记录手动支付卡片失败", exc_info=True)
+
+        token = str(acc.get("access_token") or "").strip()
+        if token:
+            try:
+                queued = plan_check_service.enqueue_account_plan_check(
+                    account_id=account_id, email=email, access_token=token,
+                    trigger="manual_pay")
+                done.append("套餐查询已入队" if queued.get("accepted")
+                            else "套餐查询未接受，请稍后手动查")
+            except Exception as exc:
+                logger.warning("手动支付后入队套餐查询失败：%s", exc)
+                done.append("套餐查询入队失败")
+        else:
+            done.append("该账号无 access_token，无法自动查套餐")
+
+        return jsonify({"ok": True, "message": "；".join(done) or "没有需要登记的内容"})
+
     @app.get("/api/pay/funds-check")
     def api_pay_funds_check():
         """只查不充：选完卡就告诉人够不够付、要不要充。"""

@@ -3199,8 +3199,73 @@
     </div>
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnAutoPayCancel">取消并关闭</button>
+      <button type="button" class="jobs-tb-btn" id="btnAutoPayManual">手动支付</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnAutoPayStart">开始填表</button>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary hidden" id="btnAutoPayConfirm" disabled>确认支付</button>
+    </div>
+  </div>
+</div>
+<div id="manualPayModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="manualPayTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(860px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="manualPayTitle">手动支付</h3>
+        <p class="muted" style="margin:4px 0 0;font-size:12px;">
+          在自己浏览器里打开长链，粘贴脚本一键填好卡片和地址，核对后自己点 Subscribe。
+        </p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnManualPayClose" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div id="manualPayWho" style="margin:0 0 12px;padding:8px 10px;border-radius:6px;background:#f6f8fa;border:1px solid #e5e9ef;font-size:13px;"></div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;">① 支付长链</div>
+      <div style="display:flex;gap:8px;align-items:flex-start;margin-bottom:14px;">
+        <textarea id="manualPayUrl" readonly rows="3"
+                  style="flex:1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.45;resize:vertical;padding:8px;border:1px solid var(--line,#ddd);border-radius:6px;"></textarea>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <button type="button" class="jobs-tb-btn" id="btnManualPayCopyUrl">复制</button>
+          <a class="jobs-tb-btn" id="btnManualPayOpen" target="_blank" rel="noopener"
+             style="text-align:center;text-decoration:none;line-height:normal;">打开</a>
+        </div>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
+        ② 选卡片 <small class="muted" id="manualPayCardHint">加载中…</small>
+      </div>
+      <label class="outlook-import-field" style="margin-bottom:10px;">
+        <select id="manualPayCard"></select>
+      </label>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;">
+        ③ 账单地址 <small class="muted" id="manualPayAddrHint"></small>
+      </div>
+      <label class="outlook-import-field" style="margin-bottom:10px;">
+        <select id="manualPayAddr"></select>
+      </label>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
+        ④ 填表脚本 <small class="muted">F12 → Console 粘贴执行；不会自动提交</small>
+      </div>
+      <textarea id="manualPayScript" readonly rows="12"
+                style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.4;resize:vertical;padding:8px;border:1px solid var(--line,#ddd);border-radius:6px;"></textarea>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnManualPayCopyScript">复制脚本</button>
+        <span class="muted" id="manualPayCopyTip" style="font-size:12px;"></span>
+      </div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
+        ⑤ 支付成功后登记
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <input type="text" id="manualPayPromo" placeholder="本次用掉的优惠码（可留空）"
+               style="flex:1;padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px;">
+        <button type="button" class="jobs-tb-btn" id="btnManualPayDone">登记并查套餐</button>
+      </div>
+      <div id="manualPayDoneTip" class="muted" style="margin-top:6px;font-size:12px;"></div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnManualPayClose2">关闭</button>
     </div>
   </div>
 </div>
@@ -5177,6 +5242,213 @@ async function openAutoPay(id) {
   await _autoPayLoadSetup();
 }
 
+// ---- 手动支付：给人长链 + 一键填表脚本，自己在浏览器里付 ----
+let _manualPaySecrets = null;
+
+function _manualPayCopy(text, tip) {
+  const el = $('#manualPayCopyTip');
+  navigator.clipboard.writeText(text).then(() => {
+    if (el) { el.textContent = tip; setTimeout(() => { el.textContent = ''; }, 2600); }
+  }).catch(() => {
+    if (el) el.textContent = '复制失败，请手动全选';
+  });
+}
+
+function _manualPayScriptText(card, addr) {
+  // 脚本在 Stripe 页面的 Console 里跑：字段被 disabled 时先解锁再写，写完还原。
+  const j = v => JSON.stringify(String(v == null ? '' : v));
+  return `(() => {
+  const CARD = {
+    number: ${j(card.number)},
+    expiry: ${j(card.exp_month + ' / ' + card.exp_year)},
+    cvc:    ${j(card.cvc)},
+    holder: ${j(card.holder_name)},
+  };
+  const ADDR = {
+    country: ${j(addr.country)},
+    state:   ${j(addr.state)},
+    city:    ${j(addr.city)},
+    line1:   ${j(addr.line1)},
+    line2:   ${j(addr.line2 || '')},
+    postal:  ${j(addr.postal)},
+  };
+
+  const setInput = (sel, val) => {
+    const el = document.querySelector(sel);
+    if (!el) return sel + ' 不存在';
+    const d = el.disabled, r = el.readOnly;
+    el.disabled = false; el.readOnly = false;
+    const proto = el instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, val);
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur',   { bubbles: true }));
+    const ok = el.value === val;
+    el.disabled = d; el.readOnly = r;
+    return ok ? 'OK' : '写入被回滚（当前 "' + el.value + '"）';
+  };
+
+  const setSelect = (sel, val) => {
+    const el = document.querySelector(sel);
+    if (!el) return sel + ' 不存在';
+    const d = el.disabled;
+    el.disabled = false;
+    const want = String(val).trim().toLowerCase();
+    let hit = [...el.options].findIndex(o => o.value.trim().toLowerCase() === want);
+    if (hit < 0) hit = [...el.options].findIndex(o => o.text.trim().toLowerCase() === want);
+    if (hit < 0) { el.disabled = d; return '找不到选项 "' + val + '"'; }
+    el.selectedIndex = hit;
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.disabled = d;
+    return 'OK';
+  };
+
+  const check = (sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return sel + ' 不存在';
+    if (el.checked) return '已勾选';
+    const d = el.disabled;
+    el.disabled = false;
+    el.click();
+    if (!el.checked) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')
+        .set.call(el, true);
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    el.disabled = d;
+    return el.checked ? 'OK' : '勾不上';
+  };
+
+  const log = [];
+  log.push(['卡号',   setInput('#cardNumber',  CARD.number)]);
+  log.push(['有效期', setInput('#cardExpiry',  CARD.expiry)]);
+  log.push(['CVC',    setInput('#cardCvc',     CARD.cvc)]);
+  log.push(['持卡人', setInput('#billingName', CARD.holder)]);
+  // 国家先设：省份下拉会按国家重建，顺序反了选不到州
+  log.push(['国家',   setSelect('select#billingCountry', ADDR.country)]);
+
+  setTimeout(() => {
+    log.push(['街道', setInput('#billingAddressLine1', ADDR.line1)]);
+    if (ADDR.line2) log.push(['街道2', setInput('#billingAddressLine2', ADDR.line2)]);
+    log.push(['城市', setInput('#billingLocality',   ADDR.city)]);
+    log.push(['邮编', setInput('#billingPostalCode', ADDR.postal)]);
+    log.push(['州/省', setSelect('select#billingAdministrativeArea', ADDR.state)]);
+    log.push(['条款', check('#termsOfServiceConsentCheckbox')]);
+    console.table(log.map(([k, v]) => ({ 字段: k, 结果: v })));
+    const bad = log.filter(([, v]) => v !== 'OK' && v !== '已勾选');
+    console.log(bad.length ? '⚠ 以下字段需手动检查：' : '✅ 全部填好，自行核对后点 Subscribe');
+    bad.forEach(([k, v]) => console.log('   ', k, '→', v));
+  }, 1200);
+})();`;
+}
+
+async function _manualPayRender() {
+  const cardId = $('#manualPayCard').value;
+  const addrId = $('#manualPayAddr').value;
+  const addr = _autoPayAddrCache.find(a => String(a.id) === addrId);
+  const box = $('#manualPayScript');
+  if (!cardId || !addr) {
+    box.value = '// 先选好卡片和账单地址';
+    return;
+  }
+  if (!_manualPaySecrets || _manualPaySecrets._id !== cardId) {
+    box.value = '// 正在取卡片信息…';
+    try {
+      const r = await fetch('/api/pay/card-secrets?card_id=' + encodeURIComponent(cardId));
+      const s = await r.json();
+      if (!s.ok) throw new Error(s.error || '取卡失败');
+      _manualPaySecrets = Object.assign({ _id: cardId }, s);
+    } catch (err) {
+      box.value = '// 取卡片信息失败：' + err.message;
+      return;
+    }
+  }
+  box.value = _manualPayScriptText(_manualPaySecrets, addr);
+}
+
+async function _manualPayOpen() {
+  const id = $('#autoPayAccountId').value;
+  if (!id) return;
+  _manualPaySecrets = null;
+  $('#manualPayModal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  $('#manualPayDoneTip').textContent = '';
+  $('#manualPayPromo').value = '';
+
+  const acc = (typeof ACCOUNTS !== 'undefined'
+    ? ACCOUNTS.find(a => Number(a.id) === Number(id)) : null) || {};
+  $('#manualPayWho').innerHTML =
+    `账号 <b>${esc(acc.email || '')}</b>　代理 <b>${esc(acc.register_proxy_name || '未绑定代理')}</b>`;
+
+  // 长链：优先用弹窗里已复用的，其次取账号上存着的
+  let url = '';
+  const reuse = $('#apReuseLink');
+  if (reuse && reuse.dataset.url) url = reuse.dataset.url;
+  if (!url) url = String(acc.team_checkout_url || '').trim();
+  $('#manualPayUrl').value = url || '（这个账号还没有长链，请先在自动支付里生成）';
+  const open = $('#btnManualPayOpen');
+  if (url) { open.href = url; open.style.pointerEvents = ''; open.style.opacity = ''; }
+  else { open.removeAttribute('href'); open.style.pointerEvents = 'none'; open.style.opacity = '0.45'; }
+
+  // 卡片和地址直接复用自动支付已经加载好的缓存
+  const cs = $('#manualPayCard');
+  cs.innerHTML = (_autoPayCardCache || []).map(c =>
+    `<option value="${esc(c.card_id)}" ${c.usable ? '' : 'disabled'}>
+       ${esc(c.mask)} — ${c.balance.toFixed(2)} USD — ${esc(c.holder_name)}
+     </option>`).join('');
+  cs.value = $('#autoPayCardSelect').value || (cs.options[0] && cs.options[0].value) || '';
+  $('#manualPayCardHint').textContent = `共 ${(_autoPayCardCache || []).length} 张`;
+
+  const as = $('#manualPayAddr');
+  const links = _autoPayCardLinks[cs.value] || [];
+  const rank = new Map(links.map((x, i) => [String(x), i]));
+  const mine = [], others = [];
+  (_autoPayAddrCache || []).forEach(a =>
+    (rank.has(String(a.id)) ? mine : others).push(a));
+  mine.sort((x, y) => rank.get(String(x.id)) - rank.get(String(y.id)));
+  const opt = a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`;
+  as.innerHTML = mine.length
+    ? `<optgroup label="该卡用过（${mine.length}）">${mine.map(opt).join('')}</optgroup>` +
+      (others.length ? `<optgroup label="其它地址（${others.length}）">${others.map(opt).join('')}</optgroup>` : '')
+    : (_autoPayAddrCache || []).map(opt).join('');
+  as.value = $('#autoPayAddrSelect').value || (mine[0] && String(mine[0].id)) ||
+             (as.options[0] && as.options[0].value) || '';
+  $('#manualPayAddrHint').textContent = mine.length ? '已选该卡上次用的地址' : '';
+
+  await _manualPayRender();
+}
+
+async function _manualPayDone() {
+  const id = $('#autoPayAccountId').value;
+  const promo = $('#manualPayPromo').value.trim();
+  const cardId = $('#manualPayCard').value;
+  const addrId = $('#manualPayAddr').value;
+  const tip = $('#manualPayDoneTip');
+  const btn = $('#btnManualPayDone');
+  btn.disabled = true;
+  tip.textContent = '处理中…';
+  try {
+    const r = await fetch('/api/pay/manual-done', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        account_id: Number(id), promo_code: promo,
+        card_id: cardId, billing_address_id: Number(addrId) || 0,
+      }),
+    });
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '登记失败');
+    tip.textContent = s.message || '已登记，套餐查询已入队';
+    if (typeof loadAccounts === 'function') loadAccounts();
+  } catch (err) {
+    tip.textContent = '失败：' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function _autoPayStart() {
   const id = $('#autoPayAccountId').value;
   const btn = $('#btnAutoPayStart');
@@ -5294,6 +5566,27 @@ function _autoPayBind() {
 
   const btnStart = $('#btnAutoPayStart');
   if (btnStart) btnStart.onclick = _autoPayStart;
+
+  const btnManual = $('#btnAutoPayManual');
+  if (btnManual) btnManual.onclick = _manualPayOpen;
+  const mpClose = () => {
+    $('#manualPayModal').classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  ['#btnManualPayClose', '#btnManualPayClose2'].forEach(s => {
+    const el = $(s); if (el) el.onclick = mpClose;
+  });
+  ['#manualPayCard', '#manualPayAddr'].forEach(s => {
+    const el = $(s); if (el) el.onchange = _manualPayRender;
+  });
+  const mpCopyUrl = $('#btnManualPayCopyUrl');
+  if (mpCopyUrl) mpCopyUrl.onclick = () =>
+    _manualPayCopy($('#manualPayUrl').value, '长链已复制');
+  const mpCopyScript = $('#btnManualPayCopyScript');
+  if (mpCopyScript) mpCopyScript.onclick = () =>
+    _manualPayCopy($('#manualPayScript').value, '脚本已复制，去页面 Console 粘贴');
+  const mpDone = $('#btnManualPayDone');
+  if (mpDone) mpDone.onclick = _manualPayDone;
 
   const cardSel = $('#autoPayCardSelect');
   if (cardSel) cardSel.onchange = () => {
