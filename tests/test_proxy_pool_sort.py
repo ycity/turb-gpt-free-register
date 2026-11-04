@@ -16,7 +16,11 @@ HTML = (Path(__file__).resolve().parents[1]
 
 
 def _fn(name: str) -> str:
-    i = HTML.index(f"function {name}()")
+    """截取某个函数的源码片段（函数可带参数）。"""
+    import re
+    m = re.search(r"function " + re.escape(name) + r"\s*\(", HTML)
+    assert m, f"找不到 function {name}"
+    i = m.start()
     j = HTML.index("\nfunction ", i + 10)
     return HTML[i:j]
 
@@ -61,6 +65,48 @@ class SortWiringTest(unittest.TestCase):
         j = HTML.index("data-pp-select-all]')")
         seg2 = HTML[j:j + 300]
         self.assertIn("rows.map(ppIdentity)", seg2)
+
+
+class RegionGroupingTest(unittest.TestCase):
+    """先按地区分组，组内再按名称。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.seg = _fn("ppFilteredItems")
+
+    def test_region_compared_before_name(self):
+        seg = self.seg
+        region_at = seg.index("ppRegionKey")
+        name_at = seg.index("String(a.name")
+        self.assertLess(region_at, name_at, "地区必须先比，否则分不了组")
+
+    def test_region_key_only_from_test_result(self):
+        """地区只能来自测试结果，没测过的拿不到。"""
+        seg = _fn("ppRegionKey")
+        self.assertIn("test", seg)
+        self.assertIn("country", seg)
+
+    def test_unknown_region_sinks_to_bottom(self):
+        self.assertIn("if (!ar !== !br) return ar ? -1 : 1;", self.seg)
+
+    def test_group_heads_rendered(self):
+        seg = _fn("ppRowsWithRegionHeads")
+        self.assertIn("pp-region-head", seg)
+        self.assertIn("未知地区", seg)
+
+    def test_body_uses_group_renderer(self):
+        seg = _fn("renderProxyPoolBody")
+        self.assertIn("ppRowsWithRegionHeads(rows)", seg)
+        self.assertNotIn("rows.map(ppRowHtml)", seg,
+                         "应改走带分组标题的渲染")
+
+    def test_head_row_styled(self):
+        self.assertIn("tr.pp-region-head td", HTML)
+
+    def test_head_row_spans_table(self):
+        """标题行必须跨满列数，否则会把表格挤歪。"""
+        seg = _fn("ppRowsWithRegionHeads")
+        self.assertIn('colspan="7"', seg)
 
 
 if __name__ == "__main__":

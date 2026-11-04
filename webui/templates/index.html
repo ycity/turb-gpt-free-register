@@ -1927,6 +1927,11 @@
       padding: 28px 16px !important; text-align: center !important; white-space: normal !important;
       color: #909399; font-size: 13px; line-height: 1.6;
     }
+    .proxy-pool-v2-table tbody tr.pp-region-head td {
+      padding: 7px 12px; background: #f5f7fa; border-bottom: 1px solid #ebeef5;
+      font-size: 12px; font-weight: 600; color: #606266; letter-spacing: .2px;
+      position: sticky; left: 0;
+    }
     .proxy-pool-v2-settings-title {
       margin-top: 22px; padding-top: 18px; border-top: 1px solid #ebeef5;
       font-size: 14px; font-weight: 600; color: #303133;
@@ -8796,6 +8801,11 @@ function ppFlagFallback(img) {
   badge.title = img.title;
   img.replaceWith(badge);
 }
+function ppRegionKey(item) {
+  // 地区只能从测试结果拿；没测过、测失败或格式错误的都没有，返回空串让调用方
+  // 把它们归到"未知地区"。
+  return String(((item || {}).test || {}).country || '').toUpperCase();
+}
 function ppRegionName(code) {
   const c = String(code || '').toUpperCase();
   if (!PP_REGION_NAMES || !/^[A-Z]{2}$/.test(c)) return c;
@@ -8848,9 +8858,17 @@ function ppFilteredItems() {
   });
   // 只对显示结果排序：st.items 的顺序就是 .env 里的写入顺序，保存时按它整表
   // 回写，排原数组会把展示顺序写进配置。
-  // localeCompare + numeric 让 Frontier-2 排在 Frontier-10 前面；没名字的
-  // 一律沉到末尾，按地址排。
+  // 先按地区分组，组内再按名称。地区来自测试结果，没测过或测失败的拿不到，
+  // 这些一律沉到末尾，不要和真实地区混在一起。
   return rows.sort((a, b) => {
+    const ar = ppRegionKey(a);
+    const br = ppRegionKey(b);
+    if (!ar !== !br) return ar ? -1 : 1;
+    if (ar !== br) {
+      const byRegion = ppRegionName(ar).localeCompare(
+        ppRegionName(br), 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+      if (byRegion) return byRegion;
+    }
     const an = String(a.name || '').trim();
     const bn = String(b.name || '').trim();
     if (!an !== !bn) return an ? -1 : 1;
@@ -8929,6 +8947,23 @@ function renderProxyPoolManagerV2() {
   renderProxyPoolBody();
 }
 
+function ppRowsWithRegionHeads(rows) {
+  // 行已按地区分组排好，这里在每组开头插一行小标题，让分类看得见。
+  const out = [];
+  let current = null;
+  rows.forEach(item => {
+    const key = ppRegionKey(item);
+    if (key !== current) {
+      current = key;
+      const label = key ? `${ppRegionName(key)}（${key}）` : '未知地区（未测试或测试失败）';
+      const n = rows.filter(r => ppRegionKey(r) === key).length;
+      out.push(`<tr class="pp-region-head"><td colspan="7">${esc(label)} · ${n} 个</td></tr>`);
+    }
+    out.push(ppRowHtml(item));
+  });
+  return out.join('');
+}
+
 function renderProxyPoolBody() {
   const mount = document.getElementById('proxyPoolManagerV2');
   if (!mount || mount.dataset.ppReady !== '1') return;
@@ -8936,7 +8971,7 @@ function renderProxyPoolBody() {
   const rows = ppFilteredItems();
   const body = mount.querySelector('[data-pp-body]');
   if (body) {
-    body.innerHTML = rows.length ? rows.map(ppRowHtml).join('') : `<tr><td colspan="7" class="proxy-pool-v2-empty">${
+    body.innerHTML = rows.length ? ppRowsWithRegionHeads(rows) : `<tr><td colspan="7" class="proxy-pool-v2-empty">${
       st.items.length ? '没有符合条件的代理' : '代理池为空，注册时不使用代理（直连）。点击「添加代理」或「批量导入」开始配置。'
     }</td></tr>`;
   }
