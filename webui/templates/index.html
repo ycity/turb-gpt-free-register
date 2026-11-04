@@ -8835,7 +8835,7 @@ function ppDescribeResult(t) {
 function ppFilteredItems() {
   const st = PROXY_POOL_STATE;
   const q = st.search.trim().toLowerCase();
-  return st.items.filter(item => {
+  const rows = st.items.filter(item => {
     const state = ppTestState(item);
     if (st.filter === 'enabled' && !(item.enabled && item.valid)) return false;
     if (st.filter === 'disabled' && item.enabled) return false;
@@ -8845,6 +8845,19 @@ function ppFilteredItems() {
     return [item.name, item.scheme, item.host, item.port, item.username, t.ip, t.country,
       ppRegionName(t.country), t.region, t.city, t.org, item.valid ? '' : item.raw]
       .some(v => String(v ?? '').toLowerCase().includes(q));
+  });
+  // 只对显示结果排序：st.items 的顺序就是 .env 里的写入顺序，保存时按它整表
+  // 回写，排原数组会把展示顺序写进配置。
+  // localeCompare + numeric 让 Frontier-2 排在 Frontier-10 前面；没名字的
+  // 一律沉到末尾，按地址排。
+  return rows.sort((a, b) => {
+    const an = String(a.name || '').trim();
+    const bn = String(b.name || '').trim();
+    if (!an !== !bn) return an ? -1 : 1;
+    const byName = an.localeCompare(bn, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+    if (byName) return byName;
+    return String(a.host || a.raw || '').localeCompare(
+      String(b.host || b.raw || ''), undefined, { numeric: true });
   });
 }
 
