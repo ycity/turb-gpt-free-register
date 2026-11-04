@@ -50,6 +50,22 @@ def _connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_billing_last_used "
         "ON billing_addresses(last_used_at DESC)")
+    # 卡 ↔ 地址的使用关系。同一张卡换过地址时保留多条，按 last_used_at 取最近的。
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS billing_address_cards (
+            card_id TEXT NOT NULL,
+            address_id INTEGER NOT NULL,
+            use_count INTEGER NOT NULL DEFAULT 0,
+            last_used_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (card_id, address_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_billing_card_recent "
+        "ON billing_address_cards(card_id, last_used_at DESC)")
     conn.commit()
     return conn
 
@@ -131,6 +147,60 @@ def mark_used(addr_id: int) -> None:
 
 def delete_address(addr_id: int) -> bool:
     with closing(_connect()) as conn:
+        conn.execute("DELETE FROM billing_address_cards WHERE address_id=?",
+                     (int(addr_id),))
         cur = conn.execute("DELETE FROM billing_addresses WHERE id=?", (int(addr_id),))
         conn.commit()
     return cur.rowcount > 0
+
+
+# ---- 卡 ↔ 地址关联 ----
+
+def link_card_address(card_id: str, addr_id: int) -> None:
+    """记一次"这张卡用了这个地址"。重复使用只累加次数并刷新时间。"""
+    card_id = str(card_id or "").strip()
+    if not card_id or not addr_id:
+        return
+    now = _now()
+    with closing(_connect()) as conn:
+        conn.execute(
+            "INSERT INTO billing_address_cards"
+            "(card_id, address_id, use_count, last_used_at, created_at)"
+            " VALUES (?,?,1,?,?)"
+            " ON CONFLICT(card_id, address_id) DO UPDATE SET"
+            " use_count=use_count+1, last_used_at=excluded.last_used_at",
+            (card_id, int(addr_id), now, now))
+        conn.commit()
+
+
+def addresses_for_card(card_id: str) -> list[int]:
+    """这张卡用过的地址 id，最近用过的排在前面。"""
+    card_id = str(card_id or "").strip()
+    if not card_id:
+        return []
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT c.address_id FROM billing_address_cards c"
+            " JOIN billing_addresses a ON a.id = c.address_id"
+            " WHERE c.card_id=? ORDER BY c.last_used_at DESC, c.address_id DESC",
+            (card_id,)).fetchall()
+    return [int(r["address_id"]) for r in rows]
+
+
+def last_address_for_card(card_id: str) -> dict | None:
+    """这张卡最近一次用过的地址。"""
+    ids = addresses_for_card(card_id)
+    return get_address(ids[0]) if ids else None
+
+
+def card_links() -> dict[str, list[int]]:
+    """全部卡 → 地址 id 列表（各自按最近使用排序），供前端一次拉取后本地分组。"""
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT c.card_id, c.address_id FROM billing_address_cards c"
+            " JOIN billing_addresses a ON a.id = c.address_id"
+            " ORDER BY c.card_id, c.last_used_at DESC, c.address_id DESC").fetchall()
+    out: dict[str, list[int]] = {}
+    for row in rows:
+        out.setdefault(str(row["card_id"]), []).append(int(row["address_id"]))
+    return out

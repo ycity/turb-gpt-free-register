@@ -3145,7 +3145,7 @@
 
         <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 8px;border-top:1px solid #ebeef5;padding-top:12px;">③ 账单地址</div>
         <label class="outlook-import-field">
-          <span>账单地址</span>
+          <span>账单地址 <small class="muted" id="autoPayAddrHint"></small></span>
           <select id="autoPayAddrSelect">
             <option value="">— 手动填写 —</option>
           </select>
@@ -4880,6 +4880,55 @@ function _autoPayFillAddrForm(a) {
 
 let _autoPayAddrCache = [];
 let _autoPayCardCache = [];
+let _autoPayCardLinks = {};
+
+// 按"这张卡用过 / 没用过"把地址分两组渲染，用过的排前面。
+function _autoPayRenderAddrOptions(cardId) {
+  const sel = $('#autoPayAddrSelect');
+  if (!sel) return;
+  const keep = sel.value;
+  const linked = _autoPayCardLinks[cardId] || [];
+  const rank = new Map(linked.map((id, i) => [String(id), i]));
+  const mine = [], others = [];
+  _autoPayAddrCache.forEach(a => {
+    (rank.has(String(a.id)) ? mine : others).push(a);
+  });
+  mine.sort((x, y) => rank.get(String(x.id)) - rank.get(String(y.id)));
+
+  const opt = a => `<option value="${esc(a.id)}">${esc(a.label)}</option>`;
+  let html = '<option value="">— 手动填写 —</option>';
+  if (mine.length) {
+    html += `<optgroup label="该卡用过（${mine.length}）">` +
+            mine.map(opt).join('') + '</optgroup>';
+    html += others.length
+      ? `<optgroup label="其它地址（${others.length}）">` +
+        others.map(opt).join('') + '</optgroup>'
+      : '';
+  } else {
+    html += others.map(opt).join('');
+  }
+  sel.innerHTML = html;
+  if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+
+// 换卡时把账单地址切到这张卡最近用过的那个。
+function _autoPayApplyCardAddress() {
+  const cardId = $('#autoPayCardSelect').value;
+  _autoPayRenderAddrOptions(cardId);
+  const linked = _autoPayCardLinks[cardId] || [];
+  const hint = $('#autoPayAddrHint');
+  if (!linked.length) {
+    if (hint) hint.textContent = '该卡暂无历史地址';
+    return;
+  }
+  const want = _autoPayAddrCache.find(a => String(a.id) === String(linked[0]));
+  if (!want) { if (hint) hint.textContent = ''; return; }
+  const sel = $('#autoPayAddrSelect');
+  sel.value = String(want.id);
+  _autoPayFillAddrForm(want);
+  $('#autoPaySaveAddr').checked = false;
+  if (hint) hint.textContent = '已套用该卡上次用的地址';
+}
 
 async function _autoPayCheckFunds() {
   const box = $('#autoPayFunds');
@@ -4956,9 +5005,8 @@ async function _autoPayLoadSetup() {
     const r = await fetch('/api/pay/billing-addresses');
     const s = await r.json();
     _autoPayAddrCache = s.addresses || [];
-    addrSel.innerHTML = '<option value="">— 手动填写 —</option>' +
-      _autoPayAddrCache.map(a =>
-        `<option value="${esc(a.id)}">${esc(a.label)}</option>`).join('');
+    _autoPayCardLinks = s.card_links || {};
+    _autoPayRenderAddrOptions(addrSel.value);
   } catch (err) { /* 地址簿是锦上添花，失败不挡流程 */ }
 
   // 没存过地址时用配置里的默认值兜底
@@ -5011,6 +5059,8 @@ async function _autoPayLoadSetup() {
         sel2.value = chosen;
         if (why) $('#autoPayCardHint').textContent += why;
       }
+      // 定好卡之后再套地址：这张卡用过的地址比"全局最近用过"更准
+      _autoPayApplyCardAddress();
     }
   } catch (err) { /* 用表单现有值 */ }
 
@@ -5246,10 +5296,15 @@ function _autoPayBind() {
   if (btnStart) btnStart.onclick = _autoPayStart;
 
   const cardSel = $('#autoPayCardSelect');
-  if (cardSel) cardSel.onchange = _autoPayCheckFunds;
+  if (cardSel) cardSel.onchange = () => {
+    _autoPayApplyCardAddress();
+    _autoPayCheckFunds();
+  };
 
   const addrSel = $('#autoPayAddrSelect');
   if (addrSel) addrSel.onchange = () => {
+    const hint = $('#autoPayAddrHint');
+    if (hint) hint.textContent = '';
     const picked = _autoPayAddrCache.find(a => String(a.id) === addrSel.value);
     if (picked) {
       _autoPayFillAddrForm(picked);

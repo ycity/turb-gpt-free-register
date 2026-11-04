@@ -1367,20 +1367,23 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         # 地址只在会话真正起来之后才存，免得把填错的地址也记进地址簿
         saved_address = None
+        used_address_id = 0
         if data.get("save_address") and isinstance(data.get("billing"), dict):
             try:
                 from core.billing_address_store import mark_used, save_address
                 saved_address = save_address(data["billing"])
                 if saved_address.get("id"):
-                    mark_used(int(saved_address["id"]))
+                    used_address_id = int(saved_address["id"])
+                    mark_used(used_address_id)
             except Exception as exc:
                 logger.warning("保存账单地址失败：%s", exc)
         elif data.get("billing_address_id"):
             try:
                 from core.billing_address_store import mark_used
-                mark_used(int(data["billing_address_id"]))
+                used_address_id = int(data["billing_address_id"])
+                mark_used(used_address_id)
             except Exception:
-                pass
+                used_address_id = 0
 
         # 记下这次用的卡，下次开弹窗默认选中它。配置里的 VCC_CARD_ID 是全局
         # 兜底，换卡后每次还得手点一遍，实际用的那张才是更合理的默认值。
@@ -1388,6 +1391,9 @@ def create_app(auth_code: str | None = None) -> Flask:
             used_card = str(data.get("card_id") or "").strip()
             if used_card:
                 db.set_meta("pay_last_card_id", used_card)
+                if used_address_id:
+                    from core.billing_address_store import link_card_address
+                    link_card_address(used_card, used_address_id)
         except Exception:
             logger.debug("记录上次支付卡片失败", exc_info=True)
 
@@ -1490,8 +1496,9 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/pay/billing-addresses")
     def api_pay_billing_addresses():
-        from core.billing_address_store import list_addresses
-        return jsonify({"ok": True, "addresses": list_addresses()})
+        from core.billing_address_store import card_links, list_addresses
+        return jsonify({"ok": True, "addresses": list_addresses(),
+                        "card_links": card_links()})
 
     @app.post("/api/pay/billing-addresses")
     def api_pay_billing_address_save():
