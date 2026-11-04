@@ -209,12 +209,16 @@ def _try_cloak_browser(cfg, proxy: str, sess):
     if seed:
         opts["args"] = [f"--fingerprint={seed}"]
     try:
-        from config import cloak as cloak_cfg
+        from config import cloakbrowser as cloak_cfg
         key = str(getattr(cloak_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
         if key:
             opts["license_key"] = key
-    except Exception:  # noqa: BLE001 - 没有配置就按未授权跑
-        pass
+        else:
+            logger.warning("[pay-session] %s CLOAK_LICENSE_KEY 为空，"
+                           "CloakBrowser 将无法启动并退回裸 Playwright", sess.sid)
+    except Exception as exc:  # noqa: BLE001 - 读不到配置就按未授权跑
+        logger.warning("[pay-session] %s 读取 CloakBrowser license 失败：%s",
+                       sess.sid, exc)
 
     try:
         browser = cloak_launch(**opts)
