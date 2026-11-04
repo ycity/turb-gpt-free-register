@@ -1930,7 +1930,13 @@
     .proxy-pool-v2-table tbody tr.pp-region-head td {
       padding: 7px 12px; background: #f5f7fa; border-bottom: 1px solid #ebeef5;
       font-size: 12px; font-weight: 600; color: #606266; letter-spacing: .2px;
-      position: sticky; left: 0;
+    }
+    /* flex 放在内层 span 上：直接给 td 设 flex 会让 colspan 失效、把表格挤歪 */
+    .proxy-pool-v2-table tbody tr.pp-region-head .pp-region-label {
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .proxy-pool-v2-table tbody tr.pp-region-head .pp-region-count {
+      font-weight: 400; color: #909399;
     }
     .proxy-pool-v2-settings-title {
       margin-top: 22px; padding-top: 18px; border-top: 1px solid #ebeef5;
@@ -8955,9 +8961,12 @@ function ppRowsWithRegionHeads(rows) {
     const key = ppRegionKey(item);
     if (key !== current) {
       current = key;
-      const label = key ? `${ppRegionName(key)}（${key}）` : '未知地区（未测试或测试失败）';
       const n = rows.filter(r => ppRegionKey(r) === key).length;
-      out.push(`<tr class="pp-region-head"><td colspan="7">${esc(label)} · ${n} 个</td></tr>`);
+      // 国旗复用 ppFlagHtml：它带 CDN 失败回退，不要在这里另造一套。
+      const label = key
+        ? `${ppFlagHtml(key)}<span>${esc(ppRegionName(key))}（${esc(key)}）</span>`
+        : '<span>未知地区（未测试或测试失败）</span>';
+      out.push(`<tr class="pp-region-head"><td colspan="7"><span class="pp-region-label">${label}<span class="pp-region-count">· ${n} 个</span></span></td></tr>`);
     }
     out.push(ppRowHtml(item));
   });

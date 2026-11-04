@@ -109,5 +109,40 @@ class RegionGroupingTest(unittest.TestCase):
         self.assertIn('colspan="7"', seg)
 
 
+class RegionFlagTest(unittest.TestCase):
+    """分组标题前显示国旗。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.seg = _fn("ppRowsWithRegionHeads")
+
+    def test_reuses_existing_flag_helper(self):
+        """复用 ppFlagHtml，它带 CDN 失败回退；不要另造一套 emoji 方案。"""
+        self.assertIn("ppFlagHtml(key)", self.seg)
+
+    def test_flag_only_for_known_region(self):
+        """未知地区没有国家码，不能渲染出一个空国旗。"""
+        self.assertIn("const label = key", self.seg)
+        self.assertIn("未知地区", self.seg)
+
+    def test_region_text_is_escaped(self):
+        self.assertIn("esc(ppRegionName(key))", self.seg)
+
+    def test_colspan_preserved(self):
+        self.assertIn('colspan="7"', self.seg)
+
+    def test_flex_not_applied_to_td(self):
+        """给 td 设 display:flex 会让 colspan 失效、把表格挤歪。"""
+        i = HTML.index("tr.pp-region-head td {")
+        td_rule = HTML[i:HTML.index("}", i)]
+        self.assertNotIn("display: flex", td_rule)
+        self.assertIn(".pp-region-label", HTML)
+
+    def test_flag_fallback_exists(self):
+        """CDN 挂掉时要退回文字国家码，不能留个破图。"""
+        self.assertIn("ppFlagFallback", HTML)
+        self.assertIn("PP_FLAG_FAILED", HTML)
+
+
 if __name__ == "__main__":
     unittest.main()
