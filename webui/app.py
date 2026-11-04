@@ -1345,14 +1345,15 @@ def create_app(auth_code: str | None = None) -> Flask:
             # 支付必须走这个出口，否则照样卡在等表单上。
             override = str(data.get("pay_proxy") or "").strip()
             # 人在弹窗里换出口时只传得到池里的名称（列表接口不下发密码）。
-            # 怀疑账单地址国家和出口国家不一致会被 Stripe 拒，换出口是排查手段。
+            # 出口对能否过 Stripe 风控有实际影响：同为美国，Aaitr-ATT 付不通
+            # 而 Aaitr-Frontier 能通，所以要能逐单手动指定，停用的也允许。
             by_name = str(data.get("pay_proxy_name") or "").strip()
             if not override and by_name:
                 override = proxy_pool.resolve_by_name(by_name)
                 if not override:
                     return jsonify({
                         "ok": False,
-                        "error": f"代理池里找不到启用的出口「{by_name}」",
+                        "error": f"代理池里找不到出口「{by_name}」",
                     }), 400
             if override and override != proxy:
                 logger.warning("[pay] 账号 %s 改用备用出口支付：%s",

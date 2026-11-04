@@ -51,9 +51,11 @@ class ResolveByNameTest(unittest.TestCase):
         self.assertEqual(self.pp.resolve_by_name(""), "")
         self.assertEqual(self.pp.resolve_by_name("   "), "")
 
-    def test_disabled_entry_is_refused(self):
-        """停用的出口不该被支付偷偷用上。"""
-        self.assertEqual(self.pp.resolve_by_name("Disabled-Node"), "")
+    def test_disabled_entry_is_still_resolvable(self):
+        """enabled 只管注册时随机抽不抽它；支付是逐单手动指定，实测有些
+        被停用的节点反而付得通（Aaitr-ATT 付不通，Aaitr-Frontier 能通）。"""
+        got = self.pp.resolve_by_name("Disabled-Node")
+        self.assertIn("3.3.3.3:8080", got)
 
 
 class BackendAcceptsProxyNameTest(unittest.TestCase):
@@ -68,7 +70,7 @@ class BackendAcceptsProxyNameTest(unittest.TestCase):
         """名字打错就该报错，不能悄悄退回注册代理让人以为换成功了。"""
         idx = APP.index('data.get("pay_proxy_name")')
         window = APP[idx:idx + 500]
-        self.assertIn("找不到启用的出口", window)
+        self.assertIn("找不到出口", window)
         self.assertIn("400", window)
 
     def test_explicit_url_still_wins(self):
@@ -87,11 +89,19 @@ class FrontendProxyPickerTest(unittest.TestCase):
         idx = HTML.index('id="autoPayProxySelect"')
         self.assertIn("用注册代理", HTML[idx:idx + 220])
 
-    def test_loads_pool_and_filters_disabled(self):
+    def test_loads_pool_and_keeps_disabled(self):
+        """停用只影响注册选池，支付仍可手动指定，所以不能过滤掉。"""
         idx = HTML.index("async function _autoPayLoadProxies")
-        body = HTML[idx:idx + 1400]
+        body = HTML[idx:idx + 1600]
         self.assertIn("/api/proxy-pool", body)
-        self.assertIn("p.enabled", body)
+        self.assertIn("filter(p => p.valid)", body)
+        self.assertNotIn("p.enabled && p.valid", body)
+
+    def test_marks_disabled_entries(self):
+        """能选不等于该默认选，要让人看出这个节点注册时是停用的。"""
+        idx = HTML.index("async function _autoPayLoadProxies")
+        body = HTML[idx:idx + 1600]
+        self.assertIn("注册已停用", body)
 
     def test_groups_by_country(self):
         idx = HTML.index("async function _autoPayLoadProxies")

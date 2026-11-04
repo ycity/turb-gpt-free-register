@@ -1604,12 +1604,14 @@
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
     #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden),
-    #mailboxModal:not(.hidden) {
+    #mailboxModal:not(.hidden), #manualPayModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
       background: rgba(15, 23, 42, .45);
     }
+    /* 手动支付是从支付弹窗里点开的，必须盖在它上面 */
+    #manualPayModal:not(.hidden) { z-index: 1300; }
     .outlook-import-dialog {
       width: min(640px, 100%); max-height: min(860px, calc(100vh - 48px));
       display: flex; flex-direction: column;
@@ -3932,7 +3934,8 @@ function updateModalScrollLock() {
     || !$('#teamCheckoutModal').classList.contains('hidden')
     || !$('#emailChangeModalV2').classList.contains('hidden')
     || !$('#proxyPoolEditModal').classList.contains('hidden')
-    || !$('#proxyPoolImportModal').classList.contains('hidden');
+    || !$('#proxyPoolImportModal').classList.contains('hidden')
+    || !$('#manualPayModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -4972,15 +4975,16 @@ let _autoPayProxyCache = [];
 // 本单实际指定的出口名；会话跑起来后配置区隐藏，靠它在信息栏里显示
 let _autoPayUsedProxyName = '';
 
-// 支付出口选择。怀疑账单地址国家和出口国家不一致会被 Stripe 拒，
-// 所以要能在不动注册代理的前提下临时换一个出口重试。
+// 支付出口选择。出口对能否过 Stripe 风控有实际影响（同为美国，
+// Aaitr-ATT 付不通而 Aaitr-Frontier 能通），所以要能逐单手动指定。
+// 停用的节点也列出来：enabled 只管注册时随机抽不抽它，不代表支付不能用。
 async function _autoPayLoadProxies() {
   const sel = $('#autoPayProxySelect');
   if (!sel) return;
   try {
     const r = await fetch('/api/proxy-pool');
     const s = await r.json();
-    _autoPayProxyCache = (s.items || []).filter(p => p.enabled && p.valid);
+    _autoPayProxyCache = (s.items || []).filter(p => p.valid);
   } catch (err) {
     return;  // 出口选择是辅助功能，拉不到就只用注册代理
   }
@@ -4993,7 +4997,8 @@ async function _autoPayLoadProxies() {
   const groups = Object.keys(byCc).sort().map(cc => {
     const opts = byCc[cc].map(p => {
       const city = (p.test || {}).city || '';
-      return `<option value="${esc(p.name)}">${esc(p.name)}${city ? ' — ' + esc(city) : ''}</option>`;
+      const off = p.enabled ? '' : '（注册已停用）';
+      return `<option value="${esc(p.name)}">${esc(p.name)}${city ? ' — ' + esc(city) : ''}${off}</option>`;
     }).join('');
     return `<optgroup label="${esc(cc)}（${byCc[cc].length}）">${opts}</optgroup>`;
   }).join('');
@@ -5443,7 +5448,7 @@ async function _manualPayOpen() {
   if (!id) return;
   _manualPaySecrets = null;
   $('#manualPayModal').classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
+  updateModalScrollLock();
   $('#manualPayDoneTip').textContent = '';
   $('#manualPayPromo').value = '';
 
@@ -5660,7 +5665,8 @@ function _autoPayBind() {
   if (btnManual) btnManual.onclick = _manualPayOpen;
   const mpClose = () => {
     $('#manualPayModal').classList.add('hidden');
-    document.body.style.overflow = '';
+    // 不直接改 body.style：支付弹窗还开着，滚动锁要由统一逻辑判断
+    updateModalScrollLock();
   };
   ['#btnManualPayClose', '#btnManualPayClose2'].forEach(s => {
     const el = $(s); if (el) el.onclick = mpClose;
