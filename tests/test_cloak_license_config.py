@@ -36,16 +36,14 @@ class LicenseModuleNameTest(unittest.TestCase):
 
 
 class LicenseFailureIsLoudTest(unittest.TestCase):
-    """key 缺失要留下明确日志，不能静默退回。"""
+    """读配置失败要留下日志；但 key 为空是正常配置，不该告警。"""
 
-    def test_empty_key_is_logged(self):
+    def test_empty_key_is_not_an_error(self):
+        """0.6.4 跑免费 binary 不需要 key，为空告警只是噪音。"""
         src = (ROOT / "core" / "vcc_pay_session.py").read_text(encoding="utf-8")
         start = src.index("def _try_cloak_browser")
         body = src[start:src.index("def _plain_browser")]
-        self.assertIn("CLOAK_LICENSE_KEY 为空", body)
-        # 不能是 except: pass
-        self.assertNotIn("except Exception:  # noqa: BLE001 - 没有配置就按未授权跑",
-                         body)
+        self.assertNotIn("CLOAK_LICENSE_KEY 为空", body)
 
     def test_import_failure_is_logged(self):
         src = (ROOT / "core" / "vcc_pay_session.py").read_text(encoding="utf-8")

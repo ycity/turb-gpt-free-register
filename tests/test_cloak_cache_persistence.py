@@ -58,11 +58,12 @@ class StartupWarnsOnMissingLicenseTest(unittest.TestCase):
         self.assertLess(self.entry.index("license.key"),
                         self.entry.index("python web.py"))
 
-    def test_missing_license_is_a_warning_not_a_hard_exit(self):
-        """支付可以退回裸浏览器，不该因为缺 license 就拒绝启动整个服务。"""
+    def test_missing_license_is_not_treated_as_failure(self):
+        """0.6.4 免费 binary 不需要 license，缺 key 不是错误。"""
         idx = self.entry.index("license.key")
         window = self.entry[idx:idx + 500]
         self.assertNotIn("exit 1", window)
+        self.assertIn("免费 binary", window)
 
 
 if __name__ == "__main__":

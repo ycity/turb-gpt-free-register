@@ -213,10 +213,7 @@ def _try_cloak_browser(cfg, proxy: str, sess):
         key = str(getattr(cloak_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
         if key:
             opts["license_key"] = key
-        else:
-            logger.warning("[pay-session] %s CLOAK_LICENSE_KEY 为空，"
-                           "CloakBrowser 将无法启动并退回裸 Playwright", sess.sid)
-    except Exception as exc:  # noqa: BLE001 - 读不到配置就按未授权跑
+    except Exception as exc:  # noqa: BLE001 - 读不到配置就按免费 binary 跑
         logger.warning("[pay-session] %s 读取 CloakBrowser license 失败：%s",
                        sess.sid, exc)
 
