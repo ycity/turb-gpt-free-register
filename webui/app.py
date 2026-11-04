@@ -1350,9 +1350,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 proxy = override
 
         try:
+            # 复用已有长链时走不到生成分支，meta 为空；那种情况下用请求里手填的
+            # 码兜底，否则这一单用掉的码仍然不会被登记。
+            used_promo = (str(meta.get("promo_used") or "").strip()
+                          or str(data.get("promo_code") or "").strip())
             sess = start_session(account_id=int(acc["id"]),
                                  email=str(acc.get("email") or ""),
-                                 checkout_url=url, proxy=proxy, cfg=run_cfg)
+                                 checkout_url=url, proxy=proxy, cfg=run_cfg,
+                                 promo_code=used_promo)
         except RuntimeError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 409
         except Exception as exc:

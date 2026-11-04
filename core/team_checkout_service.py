@@ -146,6 +146,50 @@ def mark_promo_code(promo_id: int, status: str, account_id: int | None = None,
         )
 
 
+def record_used_promo_code(code: str, account_id: int | None = None,
+                           account_email: str | None = None,
+                           status: str = "used") -> dict:
+    """把手动填写并实际用掉的优惠码登记进池，方便以后查阅。
+
+    手动填的码不经过 claim_next_promo_code，原先用完就没了记录，下次翻不到
+    是谁用了哪个码。这里补登：池里没有就插入，已存在就补上账号归属。
+
+    已经是 used 的记录不会被覆盖——同一个码重复登记时保留首次的归属，避免
+    把真实使用者改掉。
+    """
+    clean = extract_clean_promo_code(code or "")
+    if not clean:
+        return {"ok": False, "error": "优惠码为空或格式无法识别"}
+
+    now = _now()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM promo_codes WHERE code = ?", (clean,)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO promo_codes (code, status, account_id, account_email,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (clean, status, account_id, account_email, now, now))
+            return {"ok": True, "code": clean, "action": "inserted",
+                    "stats": get_promo_stats()}
+
+        before = dict(row)
+        if str(before.get("status") or "") == "used":
+            return {"ok": True, "code": clean, "action": "already_used",
+                    "account_email": before.get("account_email"),
+                    "stats": get_promo_stats()}
+
+        conn.execute(
+            "UPDATE promo_codes SET status = ?,"
+            " account_id = coalesce(?, account_id),"
+            " account_email = coalesce(?, account_email),"
+            " updated_at = ? WHERE id = ?",
+            (status, account_id, account_email, now, before["id"]))
+        return {"ok": True, "code": clean, "action": "updated",
+                "previous_status": before.get("status"),
+                "stats": get_promo_stats()}
+
+
 def clear_promo_codes(status: str = "") -> int:
     with _connect() as conn:
         if status:

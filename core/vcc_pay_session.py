@@ -54,6 +54,7 @@ class PaySession:
     expected: float | None = None
     card_mask: str = ""
     gate_error: str = ""          # 闸门未通过的原因；非空时禁止确认
+    promo_code: str = ""          # 本单用掉的优惠码，支付成功后登记进池备查
     shot_b64: str = ""            # 最新截图，base64，不落盘
     submitted: bool = False
     created_at: float = field(default_factory=time.time)
@@ -91,6 +92,31 @@ def _touch(sess: PaySession, **kw) -> None:
     for key, value in kw.items():
         setattr(sess, key, value)
     sess.updated_at = time.time()
+
+
+def _record_promo(sess: PaySession) -> None:
+    """把这一单用掉的优惠码登记进池。
+
+    只在支付真正提交成功后调用：手动填的码不经过优惠码池分派，用完就查不到
+    记录了。登记失败不能影响支付结果，所以这里吞掉异常只记日志。
+    """
+    code = str(getattr(sess, "promo_code", "") or "").strip()
+    if not code:
+        return
+    try:
+        from core.team_checkout_service import record_used_promo_code
+
+        res = record_used_promo_code(
+            code, account_id=int(sess.account_id or 0) or None,
+            account_email=str(sess.email or "") or None)
+        if res.get("ok"):
+            logger.info("[pay-session] %s 优惠码已登记：%s（%s）",
+                        sess.sid, res.get("code"), res.get("action"))
+        else:
+            logger.warning("[pay-session] %s 优惠码登记被拒：%s",
+                           sess.sid, res.get("error"))
+    except Exception:  # noqa: BLE001 - 登记失败不能影响已完成的支付
+        logger.exception("[pay-session] %s 优惠码登记失败", sess.sid)
 
 
 def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
@@ -448,6 +474,7 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
         else:
             shown = f"{currency} {amount:.2f}" if amount is not None else ""
             _touch(sess, state=ST_DONE, message=f"已提交支付 {shown}".strip())
+            _record_promo(sess)
             _schedule_plan_check(sess, cfg)
         return
 
@@ -689,7 +716,7 @@ def _handle_3ds_interactive(page, sess, cfg, client, card_id) -> None:
 
 def start_session(*, account_id: int, email: str, checkout_url: str,
                   proxy: str = "", cfg: Any = None,
-                  client: Any = None) -> PaySession:
+                  client: Any = None, promo_code: str = "") -> PaySession:
     """开一个支付会话。立即返回，填表在后台线程进行。"""
     if cfg is None:
         from config import vcc as cfg  # type: ignore[no-redef]
@@ -704,7 +731,8 @@ def start_session(*, account_id: int, email: str, checkout_url: str,
                 "请先完成或取消")
 
         sess = PaySession(sid=uuid.uuid4().hex[:12], account_id=account_id,
-                          email=email)
+                          email=email,
+                          promo_code=str(promo_code or "").strip())
         _sessions[sess.sid] = sess
 
     client = client or build_client_from_config()
