@@ -48,9 +48,15 @@ class TagPrefersPlanLimitTest(unittest.TestCase):
     def test_keeps_chat_limit_as_fallback(self):
         self.assertIn("limit_windows", self.fn)
 
-    def test_shows_all_windows_not_just_shortest(self):
-        """#9 是 5h+weekly，只显示最短的会丢信息。"""
-        self.assertIn("join('+')", self.fn)
+    def test_shows_only_shortest_window(self):
+        """只标最短窗口。5h+周 这种拼接读起来啰嗦，完整窗口放 title。"""
+        fn = _tag_fn()
+        self.assertIn("shortest", fn)
+        self.assertNotIn("join('+') + '限额'", fn)
+
+    def test_full_windows_kept_in_tooltip(self):
+        fn = _tag_fn()
+        self.assertIn("const all = windows.map", fn)
 
     def test_tooltip_separates_two_data_sources(self):
         """两套额度含义不同，提示里不能混为一谈。"""
@@ -108,7 +114,15 @@ class LimitFollowsWorkspaceTest(unittest.TestCase):
         start = HTML.index("function _planCell")
         body = HTML[start:HTML.index("function _planAction")]
         self.assertIn("const limit = _limitSuffix(r)", body)
-        self.assertIn("parts.push(limit.text)", body)
+
+    def test_limit_is_not_inside_billing_parens(self):
+        """括号里是计费信息（月付/EGP/到期），限额不该混进去——
+        那样 personal=team 的账号写法和 personal=free 的不一致。"""
+        start = HTML.index("function _planCell")
+        body = HTML[start:HTML.index("function _planAction")]
+        self.assertNotIn("parts.push(limit.text)", body)
+        self.assertIn("${limit.text}", body)
+        self.assertIn("limit.text ?", body)
 
     def test_free_branch_does_not_duplicate(self):
         """free 分支的限额已经在 workspace 标签里，不能再加一次。"""

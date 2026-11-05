@@ -4372,8 +4372,7 @@ function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') 
 }
 const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '月'};
 // 限额跟随空间：查询时按 paid_workspace_account_id 指定 workspace 发起，
-// 拿到的就是那个空间的额度。所以它应该跟着付费空间的套餐一起显示，而不是
-// 另起一个孤立标签。
+// 拿到的就是那个空间的额度，所以跟着付费空间的套餐一起显示。
 function _limitSuffix(r) {
   // 套餐限额来自 codex/usage（settings/usage 页上那个「每周限额」），直接给出
   // 窗口长度；旧的 limit_windows 是聊天额度，按剩余时间推断会漂移，只作兜底。
@@ -4381,14 +4380,19 @@ function _limitSuffix(r) {
   const chatWins = Array.isArray(r.limit_windows) ? r.limit_windows : [];
   const windows = planWins.length ? planWins : chatWins;
   if (!windows.length) return {text: '', tip: ''};
-  const text = windows.map(w => LIMIT_WINDOW_LABEL[w] || w).join('+') + '限额';
+  // 只标最短的那个窗口：它决定实际节奏，列全了反而啰嗦。完整窗口放 title。
+  const order = {'5h': 0, daily: 1, weekly: 2, monthly: 3};
+  const shortest = windows.slice().sort(
+    (a, b) => (order[a] ?? 9) - (order[b] ?? 9))[0];
+  const text = `${LIMIT_WINDOW_LABEL[shortest] || shortest}限额`;
   const used = (r.plan_limit_detail || [])
     .map(d => `${LIMIT_WINDOW_LABEL[d.window] || d.window}: 已用 ${d.used_percent ?? '?'}%`)
     .join('；');
+  const all = windows.map(w => LIMIT_WINDOW_LABEL[w] || w).join('+');
   const features = (r.limit_features || [])
     .map(f => `${f.feature}: ${LIMIT_WINDOW_LABEL[f.window] || f.window}`).join('；');
-  const tip = [planWins.length ? `套餐限额（Codex/Work 共享）${used ? ' → ' + used : ''}`
-                               : '聊天额度（按剩余时间推断，仅供参考）',
+  const tip = [planWins.length ? `套餐限额（Codex/Work 共享）：${all}${used ? ' → ' + used : ''}`
+                               : `聊天额度（按剩余时间推断，仅供参考）：${all}`,
                features ? `聊天额度 → ${features}` : '',
                r.plan_limit_reached ? '已触顶' : ''].filter(Boolean).join('；');
   return {text, tip};
@@ -4471,10 +4475,11 @@ function _planCell(r) {
   if (expire) parts.push(`到期 ${expire}`);
   const discount = _discountLabel(r);
   if (discount) parts.push(discount);
-  // 主标签展示的就是付费空间，限额跟着它
   const limit = _limitSuffix(r);
-  if (limit.text) parts.push(limit.text);
-  const text = parts.length ? `${plan}（${parts.join('/')}）` : plan;
+  const base = parts.length ? `${plan}（${parts.join('/')}）` : plan;
+  // 限额不进括号：括号里是计费信息，限额是另一回事，跟 workspace 标签
+  // 一样用 ` · ` 挂在后面，两类账号的写法才一致。
+  const text = limit.text ? `${base} · ${limit.text}` : base;
   const detail = [title];
   if (limit.tip) detail.push(limit.tip);
   if (expireRaw) detail.push(`到期时间: ${expireRaw}`);
