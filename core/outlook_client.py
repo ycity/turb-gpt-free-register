@@ -388,8 +388,22 @@ def _outlook_fetch_mode() -> str:
 
 
 def _is_remote_disabled_error(exc: Exception | str) -> bool:
+    """远端取信不可用、应该切 Graph 直连的错误。
+
+    除了欠费（402 / DEPLOYMENT_DISABLED），还要认 IMAP 协议本身不被支持的
+    情况：mail.chatai.codes 跑在 Cloudflare Workers 免费运行时上，
+    /api/fetch-imap 固定返回 HTTP 501 IMAP_REQUIRES_CONTAINER。
+    这个错不在识别列表里时，auto 模式会一直死磕远端 IMAP 直到 OTP 超时
+    （2026-11-05 实际发生：#61/#53 的查活都卡在这里，拿不到验证码）。
+    """
     text = str(exc or "")
-    return "DEPLOYMENT_DISABLED" in text or "HTTP 402" in text or "Payment required" in text
+    return (
+        "DEPLOYMENT_DISABLED" in text
+        or "HTTP 402" in text
+        or "Payment required" in text
+        or "IMAP_REQUIRES_CONTAINER" in text
+        or "HTTP 501" in text
+    )
 
 
 def _ms_http() -> CurlSession:
@@ -922,8 +936,10 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
         if mode == "auto" and _is_remote_disabled_error(exc):
             _REMOTE_DISABLED = True
             logger.warning("[Outlook] 远端取件服务已禁用，自动切换为 Microsoft Graph 直连模式")
-            if protocol == "graph":
-                return _fetch_via_graph_direct(account)
+            # 不论失败的是 graph 还是 imap，都回退 Graph 直连：远端 IMAP
+            # 返回 501 时只置标记不回退的话，本轮直接空手而归，轮询到超时
+            # 才换下一轮，OTP 根本拿不到。
+            return _fetch_via_graph_direct(account)
         return []
     except Exception as exc:
         logger.warning(f"[Outlook] {protocol} 请求异常: {type(exc).__name__}: {exc}")
