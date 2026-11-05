@@ -4374,9 +4374,15 @@ const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '�
 function _teamPlanTag(r, excludeAccountId = '') {
   // 账号名下的付费 workspace 各挂一个标签；主标签已展示的那个 workspace 不再重复。
   const list = Array.isArray(r.workspace_plans) ? r.workspace_plans : [];
-  // 标签只标窗口类型，取最短的那个（5h 比周更能说明限制强度）；明细放 title。
-  const windows = Array.isArray(r.limit_windows) ? r.limit_windows : [];
-  const limitText = windows.length ? (LIMIT_WINDOW_LABEL[windows[0]] || windows[0]) : '';
+  // 限额取 codex/usage 的套餐限额（settings/usage 页上那个「每周限额」），
+  // 它直接给出窗口长度。旧的 limit_windows 是聊天额度，且按剩余时间推断，
+  // 窗口后期会漂移成更短的窗口，只在没有套餐限额时兜底。
+  const planWins = Array.isArray(r.plan_limit_windows) ? r.plan_limit_windows : [];
+  const chatWins = Array.isArray(r.limit_windows) ? r.limit_windows : [];
+  const windows = planWins.length ? planWins : chatWins;
+  const limitText = windows.length
+    ? windows.map(w => LIMIT_WINDOW_LABEL[w] || w).join('+')
+    : '';
   return list.filter(w => w && w.has_active_subscription &&
       !['', 'free', 'guest'].includes(String(w.plan_type || '').toLowerCase()) &&
       String(w.account_id || '') !== String(excludeAccountId || ''))
@@ -4385,12 +4391,16 @@ function _teamPlanTag(r, excludeAccountId = '') {
       // esc() 会把空串渲染成 '-'，没有限额数据时不能走 esc。
       const limit = limitText ? ` · ${esc(limitText)}限额` : '';
       const expire = _fmtPlanTime(w.expires_at, true);
+      const used = (r.plan_limit_detail || [])
+        .map(d => `${LIMIT_WINDOW_LABEL[d.window] || d.window}: 已用 ${d.used_percent ?? '?'}%`)
+        .join('；');
       const features = (r.limit_features || [])
         .map(f => `${f.feature}: ${LIMIT_WINDOW_LABEL[f.window] || f.window}`).join('；');
       const tip = [`workspace: ${w.name || w.account_id || '-'}`,
                    `套餐: ${w.plan_type || '-'}`,
                    expire ? `到期 ${expire}` : '',
-                   features ? `限额窗口 → ${features}` : ''].filter(Boolean).join('；');
+                   used ? `套餐限额 → ${used}` : '',
+                   features ? `聊天额度 → ${features}` : ''].filter(Boolean).join('；');
       return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}${limit}</span>`;
     }).join('');
 }

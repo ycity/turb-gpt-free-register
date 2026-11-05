@@ -198,6 +198,9 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         "workspace_plans", "personal_plan_type", "paid_workspace_account_id",
         "paid_workspace_name", "account_id", "limit_windows", "limit_checked_at",
         "limit_features",
+        # 套餐限额（codex/usage，settings/usage 页上的「每周限额」）
+        "plan_limit_windows", "plan_limit_detail", "plan_limit_reached",
+        "plan_limit_checked_at",
         # 套餐展示补充：付费到期/折扣/失败原因。
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",

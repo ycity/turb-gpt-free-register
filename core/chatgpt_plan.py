@@ -468,7 +468,12 @@ def _retry_wait_seconds(resp: Any, base_delay: float, attempt: int) -> float:
 
 
 def _limit_window(hours: float) -> str:
-    """把重置间隔归类成限额窗口。实测间隔非常规整：5.00 / 24.00 / 720.00 小时。"""
+    """把"距离下次重置还剩多少小时"归类成限额窗口。
+
+    注意这是推断，不是读取：剩余时间随查询时刻变化，窗口后期会被归到更短的
+    窗口（weekly 剩 5h 会被判成 5h）。只在数据源没给出窗口长度时才用它，
+    能拿到 limit_window_seconds 时一律走 _window_from_seconds。
+    """
     if hours <= 0:
         return ""
     if hours <= 6:
@@ -478,6 +483,106 @@ def _limit_window(hours: float) -> str:
     if hours <= 200:
         return "weekly"
     return "monthly"
+
+
+def _window_from_seconds(seconds: float) -> str:
+    """按窗口长度本身判定类型。
+
+    codex/usage 的 limit_window_seconds 是窗口长度而非剩余时间，不随查询
+    时刻变化，比 _limit_window 的推断可靠。实测值：18000(5h)、86400(1d)、
+    604800(7d)、2592000(30d)。
+    """
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    # 取最接近的标准窗口，容忍服务端的小幅偏差
+    table = (
+        (18000.0, "5h"),
+        (86400.0, "daily"),
+        (604800.0, "weekly"),
+        (2592000.0, "monthly"),
+    )
+    best, best_diff = "", None
+    for std, name in table:
+        diff = abs(s - std) / std
+        if best_diff is None or diff < best_diff:
+            best, best_diff = name, diff
+    # 偏差超过 20% 说明是没见过的窗口，宁可不猜
+    return best if best_diff is not None and best_diff <= 0.2 else ""
+
+
+def fetch_codex_usage(
+    env: BrowserSession,
+    token: str,
+    *,
+    account_id: str | None = None,
+    timeout: float = 20.0,
+) -> dict:
+    """读套餐限额（Codex / Work / 工作空间智能体共享的那份额度）。
+
+    就是 chatgpt.com/settings/usage 页面上显示的「每周限额」。它和
+    conversation/init 返回的聊天额度（deep_research、image_gen）是两套东西，
+    之前把后者当成套餐限额，导致 weekly 账号被判成 daily+monthly。
+
+    这里直接读 limit_window_seconds，不按剩余时间推断。
+    """
+    path = "/backend-api/codex/usage"
+    headers = env.get_chatgpt_headers(
+        referer="https://chatgpt.com/settings/usage")
+    headers.update({
+        "authorization": f"Bearer {normalize_token(token)}",
+        "x-openai-target-path": path,
+        "x-openai-target-route": path,
+    })
+    workspace = str(account_id or "").strip()
+    if workspace:
+        headers["chatgpt-account-id"] = workspace
+
+    resp = env.get(f"https://chatgpt.com{path}", headers=headers,
+                   allow_redirects=False, timeout=timeout)
+    status = int(getattr(resp, "status_code", 0) or 0)
+    if not (200 <= status < 300):
+        return {"plan_limit_ok": False, "plan_limit_error": f"HTTP {status}"}
+    try:
+        data = resp.json()
+    except Exception:
+        return {"plan_limit_ok": False, "plan_limit_error": "响应不是 JSON"}
+    if not isinstance(data, dict):
+        return {"plan_limit_ok": False, "plan_limit_error": "响应不是 JSON 对象"}
+
+    rl = data.get("rate_limit")
+    rl = rl if isinstance(rl, dict) else {}
+    windows: list[str] = []
+    detail: list[dict] = []
+    for key in ("primary_window", "secondary_window"):
+        w = rl.get(key)
+        if not isinstance(w, dict):
+            continue
+        name = _window_from_seconds(w.get("limit_window_seconds"))
+        if not name:
+            continue
+        if name not in windows:
+            windows.append(name)
+        detail.append({
+            "window": name,
+            "slot": key,
+            "used_percent": w.get("used_percent"),
+            "reset_at": w.get("reset_at"),
+        })
+
+    order = {"5h": 0, "daily": 1, "weekly": 2, "monthly": 3}
+    windows.sort(key=lambda x: order.get(x, 9))
+    return {
+        "plan_limit_ok": True,
+        "plan_limit_windows": windows,
+        "plan_limit_detail": detail,
+        "plan_limit_reached": bool(rl.get("limit_reached")),
+        "plan_limit_checked_at": now_iso(),
+    }
+
 
 
 def fetch_limit_windows(
@@ -723,6 +828,21 @@ def check_account_plan(
                                 )
                                 parsed["limit_check_ok"] = False
                                 parsed["limit_check_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                            # 套餐限额（Codex/Work 共享的那份，settings/usage 页上
+                            # 显示的「每周限额」）和上面的聊天额度是两套数据。
+                            try:
+                                parsed.update(fetch_codex_usage(
+                                    env, token,
+                                    account_id=parsed.get("paid_workspace_account_id"),
+                                    timeout=timeout_seconds,
+                                ))
+                            except Exception as exc:
+                                logger.info(
+                                    "[Plan] 套餐限额探测失败，保留套餐结果：%s: %s",
+                                    type(exc).__name__, str(exc)[:160],
+                                )
+                                parsed["plan_limit_ok"] = False
+                                parsed["plan_limit_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
                         return parsed
             except Exception as exc:
                 logger.debug("套餐查询失败: %s: %s", type(exc).__name__, exc, exc_info=True)

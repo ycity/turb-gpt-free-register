@@ -1580,6 +1580,11 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
             row["limit_windows"] = result.get("limit_windows") or []
             row["limit_features"] = result.get("limit_features") or []
             row["limit_checked_at"] = result.get("limit_checked_at")
+            # 套餐限额：Codex/Work 共享的那份，和上面的聊天额度不是一回事
+            row["plan_limit_windows"] = result.get("plan_limit_windows") or []
+            row["plan_limit_detail"] = result.get("plan_limit_detail") or []
+            row["plan_limit_reached"] = result.get("plan_limit_reached")
+            row["plan_limit_checked_at"] = result.get("plan_limit_checked_at")
             row["plan_last_success_at"] = result.get("checked_at") or _now()
             row["plan_last_success_result_json"] = json.dumps(result, ensure_ascii=False)
         row["plan_check_proxy_mode"] = result.get("proxy_mode")
@@ -1827,6 +1832,8 @@ def list_account_plan_check_statuses(
         "workspace_plans", "personal_plan_type", "paid_workspace_account_id",
         "paid_workspace_name", "account_id", "limit_windows", "limit_checked_at",
         "limit_features",
+        "plan_limit_windows", "plan_limit_detail", "plan_limit_reached",
+        "plan_limit_checked_at",
         "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
