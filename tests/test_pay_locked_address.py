@@ -83,9 +83,11 @@ class DomWriteUnlocksFieldTest(unittest.TestCase):
         self.assertIn("if (wasReadOnly) el.readOnly = true", s)
 
     def test_verifies_the_value_actually_stuck(self):
-        """React 可能回滚写入，必须回读确认而不是无脑返回 true。"""
+        """要确认写进去了，但不能用严格相等——Stripe 会给卡号插空格，
+        严格比会把成功判成失败（见 test_pay_dom_write_verdict）。"""
         s = self._script()
-        self.assertIn("el.value === val", s)
+        self.assertIn("length > 0", s)
+        self.assertNotIn("el.value === val", s)
 
     def test_passes_selector_and_value_as_args(self):
         page = FakePage()

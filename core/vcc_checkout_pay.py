@@ -210,6 +210,10 @@ def _fill_via_dom(page: Any, selector: str, value: str) -> bool:
 
     复用旧长链时 Stripe 会把已填过的 email / 地址锁成 disabled+readonly，
     直接 setter 写入会被 React 回滚，所以先摘掉锁、写完再还原。
+
+    写完只确认"值不为空"，不做严格相等：Stripe 会给卡号自动插空格
+    （5378727141745290 → 5378 7271 4174 5290），严格比会把成功判成失败。
+    精确校验由调用方的 _value_matches 做，它只比数字。
     """
     try:
         return bool(page.evaluate(
@@ -228,7 +232,8 @@ def _fill_via_dom(page: Any, selector: str, value: str) -> bool:
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
                 el.dispatchEvent(new Event('blur', { bubbles: true }));
-                const ok = el.value === val;
+                // 只看写进去没有：格式化会改变字面值，严格相等必然失败
+                const ok = String(el.value || '').length > 0;
                 // 还原原状：锁是 Stripe 自己加的，留着改动可能触发它的校验
                 if (wasDisabled) el.disabled = true;
                 if (wasReadOnly) el.readOnly = true;
@@ -291,7 +296,14 @@ def _fill(page: Any, selector: str, value: str, *, label: str,
         filled[label] = True
         return
     if required:
-        raise VccPayError(f"填写 {label} 失败：指针被遮挡且 DOM 写入未成功")
+        actual = ""
+        try:
+            actual = page.input_value(selector, timeout=2000) or ""
+        except Exception:  # noqa: BLE001 - 读不到就不带这段
+            pass
+        raise VccPayError(
+            f"填写 {label} 失败：DOM 写入未生效"
+            + (f"（页面当前值 {actual!r}）" if actual else "（页面当前为空）"))
     filled[label] = False
 
 
