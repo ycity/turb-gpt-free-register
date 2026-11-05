@@ -4371,37 +4371,42 @@ function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') 
   return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
 }
 const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '月'};
-function _teamPlanTag(r, excludeAccountId = '') {
-  // 账号名下的付费 workspace 各挂一个标签；主标签已展示的那个 workspace 不再重复。
-  const list = Array.isArray(r.workspace_plans) ? r.workspace_plans : [];
-  // 限额取 codex/usage 的套餐限额（settings/usage 页上那个「每周限额」），
-  // 它直接给出窗口长度。旧的 limit_windows 是聊天额度，且按剩余时间推断，
-  // 窗口后期会漂移成更短的窗口，只在没有套餐限额时兜底。
+// 限额是账号级的，不属于某个 workspace。必须单独成一个标签：挂在 workspace
+// 标签上时，付费 workspace 恰好是主标签那个（personal_plan_type=team 的账号）
+// 就会被 excludeAccountId 过滤掉，限额跟着一起消失。
+function _limitTag(r) {
+  // 套餐限额来自 codex/usage（settings/usage 页上那个「每周限额」），直接给出
+  // 窗口长度；旧的 limit_windows 是聊天额度，按剩余时间推断会漂移，只作兜底。
   const planWins = Array.isArray(r.plan_limit_windows) ? r.plan_limit_windows : [];
   const chatWins = Array.isArray(r.limit_windows) ? r.limit_windows : [];
   const windows = planWins.length ? planWins : chatWins;
-  const limitText = windows.length
-    ? windows.map(w => LIMIT_WINDOW_LABEL[w] || w).join('+')
-    : '';
+  if (!windows.length) return '';
+  const text = windows.map(w => LIMIT_WINDOW_LABEL[w] || w).join('+');
+  const used = (r.plan_limit_detail || [])
+    .map(d => `${LIMIT_WINDOW_LABEL[d.window] || d.window}: 已用 ${d.used_percent ?? '?'}%`)
+    .join('；');
+  const features = (r.limit_features || [])
+    .map(f => `${f.feature}: ${LIMIT_WINDOW_LABEL[f.window] || f.window}`).join('；');
+  const tip = [planWins.length ? '套餐限额（Codex/Work 共享）' : '聊天额度（推断值）',
+               used ? `套餐限额 → ${used}` : '',
+               features ? `聊天额度 → ${features}` : '',
+               r.plan_limit_reached ? '已触顶' : ''].filter(Boolean).join('；');
+  const cls = r.plan_limit_reached ? 'status-failed' : 'status-used';
+  return `<span class="pill ${cls}" title="${esc(tip)}">${esc(text)}限额</span>`;
+}
+function _teamPlanTag(r, excludeAccountId = '') {
+  // 账号名下的付费 workspace 各挂一个标签；主标签已展示的那个 workspace 不再重复。
+  const list = Array.isArray(r.workspace_plans) ? r.workspace_plans : [];
   return list.filter(w => w && w.has_active_subscription &&
       !['', 'free', 'guest'].includes(String(w.plan_type || '').toLowerCase()) &&
       String(w.account_id || '') !== String(excludeAccountId || ''))
     .map(w => {
       const plan = String(w.plan_type || '').toUpperCase();
-      // esc() 会把空串渲染成 '-'，没有限额数据时不能走 esc。
-      const limit = limitText ? ` · ${esc(limitText)}限额` : '';
       const expire = _fmtPlanTime(w.expires_at, true);
-      const used = (r.plan_limit_detail || [])
-        .map(d => `${LIMIT_WINDOW_LABEL[d.window] || d.window}: 已用 ${d.used_percent ?? '?'}%`)
-        .join('；');
-      const features = (r.limit_features || [])
-        .map(f => `${f.feature}: ${LIMIT_WINDOW_LABEL[f.window] || f.window}`).join('；');
       const tip = [`workspace: ${w.name || w.account_id || '-'}`,
                    `套餐: ${w.plan_type || '-'}`,
-                   expire ? `到期 ${expire}` : '',
-                   used ? `套餐限额 → ${used}` : '',
-                   features ? `聊天额度 → ${features}` : ''].filter(Boolean).join('；');
-      return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}${limit}</span>`;
+                   expire ? `到期 ${expire}` : ''].filter(Boolean).join('；');
+      return `<span class="pill status-success" title="${esc(tip)}">${esc(plan)}</span>`;
     }).join('');
 }
 function _planCell(r) {
@@ -4437,6 +4442,8 @@ function _planCell(r) {
   const personal = String(r.personal_plan_type || '').toLowerCase();
   const paidTags = _teamPlanTag(r);
   const baseLower = (paidTags && personal) ? personal : lower;
+  // 限额是账号级的，两个分支都要挂，不能依赖 workspace 标签是否渲染
+  const limitTag = _limitTag(r);
 
   if (baseLower === 'free') {
     const checkedOk = ok === true || r.plan_check_status === 'success';
@@ -4447,7 +4454,7 @@ function _planCell(r) {
     const t = promoSummaries.length ? `${title}；可用套餐优惠：${promoSummaries.join('；')}` : title;
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
-    return _promoStackHtml('free', cls, promoSummaries, t, `${detailBtn}${paidTags}`);
+    return _promoStackHtml('free', cls, promoSummaries, t, `${detailBtn}${paidTags}${limitTag}`);
   }
 
   const cls = 'status-success';
@@ -4467,7 +4474,7 @@ function _planCell(r) {
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
   const otherTags = _teamPlanTag(r, r.paid_workspace_account_id || r.account_id || '');
-  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'), otherTags);
+  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'), `${otherTags}${limitTag}`);
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {

@@ -18,8 +18,9 @@ APP = (ROOT / "webui" / "app.py").read_text(encoding="utf-8")
 
 
 def _tag_fn():
-    start = HTML.index("function _teamPlanTag")
-    return HTML[start:HTML.index("function _planCell")]
+    """只取 _limitTag 的函数体，不要连带后面的 _teamPlanTag。"""
+    start = HTML.index("function _limitTag")
+    return HTML[start:HTML.index("function _teamPlanTag", start)]
 
 
 class ApiExposesFieldsTest(unittest.TestCase):
@@ -70,6 +71,43 @@ class LabelMappingTest(unittest.TestCase):
         body = m.group(1)
         self.assertIn("weekly: '周'", body)
         self.assertIn("'5h': '5h'", body)
+
+
+class LimitTagIsIndependentTest(unittest.TestCase):
+    """限额是账号级的，不能挂在 workspace 标签上。
+
+    事故：原来限额文本拼在 _teamPlanTag 渲染的 workspace 标签里，而该函数会
+    用 excludeAccountId 排除主标签已展示的那个 workspace。personal_plan_type
+    为 team 的账号（如 #68）唯一的付费 workspace 正是被排除的那个，于是整个
+    标签不渲染，限额跟着消失——页面上完全看不到「周限额」。
+    """
+
+    def test_limit_tag_is_a_separate_function(self):
+        self.assertIn("function _limitTag", HTML)
+
+    def test_team_tag_no_longer_renders_limit(self):
+        start = HTML.index("function _teamPlanTag")
+        body = HTML[start:HTML.index("function _planCell")]
+        self.assertNotIn("限额", body,
+                         "限额不该再由 workspace 标签渲染")
+
+    def test_limit_tag_ignores_workspace_list(self):
+        """不读 workspace_plans，就不会被 exclude 规则影响。"""
+        fn = _tag_fn()
+        self.assertNotIn("workspace_plans", fn)
+        self.assertNotIn("excludeAccountId", fn)
+
+    def test_both_branches_render_limit_tag(self):
+        start = HTML.index("function _planCell")
+        body = HTML[start:HTML.index("function _planAction")]
+        self.assertIn("const limitTag = _limitTag(r)", body)
+        # free 分支和付费分支各一处
+        self.assertEqual(body.count("${limitTag}"), 2,
+                         "两个渲染分支都要挂限额标签")
+
+    def test_marks_reached_state(self):
+        fn = _tag_fn()
+        self.assertIn("plan_limit_reached", fn)
 
 
 if __name__ == "__main__":
