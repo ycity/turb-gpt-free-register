@@ -1,0 +1,27 @@
+# 构建上下文排除项。
+#
+# 这些目录都由 docker-compose 以卷挂载进容器，复制进镜像既没用又占空间：
+# cache/ 里有浏览器内核和 GeoIP 库，单独就有 2.8GB，曾把镜像撑到构建失败
+# （no space left on device）。
+cache/
+logs/
+data/
+注册日志/
+*.sqlite3
+*.sqlite3-journal
+.env
+.env.*
+!.env.example
+
+# 开发产物
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.agents/
+
+# 大体积的一次性文件
+*.jsonl
+Default-all-domains-*.json
+docs/

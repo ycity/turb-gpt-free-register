@@ -46,6 +46,15 @@ http://dl.google.com/linux/chrome/deb/ stable main" \
     apt-get install -y --no-install-recommends google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
 
+# 卸掉 Linux 独有的中文字体。浏览器对外伪装成 Windows 10，而字体枚举
+# （按测宽，不是 fonts.check——那个对任何字体都返回 true）能真实探到
+# WenQuanYi Zen Hei，一台 Windows 机器不该有它。放在 Chrome 之后执行，
+# 否则会被 google-chrome-stable 的依赖重新拉回来。
+RUN apt-get remove -y fonts-wqy-zenhei 2>/dev/null; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*; \
+    fc-cache -fv >/dev/null 2>&1 || true
+
 # 浏览器装进已挂载的 cache 目录，docker restart 后不丢。
 # /root/.cache 没有挂载，装那里重启即失效。
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/cache/ms-playwright
