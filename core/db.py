@@ -1596,7 +1596,17 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
                 row[key] = result[key]
         row["plan_check_result_json"] = json.dumps(result, ensure_ascii=False)
         row["updated_at"] = _now()
-        return True
+        needs_no = bool(row.get("paid_at")) and not row.get("subscription_no")
+        target_id = int(row.get("id") or 0)
+
+    # 限额类型到套餐查完才确定，订阅编号在这里补发。
+    # 放在 with 外面：assign_subscription_no 自己要拿 _LOCK，在里面调会重入。
+    if needs_no and target_id:
+        try:
+            assign_subscription_no(target_id)
+        except Exception:  # noqa: BLE001 - 编号失败不能影响套餐结果
+            logger.exception("[DB] 分配订阅编号失败: acc_id=%s", target_id)
+    return True
 
 
 def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> bool:
@@ -1834,6 +1844,7 @@ def list_account_plan_check_statuses(
         "limit_features",
         "plan_limit_windows", "plan_limit_detail", "plan_limit_reached",
         "plan_limit_checked_at",
+        "subscription_no", "subscription_kind", "paid_at", "paid_at_estimated",
         "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
@@ -2011,6 +2022,64 @@ def get_account_by_email(email: str) -> dict | None:
             else:
                 row = _select_account(conn, email=email)
         return _decorate_account(row) if row else None
+
+
+def set_account_paid_at(acc_id: int, when: str | None = None) -> bool:
+    """记录支付成功时间。已有值时不覆盖，避免重复支付把首次时间冲掉。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("paid_at"):
+            return False
+        row["paid_at"] = str(when or _now())
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
+# 两种限额各自独立编号，起点由历史数据定：5h 从 49 开始（id 1~8 那批
+# 已删除的账号占了 41~48），周限额从 8 开始。
+_SUB_NO_START = {"5h": 49, "weekly": 8}
+
+
+def _limit_kind(row: dict) -> str:
+    """付费账号属于哪种限额。只有 weekly 一种窗口才算周限额。"""
+    wins = row.get("plan_limit_windows") or []
+    if not isinstance(wins, list) or not wins:
+        return ""
+    return "weekly" if wins == ["weekly"] else ("5h" if "5h" in wins else "")
+
+
+def assign_subscription_no(acc_id: int) -> int | None:
+    """给账号分配订阅编号，按限额类型分两条序列各自递增。
+
+    已有编号直接返回，不重复分配。限额类型还没查出来时返回 None，
+    等套餐查询回来再调一次。
+    """
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return None
+        existing = row.get("subscription_no")
+        if existing:
+            return int(existing)
+        kind = _limit_kind(row)
+        if not kind:
+            return None
+        used = {
+            int(r["subscription_no"])
+            for r in rows
+            if r.get("subscription_no") and _limit_kind(r) == kind
+        }
+        nxt = _SUB_NO_START.get(kind, 1)
+        while nxt in used:
+            nxt += 1
+        row["subscription_no"] = nxt
+        row["subscription_kind"] = kind
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return nxt
 
 
 def update_account_access_token(acc_id: int, access_token: str) -> bool:

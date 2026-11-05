@@ -852,6 +852,9 @@
     .accounts-table-v2 .plan-promo-head {
       display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
     }
+    .accounts-table-v2 .plan-paid-at {
+      font-size: 11px; color: #6b7280; line-height: 1.3; white-space: nowrap;
+    }
     .accounts-table-v2 .plan-promo-stack .pill {
       height: auto; min-height: 26px; max-width: 100%; line-height: 1.3;
       text-align: left; white-space: normal; overflow-wrap: anywhere;
@@ -4365,10 +4368,24 @@ function _promoSummaries(campaigns) {
     return `${_promoPlanName(key, campaign)}：${offer}${duration ? `/${duration}` : ''}`;
   });
 }
-function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') {
+function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '', extraLines = '') {
   const base = `<span class="pill ${baseClass}" title="${esc(title)}">${esc(baseText)}</span>`;
   const lines = summaries.map(item => `<span class="pill status-success" title="${esc(item)}">${esc(item)}</span>`).join('');
-  return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
+  return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}${extraLines}</div>`;
+}
+// 订阅时间单独一行，和套餐标签垂直排列
+function _paidAtLine(r) {
+  const raw = r.paid_at;
+  if (!raw) return '';
+  const d = new Date(String(raw).replace(' ', 'T'));
+  if (isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  const txt = `${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())}`
+            + ` ${p(d.getHours())}:${p(d.getMinutes())}`;
+  const tip = r.paid_at_estimated
+    ? `订阅时间（历史数据，按注册时间估算）：${raw}`
+    : `订阅时间：${raw}`;
+  return `<div class="plan-paid-at" title="${esc(tip)}">订阅时间 · ${esc(txt)}</div>`;
 }
 const LIMIT_WINDOW_LABEL = {'5h': '5h', daily: '日', weekly: '周', monthly: '月'};
 // 限额跟随空间：查询时按 paid_workspace_account_id 指定 workspace 发起，
@@ -4384,7 +4401,9 @@ function _limitSuffix(r) {
   const order = {'5h': 0, daily: 1, weekly: 2, monthly: 3};
   const shortest = windows.slice().sort(
     (a, b) => (order[a] ?? 9) - (order[b] ?? 9))[0];
-  const text = `${LIMIT_WINDOW_LABEL[shortest] || shortest}限额`;
+  // 订阅编号：5h 和周限额各自一条序列，手动导入的账号没有编号
+  const no = r.subscription_no ? ` (${r.subscription_no})` : '';
+  const text = `${LIMIT_WINDOW_LABEL[shortest] || shortest}限额${no}`;
   const used = (r.plan_limit_detail || [])
     .map(d => `${LIMIT_WINDOW_LABEL[d.window] || d.window}: 已用 ${d.used_percent ?? '?'}%`)
     .join('；');
@@ -4462,7 +4481,8 @@ function _planCell(r) {
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
     // 限额已经跟在付费 workspace 标签上，这里不重复
-    return _promoStackHtml('free', cls, promoSummaries, t, `${detailBtn}${paidTags}`);
+    return _promoStackHtml('free', cls, promoSummaries, t,
+                           `${detailBtn}${paidTags}`, _paidAtLine(r));
   }
 
   const cls = 'status-success';
@@ -4479,15 +4499,15 @@ function _planCell(r) {
   const base = parts.length ? `${plan}（${parts.join('/')}）` : plan;
   // 限额不进括号：括号里是计费信息，限额是另一回事，跟 workspace 标签
   // 一样用 ` · ` 挂在后面，两类账号的写法才一致。
-  const text = limit.text ? `${base} · ${limit.text}` : base;
-  const detail = [title];
+  const text = limit.text ? `${base} · ${limit.text}` : base;  const detail = [title];
   if (limit.tip) detail.push(limit.tip);
   if (expireRaw) detail.push(`到期时间: ${expireRaw}`);
   if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
   const otherTags = _teamPlanTag(r, r.paid_workspace_account_id || r.account_id || '');
-  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'), otherTags);
+  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'),
+                         otherTags, _paidAtLine(r));
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {

@@ -119,6 +119,24 @@ def _record_promo(sess: PaySession) -> None:
         logger.exception("[pay-session] %s 优惠码登记失败", sess.sid)
 
 
+def _record_paid_at(sess: PaySession) -> None:
+    """记下支付成功的时间。
+
+    编号不在这里分配：此刻还不知道买到的是 5h 还是周限额，那要等
+    30 秒后的套餐查询回来才知道。所以这里只落时间，编号由
+    db.assign_subscription_no 在限额类型确定后再给。
+    """
+    account_id = int(sess.account_id or 0)
+    if account_id <= 0:
+        return
+    try:
+        from core import db
+        db.set_account_paid_at(account_id)
+        logger.info("[pay-session] %s 已记录支付时间：账号 #%s", sess.sid, account_id)
+    except Exception:  # noqa: BLE001 - 记录失败不能影响已完成的支付
+        logger.exception("[pay-session] %s 记录支付时间失败", sess.sid)
+
+
 def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
     """支付成功后延迟查一次套餐，确认 Team 是否真的生效。
 
@@ -510,6 +528,7 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
             shown = f"{currency} {amount:.2f}" if amount is not None else ""
             _touch(sess, state=ST_DONE, message=f"已提交支付 {shown}".strip())
             _record_promo(sess)
+            _record_paid_at(sess)
             _schedule_plan_check(sess, cfg)
         return
 
