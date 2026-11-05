@@ -34,7 +34,6 @@ CODEX_OUTPUT_DIRNAME: str = "codex_accounts"
 # 请求超时（秒）
 CODEX_REQUEST_TIMEOUT: int = 30
 
-
 # ============================================================
 # Codex 授权方式（2026-06-15 改造）
 #
@@ -93,6 +92,7 @@ CPA_SAVE_CALLBACK_RECEIPT: bool = True
 # SMS_PROVIDER:
 #   "grizzly" = GrizzlySMS，接口说明见 https://api.grizzlysms.com
 #   "smsbower"= SMSBower，接口说明见 https://smsbower.app/cn/api?page=client
+#   "herosms" = HeroSMS，接口说明见 https://hero-sms.com/cn/api
 #   "l"       = 本地 L 取号服务，接口说明见 L_API.md
 #   "h"       = 本地 H 取号服务，接口说明见 H_API.md
 # ============================================================
@@ -114,6 +114,13 @@ SMSBOWER_PROVIDER_IDS: str = ""
 SMSBOWER_EXCEPT_PROVIDER_IDS: str = ""
 SMSBOWER_PHONE_EXCEPTION: str = ""
 SMSBOWER_MIN_PRICE: str = ""
+
+# HeroSMS 独立 API 配置（SMS_PROVIDER="herosms" 时使用）
+# 官方声明兼容 SMS-Activate：action/参数/setStatus 的 3,6,8 都与 SMSBower 同族，
+# 但错误响应是 JSON + 非 200 状态码，所以单独走 _request_herosms 解析。
+# BASE 只填域名也行，缺路径时代码会补 /stubs/handler_api.php。
+HEROSMS_API_BASE: str = "https://hero-sms.com/stubs/handler_api.php"
+HEROSMS_API_KEY: str = env_str("HEROSMS_API_KEY", "")
 
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
@@ -171,4 +178,4 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 L_PHONE_PREFIX: str = ""
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_API_KEY': 'str', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_PRICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_POLL_INTERVAL': 'int', 'SMS_REQUEST_TIMEOUT': 'int', 'SMS_API_KEY': 'str', 'SMSBOWER_API_BASE': 'str', 'SMSBOWER_API_KEY': 'str', 'SMSBOWER_USE_V2': 'bool', 'SMSBOWER_PROVIDER_IDS': 'str', 'SMSBOWER_EXCEPT_PROVIDER_IDS': 'str', 'SMSBOWER_PHONE_EXCEPTION': 'str', 'SMSBOWER_MIN_PRICE': 'str', 'HEROSMS_API_BASE': 'str', 'HEROSMS_API_KEY': 'str', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})

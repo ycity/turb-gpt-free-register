@@ -968,7 +968,7 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / smsbower / l / h；smsbower 使用 SMSBower handler_api，l/h 使用本地取号服务",
+        "label": "接码通道", "help": "grizzly / smsbower / herosms / l / h；smsbower 和 herosms 使用 SMS-Activate 兼容 handler_api，l/h 使用本地取号服务",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -1023,6 +1023,16 @@ EDITABLE_FIELDS = [
     {
         "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "SMSBower 最低价格", "help": "可选，透传 minPrice；与最高价格一起限定号码价格区间",
+    },
+    {
+        "key": "HEROSMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API 地址",
+        "help": "默认 https://hero-sms.com/stubs/handler_api.php；只填域名也可以，程序会补上路径",
+    },
+    {
+        "key": "HEROSMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "HeroSMS API密钥", "help": "HeroSMS 控制台 API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
     },
     {
         "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",

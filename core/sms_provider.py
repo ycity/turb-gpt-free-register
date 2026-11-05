@@ -100,6 +100,62 @@ def _request_grizzly(http: CurlSession, params: dict) -> str:
     return text
 
 
+def _herosms_base() -> str:
+    """HeroSMS 的 SMS-Activate 兼容端点。
+
+    配置里只填域名也能用：缺路径时补上 /stubs/handler_api.php。
+    """
+    base = str(getattr(_cfg, "HEROSMS_API_BASE", "") or "").strip()
+    if not base:
+        raise SmsProviderError("HEROSMS_API_BASE 不能为空")
+    base = base.rstrip("/")
+    if "handler_api" not in base:
+        base += "/stubs/handler_api.php"
+    return base
+
+
+def _request_herosms(http: CurlSession, params: dict) -> str:
+    """发 HeroSMS 请求，返回响应文本。
+
+    协议和 SMSBower 同属 SMS-Activate 族（action/参数/setStatus 的 3,6,8 都一样），
+    但错误响应格式不同，不能直接复用 _request_smsbower：
+        getNumber 失败  -> HTTP 200 + 纯文本 BAD_KEY
+        其余 action 失败 -> HTTP 401/404/422 + JSON {"title":"BAD_KEY",...}
+    照 SMSBower 那套「非 200 一律抛 HTTP 错误」处理的话，轮询验证码会在
+    getStatus 这步直接失败。所以这里先解 JSON 取 title，解不出来再按纯文本判。
+    """
+    api_key = str(getattr(_cfg, "HEROSMS_API_KEY", "") or "").strip()
+    if not api_key:
+        raise SmsProviderError("HeroSMS API Key 不能为空")
+    resp = http.get(_herosms_base(), params={"api_key": api_key, **params})
+    text = (resp.text or "").strip()
+
+    code = text
+    if text.startswith("{"):
+        try:
+            code = str(json.loads(text).get("title") or "").strip() or text
+        except Exception:  # noqa: BLE001 - 不是 JSON 就按纯文本处理
+            code = text
+
+    if code == "BAD_KEY":
+        raise SmsProviderError("HeroSMS API key 无效（BAD_KEY）")
+    if code in ("NO_BALANCE", "NO_MONEY"):
+        raise SmsNoBalanceError(f"HeroSMS 余额不足（{code}），请充值")
+    if code == "NO_NUMBERS":
+        raise SmsNoNumbersError("HeroSMS 暂无可用号码（NO_NUMBERS）")
+    if code in ("BAD_SERVICE", "WRONG_SERVICE"):
+        raise SmsProviderError(f"HeroSMS 服务代码无效（{code}），OpenAI 请填写 dr")
+    if code in ("NOT_FOUND", "NO_ACTIVATION"):
+        raise SmsProviderError(f"HeroSMS 激活 ID 不存在（{code}）")
+    if code == "UNPROCESSABLE_ENTITY":
+        raise SmsProviderError(f"HeroSMS 请求参数不合法：{text[:200]}")
+    if code in ("BAD_ACTION", "BAD_STATUS"):
+        raise SmsProviderError(f"HeroSMS 请求参数错误：{code}")
+    if resp.status_code != 200:
+        raise SmsProviderError(f"HeroSMS HTTP {resp.status_code}: {text[:200]}")
+    return text
+
+
 def _request_smsbower(http: CurlSession, params: dict) -> str:
     """发 SMSBower handler_api 请求，返回去空白的响应文本。"""
     api_key = str(getattr(_cfg, "SMSBOWER_API_KEY", "") or "").strip()
@@ -404,6 +460,28 @@ def acquire_number(
     own_http = http is None
     http = http or _http()
     try:
+        if _provider() == "herosms":
+            service_code = str(service or _cfg.SMS_SERVICE or "").strip()
+            if service_code.lower() in ("openai", "chatgpt"):
+                service_code = "dr"
+            params = {
+                "action": "getNumber",
+                "service": service_code,
+                "country": str(country or _cfg.SMS_COUNTRY or "").strip(),
+            }
+            max_price = str(getattr(_cfg, "SMS_MAX_PRICE", "") or "").strip()
+            if max_price:
+                params["maxPrice"] = max_price
+            text = _request_herosms(http, params)
+            if not text.startswith("ACCESS_NUMBER:"):
+                raise SmsProviderError(f"HeroSMS getNumber 非预期响应：{text[:200]}")
+            parts = text.split(":", 2)
+            if len(parts) < 3:
+                raise SmsProviderError(f"HeroSMS getNumber 响应格式异常：{text[:200]}")
+            activation_id, phone = parts[1].strip(), parts[2].strip()
+            _ACQUIRED_AT[activation_id] = time.time()
+            return activation_id, phone
+
         if _provider() == "smsbower":
             params, text = _request_smsbower_number(http, _smsbower_number_params(service, country))
             if params["action"] == "getNumberV2":
@@ -595,6 +673,22 @@ def wait_for_sms_code(
                 time.sleep(interval)
                 continue
 
+            if provider == "herosms":
+                text = _request_herosms(http, {"action": "getStatus", "id": activation_id})
+                if text.startswith("STATUS_OK:"):
+                    code = text.split(":", 1)[1].strip().strip("'")
+                    logger.info(f"[HeroSMS] 第 {round_no} 轮收到验证码：{code}")
+                    return code
+                if text == "STATUS_CANCEL":
+                    raise SmsProviderError("HeroSMS 激活已被取消（STATUS_CANCEL）")
+                remaining = max(0, int(deadline - time.time()))
+                logger.info(
+                    f"[HeroSMS] 第 {round_no} 轮未收到验证码，状态={text}，"
+                    f"{interval}s 后重试（剩余 {remaining}s）"
+                )
+                time.sleep(interval)
+                continue
+
             text = _request_grizzly(http, {"action": "getStatus", "id": activation_id})
 
             if text.startswith("STATUS_OK:"):
@@ -632,6 +726,13 @@ def set_status(activation_id: str, status: int, http: CurlSession | None = None)
         if _provider() == "l":
             logger.debug(f"[SMS:L] 忽略状态设置 id={activation_id}, status={status}")
             return "OK"
+        if _provider() == "herosms":
+            # 和 SMSBower 一样没有 status=1 这一步，发了会被判参数错误
+            if int(status) == 1:
+                return "OK"
+            return _request_herosms(http, {"action": "setStatus",
+                                           "status": str(status),
+                                           "id": activation_id})
         if _provider() == "smsbower":
             if int(status) == 1:
                 return "OK"
@@ -670,14 +771,18 @@ def complete(activation_id: str, http: CurlSession | None = None) -> None:
 
 
 def _do_cancel_sync(activation_id: str, http_factory) -> None:
-    """实际的同步取消逻辑：等够 2 分钟限制 → 发请求 → 失败重试一次。"""
+    """实际的同步取消逻辑：等够最短激活时间 → 发请求 → 失败重试一次。
+
+    GrizzlySMS 和 HeroSMS 都有 2 分钟最短激活时间，提前发 setStatus=8 会被
+    拒绝（HeroSMS 返回 409 EARLY_CANCEL_DENIED），钱退不回来。
+    """
     acquired_at = _ACQUIRED_AT.get(activation_id)
     if acquired_at is not None:
         elapsed = time.time() - acquired_at
         if elapsed < _MIN_CANCEL_DELAY:
             wait = _MIN_CANCEL_DELAY - elapsed
             logger.info(
-                f"[SMS] 取消等待 GrizzlySMS 2 分钟限制：activation_id={activation_id}，"
+                f"[SMS] 取消等待平台 2 分钟最短激活时间：activation_id={activation_id}，"
                 f"还需等 {wait:.0f}s..."
             )
             time.sleep(wait)
@@ -731,6 +836,22 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
         except Exception as exc:
             logger.warning(f"[SMS:H] 释放号码失败（不影响主流程）：id={activation_id}, {type(exc).__name__}: {exc}")
             _ACQUIRED_AT.pop(activation_id, None)
+        return
+    if _provider() == "herosms":
+        # HeroSMS 和 GrizzlySMS 一样有 2 分钟最短激活时间，提前取消会被
+        # HTTP 409 EARLY_CANCEL_DENIED 拒绝（minActivationTime=120），钱退不回来。
+        # 所以走 _do_cancel_sync 等够时间，而不是像 SMSBower 那样立刻取消。
+        if not background:
+            _do_cancel_sync(activation_id, _http)
+            return
+        t = threading.Thread(
+            target=_do_cancel_sync,
+            args=(activation_id, _http),
+            name=f"sms-cancel-{activation_id}",
+            daemon=True,
+        )
+        t.start()
+        logger.debug(f"[HeroSMS] 取消任务已派后台：activation_id={activation_id}")
         return
     if _provider() == "smsbower":
         try:
