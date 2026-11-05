@@ -17,6 +17,7 @@
     - 取号后若收不到短信，必须 cancel(8) 释放，避免白扣钱；
     - 成功拿到码后 complete(6) 正式完成激活。
 """
+import atexit
 import json
 import logging
 import threading
@@ -39,6 +40,53 @@ _MIN_CANCEL_DELAY = 125
 # 记录每个 activation_id 的取号时间，供 cancel() 判断是否要等。
 # 用模块级 dict 而不是改 acquire_number 返回值，保持向后兼容。
 _ACQUIRED_AT: dict[str, float] = {}
+
+# 还在等 2 分钟保护期的后台取消线程。
+# 这些线程是 daemon，主进程退出会直接杀掉，号就卡在 STATUS_WAIT_CODE 不退款
+# （2026-11-05 实际发生：手动补跑 Codex 失败换了 10 个号，$0.66 全部悬空，
+# 只能事后手动 setStatus=8 找回）。注册服务常驻不会暴露，短进程必踩。
+# 这里登记线程，atexit 时给它们留出完成时间。
+_PENDING_CANCELS: set[threading.Thread] = set()
+_PENDING_LOCK = threading.Lock()
+
+
+def _wait_pending_cancels(timeout: float = 150.0) -> None:
+    """等待后台取消线程跑完，避免进程退出时把号留在未退款状态。"""
+    with _PENDING_LOCK:
+        threads = [t for t in _PENDING_CANCELS if t.is_alive()]
+    if not threads:
+        return
+    logger.info("[SMS] 等待 %d 个号完成取消（最长 %.0fs）…", len(threads), timeout)
+    deadline = time.monotonic() + timeout
+    for t in threads:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        t.join(timeout=left)
+    stuck = [t for t in threads if t.is_alive()]
+    if stuck:
+        logger.warning(
+            "[SMS] 仍有 %d 个号未完成取消，可能未退款：%s",
+            len(stuck), [t.name for t in stuck])
+
+
+atexit.register(_wait_pending_cancels)
+
+
+def _spawn_cancel(activation_id: str) -> None:
+    """派一个后台取消线程，并登记到 _PENDING_CANCELS 供退出时等待。"""
+    def _run():
+        try:
+            _do_cancel_sync(activation_id, _http)
+        finally:
+            with _PENDING_LOCK:
+                _PENDING_CANCELS.discard(threading.current_thread())
+
+    t = threading.Thread(target=_run, name=f"sms-cancel-{activation_id}",
+                         daemon=True)
+    with _PENDING_LOCK:
+        _PENDING_CANCELS.add(t)
+    t.start()
 
 
 class SmsProviderError(RuntimeError):
@@ -844,13 +892,7 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
         if not background:
             _do_cancel_sync(activation_id, _http)
             return
-        t = threading.Thread(
-            target=_do_cancel_sync,
-            args=(activation_id, _http),
-            name=f"sms-cancel-{activation_id}",
-            daemon=True,
-        )
-        t.start()
+        _spawn_cancel(activation_id)
         logger.debug(f"[HeroSMS] 取消任务已派后台：activation_id={activation_id}")
         return
     if _provider() == "smsbower":
@@ -866,11 +908,5 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
         _do_cancel_sync(activation_id, _http)
         return
 
-    t = threading.Thread(
-        target=_do_cancel_sync,
-        args=(activation_id, _http),
-        name=f"sms-cancel-{activation_id}",
-        daemon=True,
-    )
-    t.start()
+    _spawn_cancel(activation_id)
     logger.debug(f"[SMS] 取消任务已派后台：activation_id={activation_id}")

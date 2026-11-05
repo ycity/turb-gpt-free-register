@@ -890,6 +890,44 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
       if (!visibleValue) visibleValue = e164;
     }
 
+    // 可见框有 maxLength 时，填完整 E.164 会被截掉尾部数字，校验必然失败
+    // （巴西 13 位号实测只剩 12 位）。这种情况退回国内号段：国家码由 select
+    // 承担，隐藏字段仍是完整 E.164，不会丢信息。
+    let truncationGuard = '';
+    const maxLen = Number(phoneInput.maxLength || 0);
+    if (maxLen > 0 && visibleValue.length > maxLen) {
+      let national = '';
+      if (dialCode && digits.startsWith(dialCode)) {
+        national = digits.slice(dialCode.length);
+      } else {
+        // 页面没给 dialCode 时按已知国家码切。必须用真实国家码，
+        // 不能按长度盲试——盲试会把区号的头几位也当国家码砍掉
+        // （+5561920088836 砍 3 位会得到 1920088836，少了区号的 6）。
+        const CC = ['998','996','995','994','993','992','977','976','975','974',
+                    '973','972','971','968','967','966','965','964','963','962',
+                    '961','960','886','880','856','855','852','679','678','673',
+                    '670','599','598','597','595','593','591','507','506','505',
+                    '504','503','502','501','423','386','385','381','380','374',
+                    '373','372','371','370','359','358','357','356','355','353',
+                    '352','351','299','298','268','267','266','265','264','263',
+                    '261','260','256','255','254','251','249','234','233','230',
+                    '229','228','225','221','220','216','213','212',
+                    '98','95','94','93','92','91','90','86','84','82','81','66',
+                    '65','64','63','62','61','60','58','57','56','55','54','53',
+                    '52','51','49','48','47','46','45','44','43','41','40','39',
+                    '36','34','33','32','31','30','27','20',
+                    '7','1'];
+        const cc = CC.find(c => digits.startsWith(c));
+        if (cc) national = digits.slice(cc.length);
+      }
+      if (national && national.length <= maxLen) {
+        truncationGuard = visibleValue + ' -> ' + national;
+        visibleValue = national;
+      } else {
+        truncationGuard = 'maxLength=' + maxLen + ' 放不下 ' + visibleValue.length + ' 位';
+      }
+    }
+
     const setNativeValue = (el, value) => {
       const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -920,6 +958,8 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
       dialCode,
       selectedText,
       selectedChanged,
+      maxLength: maxLen,
+      truncationGuard,
       inputName: phoneInput.getAttribute('name') || '',
       inputId: phoneInput.id || '',
       url: location.href,
@@ -939,7 +979,14 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
     hidden_digits = ''.join(ch for ch in hidden_value if ch.isdigit())
     expected_visible_ok = bool(actual_digits) and (actual_digits == visible_digits or actual_digits == e164_digits)
     if not expected_visible_ok:
-        raise RuntimeError(f"手机号可见输入框校验失败 expected_digits={visible_digits or e164_digits} actual={actual} result={result} state={_phone_page_state(driver)}")
+        # 最常见的原因是可见框有 maxLength，完整 E.164 放不下被截掉尾数。
+        # 写入侧已有 truncationGuard 退回国内号段，这里把判断依据写进报错，
+        # 免得下次又从"换号重试 10 次"开始查。
+        hint = ""
+        if actual_digits and e164_digits.startswith(actual_digits):
+            hint = (f"（可见框被截断：少了后 {len(e164_digits) - len(actual_digits)} 位，"
+                    f"maxLength={result.get('maxLength')} guard={result.get('truncationGuard') or '未触发'}）")
+        raise RuntimeError(f"手机号可见输入框校验失败{hint} expected_digits={visible_digits or e164_digits} actual={actual} result={result} state={_phone_page_state(driver)}")
     if hidden_value and hidden_digits != e164_digits:
         raise RuntimeError(f"手机号隐藏字段校验失败 expected={e164} actual={hidden_value} result={result} state={_phone_page_state(driver)}")
     return result
