@@ -1459,21 +1459,22 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/pay/cards")
     def api_pay_cards():
-        """列出 VCC 可用卡，供支付前选择。"""
+        """列出可用卡，供支付前选择。
+
+        VCC 接口的卡 + 本地登记的自定义卡，合并成一个列表。
+        VCC 侧挂了也要把自定义卡返回，否则手头有卡却用不了。
+        """
+        cards = []
+        vcc_error = ""
         try:
             from core.vcc_client import VccError, build_client_from_config
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"VCC 模块不可用：{exc}"}), 500
-        try:
             client = build_client_from_config()
             rows = client.list_cards()
-        except VccError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 502
-        except Exception as exc:
-            logger.exception("查询 VCC 卡列表异常")
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
+        except Exception as exc:  # noqa: BLE001 - VCC 不可用不影响自定义卡
+            rows = []
+            vcc_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("查询 VCC 卡列表失败，仅返回自定义卡：%s", vcc_error)
 
-        cards = []
         for r in rows:
             status = str(r.get("cardStatus") or "")
             try:
@@ -1489,9 +1490,23 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "holder_name": str(r.get("holderName") or ""),
                 "card_bin": str(r.get("cardBin") or ""),
                 "usable": status.upper() == "ACTIVE",
+                "source": "vcc",
             })
+
+        try:
+            from core.custom_card_store import list_cards as list_custom
+            cards.extend(list_custom(only_enabled=True))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("读取自定义卡池失败")
+            if not cards:
+                return jsonify({"ok": False,
+                                "error": f"{type(exc).__name__}: {exc}"}), 500
+
         cards.sort(key=lambda c: (not c["usable"], -c["balance"]))
-        return jsonify({"ok": True, "cards": cards})
+        out = {"ok": True, "cards": cards}
+        if vcc_error:
+            out["vcc_error"] = vcc_error
+        return jsonify(out)
 
     @app.get("/api/pay/card-secrets")
     def api_pay_card_secrets():
@@ -1502,6 +1517,32 @@ def create_app(auth_code: str | None = None) -> Flask:
         card_id = (request.args.get("card_id") or "").strip()
         if not card_id:
             return jsonify({"ok": False, "error": "缺少 card_id"}), 400
+
+        from core.custom_card_store import is_custom_id, local_id_of
+        if is_custom_id(card_id):
+            try:
+                from core.custom_card_store import (CustomCardError, get_secrets,
+                                                    mark_used)
+                lid = local_id_of(card_id)
+                sec = get_secrets(lid)
+                mark_used(lid)
+            except CustomCardError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 404
+            except Exception as exc:
+                logger.exception("取自定义卡密文异常")
+                return jsonify({"ok": False,
+                                "error": f"{type(exc).__name__}: {exc}"}), 500
+            no = sec["card_number"]
+            return jsonify({
+                "ok": True,
+                "number": no,
+                "exp_month": sec["exp_month"],
+                "exp_year": sec["exp_year"],
+                "cvc": sec["cvv"],
+                "holder_name": sec["holder_name"],
+                "mask": f"{no[:6]}****{no[-4:]}" if len(no) > 10 else no,
+            })
+
         try:
             from core.vcc_client import VccError, build_client_from_config
             client = build_client_from_config()
@@ -1521,6 +1562,88 @@ def create_app(auth_code: str | None = None) -> Flask:
             "holder_name": str(card.get("holderName") or ""),
             "mask": str(card.get("cardNoMask") or ""),
         })
+
+    @app.get("/api/custom-cards")
+    def api_custom_cards_list():
+        """自定义卡池列表。不返回卡号明文和 CVV，只给掩码。"""
+        try:
+            from core.custom_card_store import list_cards
+            return jsonify({"ok": True, "cards": list_cards()})
+        except Exception as exc:
+            logger.exception("读取自定义卡池失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.post("/api/custom-cards")
+    def api_custom_cards_add():
+        """登记一张自定义卡。Body: card_no / exp_month / exp_year / cvv ..."""
+        data = request.get_json(silent=True) or {}
+        try:
+            from core.custom_card_store import CustomCardError, add_card
+            card = add_card(
+                str(data.get("card_no") or ""),
+                str(data.get("exp_month") or ""),
+                str(data.get("exp_year") or ""),
+                str(data.get("cvv") or ""),
+                holder_name=str(data.get("holder_name") or ""),
+                label=str(data.get("label") or ""),
+                balance=data.get("balance") or 0.0,
+                currency=str(data.get("currency") or "USD"),
+                note=str(data.get("note") or ""),
+            )
+        except CustomCardError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("登记自定义卡失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+        logger.info("[卡池] 新增自定义卡 %s", card.get("mask"))
+        return jsonify({"ok": True, "card": card})
+
+    @app.post("/api/custom-cards/<int:local_id>")
+    def api_custom_cards_update(local_id: int):
+        """改一张自定义卡。卡号不可改，要改就删了重加。"""
+        data = request.get_json(silent=True) or {}
+        fields = {k: v for k, v in data.items()
+                  if k in ("exp_month", "exp_year", "cvv", "holder_name",
+                           "label", "balance", "currency", "enabled", "note")}
+        try:
+            from core.custom_card_store import CustomCardError, update_card
+            card = update_card(local_id, **fields)
+        except CustomCardError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("修改自定义卡失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+        return jsonify({"ok": True, "card": card})
+
+    @app.post("/api/custom-cards/<int:local_id>/delete")
+    def api_custom_cards_delete(local_id: int):
+        try:
+            from core.custom_card_store import delete_card
+            ok = delete_card(local_id)
+        except Exception as exc:
+            logger.exception("删除自定义卡失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+        if not ok:
+            return jsonify({"ok": False, "error": "卡不存在"}), 404
+        logger.info("[卡池] 删除自定义卡 local_id=%s", local_id)
+        return jsonify({"ok": True})
+
+    @app.get("/api/custom-cards/<int:local_id>/secrets")
+    def api_custom_cards_secrets(local_id: int):
+        """取卡片三要素明文，只在人主动查看时请求，不写日志。"""
+        try:
+            from core.custom_card_store import CustomCardError, get_secrets
+            return jsonify({"ok": True, **get_secrets(local_id)})
+        except CustomCardError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:
+            logger.exception("读取自定义卡密文失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
 
     @app.post("/api/pay/manual-done")
     def api_pay_manual_done():

@@ -1607,7 +1607,7 @@
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
     #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden),
-    #mailboxModal:not(.hidden), #manualPayModal:not(.hidden) {
+    #mailboxModal:not(.hidden), #manualPayModal:not(.hidden), #cardEditModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -2372,6 +2372,12 @@
       </svg>
       <span class="sidebar-item-label">代理池</span>
     </button>
+    <button type="button" data-tab="cards" class="sidebar-item">
+      <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>
+      </svg>
+      <span class="sidebar-item-label">银行卡池</span>
+    </button>
     <button type="button" data-tab="promos" class="sidebar-item">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
@@ -2771,8 +2777,92 @@
     <div id="proxyPoolSettingsV2"></div>
   </div>
 
-  <!-- ============ 优惠码池 ============ -->
-  <div id="tab-promos" class="hidden">
+  <!-- ============ 银行卡池 ============ -->
+  <div id="tab-cards" class="hidden">
+    <h1 class="register-title">银行卡池</h1>
+    <p class="config-overview-v2-desc" style="margin:-8px 0 16px;">
+      除了 VCC 接口自动拉取的卡，这里可以手工登记自己的卡；启用后会和 VCC 卡一起出现在支付选卡列表里。
+      卡号和 CVV 以明文存在本地库，请勿把库文件外传。
+    </p>
+    <section class="outlook-panel-v2" id="cardsPanelV2" aria-label="银行卡池">
+      <div class="outlook-filter-v2">
+        <div class="outlook-filter-stats" style="display:flex; gap:16px; align-items:center; flex:1;">
+          <span style="font-weight:600; color:#303133;">卡池概览：</span>
+          <span class="pill status-available" id="cardStatEnabled">启用: 0</span>
+          <span class="pill status-used" id="cardStatDisabled">停用: 0</span>
+          <span style="color:#909399; font-size:12px;">总计: <span id="cardStatTotal">0</span></span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnOpenCardAdd">添加银行卡</button>
+          <button type="button" class="jobs-tb-btn" id="btnRefreshCards">刷新</button>
+        </div>
+      </div>
+      <div id="cardsTableWrap"></div>
+    </section>
+  </div>
+
+  <!-- 添加/编辑银行卡 -->
+  <div id="cardEditModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="cardEditTitle">
+    <div class="outlook-import-dialog" role="document" style="width:min(560px,100%);">
+      <div class="outlook-import-head">
+        <div class="outlook-import-head-main">
+          <h3 id="cardEditTitle">添加银行卡</h3>
+          <p id="cardEditSubtitle">卡号会做 Luhn 校验；余额是手填的，只作选卡时参考。</p>
+        </div>
+        <button type="button" class="outlook-import-close" id="btnCloseCardEdit" aria-label="关闭">×</button>
+      </div>
+      <div class="outlook-import-body">
+        <div id="cardEditError" class="hidden" style="margin-bottom:12px; padding:8px 10px; background:#fef0f0; color:#f56c6c; border-radius:4px; font-size:13px;"></div>
+        <input type="hidden" id="cardEditId">
+        <label class="outlook-import-field">
+          <span>卡号 *</span>
+          <input type="text" id="cardEditNo" class="mono" placeholder="4242 4242 4242 4242" autocomplete="off">
+        </label>
+        <div style="display:flex; gap:10px;">
+          <label class="outlook-import-field" style="flex:1;">
+            <span>有效期月 *</span>
+            <input type="text" id="cardEditMonth" placeholder="12" maxlength="2" autocomplete="off">
+          </label>
+          <label class="outlook-import-field" style="flex:1;">
+            <span>有效期年 *</span>
+            <input type="text" id="cardEditYear" placeholder="2028" maxlength="4" autocomplete="off">
+          </label>
+          <label class="outlook-import-field" style="flex:1;">
+            <span>CVV *</span>
+            <input type="text" id="cardEditCvv" placeholder="123" maxlength="4" autocomplete="off">
+          </label>
+        </div>
+        <label class="outlook-import-field">
+          <span>持卡人姓名</span>
+          <input type="text" id="cardEditHolder" placeholder="留空则用账单地址里的姓名" autocomplete="off">
+        </label>
+        <div style="display:flex; gap:10px;">
+          <label class="outlook-import-field" style="flex:2;">
+            <span>备注名</span>
+            <input type="text" id="cardEditLabel" placeholder="方便自己认，比如「招行主卡」" autocomplete="off">
+          </label>
+          <label class="outlook-import-field" style="flex:1;">
+            <span>余额</span>
+            <input type="text" id="cardEditBalance" placeholder="0" autocomplete="off">
+          </label>
+          <label class="outlook-import-field" style="flex:1;">
+            <span>币种</span>
+            <input type="text" id="cardEditCurrency" placeholder="USD" maxlength="6" autocomplete="off">
+          </label>
+        </div>
+        <label class="outlook-import-field">
+          <span>备注</span>
+          <input type="text" id="cardEditNote" placeholder="可选" autocomplete="off">
+        </label>
+      </div>
+      <div class="outlook-import-foot">
+        <button type="button" class="jobs-tb-btn" id="btnCancelCardEdit">取消</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCardSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 优惠码池 ============ -->  <div id="tab-promos" class="hidden">
     <h1 class="register-title">优惠码池</h1>
     <section class="outlook-panel-v2" id="promosPanelV2" aria-label="优惠码池">
       <div class="outlook-filter-v2">
@@ -3647,6 +3737,7 @@ function activateTab(tab, persist=true) {
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') loadCodex();
   if (tab === 'proxies') loadProxyPoolPage();
+  if (tab === 'cards') loadCustomCards();
   if (tab === 'promos') {
     loadPromoStats();
     loadPromosList();
@@ -3938,7 +4029,8 @@ function updateModalScrollLock() {
     || !$('#emailChangeModalV2').classList.contains('hidden')
     || !$('#proxyPoolEditModal').classList.contains('hidden')
     || !$('#proxyPoolImportModal').classList.contains('hidden')
-    || !$('#manualPayModal').classList.contains('hidden');
+    || !$('#manualPayModal').classList.contains('hidden')
+    || !$('#cardEditModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -4600,6 +4692,119 @@ async function loadPromoStats() {
     if ($('#promoStatTotal')) $('#promoStatTotal').textContent = res.total || 0;
     if ($('#teamModalPromoPoolHint')) $('#teamModalPromoPoolHint').textContent = '池中可用: ' + (res.unused || 0);
   } catch(e) {}
+}
+
+// ============ 银行卡池 ============
+let CUSTOM_CARDS = [];
+
+async function loadCustomCards() {
+  const wrap = $('#cardsTableWrap');
+  try {
+    const res = await api('/api/custom-cards');
+    CUSTOM_CARDS = res.cards || [];
+  } catch (e) {
+    wrap.innerHTML = `<div class="proxy-pool-v2-empty">读取失败：${esc(e.message || e)}</div>`;
+    return;
+  }
+  const on = CUSTOM_CARDS.filter(c => c.usable).length;
+  $('#cardStatEnabled').textContent = `启用: ${on}`;
+  $('#cardStatDisabled').textContent = `停用: ${CUSTOM_CARDS.length - on}`;
+  $('#cardStatTotal').textContent = CUSTOM_CARDS.length;
+
+  if (!CUSTOM_CARDS.length) {
+    wrap.innerHTML = '<div class="proxy-pool-v2-empty">还没有自定义卡，点右上角「添加银行卡」登记一张。</div>';
+    return;
+  }
+  const rows = CUSTOM_CARDS.map(c => {
+    const used = c.use_count ? `用过 ${c.use_count} 次` : '未用过';
+    const last = c.last_used_at ? String(c.last_used_at).slice(0, 16).replace('T', ' ') : '';
+    return `<tr>
+      <td class="mono">${esc(c.mask)}</td>
+      <td>${esc(c.label || '-')}</td>
+      <td>${esc(c.holder_name || '-')}</td>
+      <td class="mono">${esc(c.exp_month)}/${esc(String(c.exp_year).slice(-2))}</td>
+      <td>${esc(c.currency)} ${Number(c.balance).toFixed(2)}</td>
+      <td><span class="pill ${c.usable ? 'status-available' : 'status-used'}">${c.usable ? '启用' : '停用'}</span></td>
+      <td title="${esc(last)}">${esc(used)}</td>
+      <td style="white-space:nowrap;">
+        <button type="button" class="jobs-tb-btn" data-card-secrets="${c.local_id}">查看</button>
+        <button type="button" class="jobs-tb-btn" data-card-edit="${c.local_id}">编辑</button>
+        <button type="button" class="jobs-tb-btn" data-card-toggle="${c.local_id}">${c.usable ? '停用' : '启用'}</button>
+        <button type="button" class="jobs-tb-btn" data-card-del="${c.local_id}">删除</button>
+      </td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table class="jobs-table-v2">
+    <thead><tr>
+      <th>卡号</th><th>备注名</th><th>持卡人</th><th>有效期</th>
+      <th>余额</th><th>状态</th><th>使用</th><th>操作</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function _cardModalShow(show) {
+  $('#cardEditModal').classList.toggle('hidden', !show);
+  updateModalScrollLock();
+}
+
+function openCardEdit(localId) {
+  const c = localId ? CUSTOM_CARDS.find(x => x.local_id === localId) : null;
+  $('#cardEditError').classList.add('hidden');
+  $('#cardEditId').value = c ? c.local_id : '';
+  $('#cardEditTitle').textContent = c ? '编辑银行卡' : '添加银行卡';
+  // 卡号是唯一键，改了就是另一张卡，所以编辑时锁住
+  const noInput = $('#cardEditNo');
+  noInput.value = c ? c.mask : '';
+  noInput.disabled = !!c;
+  $('#cardEditSubtitle').textContent = c
+    ? '卡号不可修改，要换卡号请删除后重新登记。'
+    : '卡号会做 Luhn 校验；余额是手填的，只作选卡时参考。';
+  $('#cardEditMonth').value = c ? c.exp_month : '';
+  $('#cardEditYear').value = c ? c.exp_year : '';
+  $('#cardEditCvv').value = '';
+  $('#cardEditCvv').placeholder = c ? '留空则不修改' : '123';
+  $('#cardEditHolder').value = c ? c.holder_name : '';
+  $('#cardEditLabel').value = c ? c.label : '';
+  $('#cardEditBalance').value = c ? c.balance : '';
+  $('#cardEditCurrency').value = c ? c.currency : 'USD';
+  $('#cardEditNote').value = c ? c.note : '';
+  _cardModalShow(true);
+}
+
+async function saveCustomCard() {
+  const id = $('#cardEditId').value;
+  const errBox = $('#cardEditError');
+  const body = {
+    exp_month: $('#cardEditMonth').value.trim(),
+    exp_year: $('#cardEditYear').value.trim(),
+    holder_name: $('#cardEditHolder').value.trim(),
+    label: $('#cardEditLabel').value.trim(),
+    balance: $('#cardEditBalance').value.trim() || 0,
+    currency: $('#cardEditCurrency').value.trim() || 'USD',
+    note: $('#cardEditNote').value.trim(),
+  };
+  const cvv = $('#cardEditCvv').value.trim();
+  if (cvv) body.cvv = cvv;
+  let url = '/api/custom-cards';
+  if (id) {
+    url = `/api/custom-cards/${id}`;
+  } else {
+    body.card_no = $('#cardEditNo').value.trim();
+    if (!body.cvv) { errBox.textContent = 'CVV 不能为空'; errBox.classList.remove('hidden'); return; }
+  }
+  try {
+    await api(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    errBox.textContent = e.message || String(e);
+    errBox.classList.remove('hidden');
+    return;
+  }
+  _cardModalShow(false);
+  showToast(id ? '已保存' : '已添加');
+  loadCustomCards();
 }
 
 async function loadPromosList() {
@@ -7463,6 +7668,51 @@ $('#btnSubmitPromoImport').addEventListener('click', submitPromoImport);
 $('#btnRefreshPromos').addEventListener('click', () => { loadPromoStats(); loadPromosList(); });
 $('#btnClearExpiredPromos').addEventListener('click', clearExpiredPromos);
 $('#promoImportModal').addEventListener('click', e => { if (e.target.id === 'promoImportModal') closePromoImportModal(); });
+
+// ---- 银行卡池 ----
+$('#btnOpenCardAdd').addEventListener('click', () => openCardEdit(0));
+$('#btnRefreshCards').addEventListener('click', loadCustomCards);
+$('#btnCloseCardEdit').addEventListener('click', () => _cardModalShow(false));
+$('#btnCancelCardEdit').addEventListener('click', () => _cardModalShow(false));
+$('#btnCardSave').addEventListener('click', saveCustomCard);
+$('#cardEditModal').addEventListener('click', e => { if (e.target.id === 'cardEditModal') _cardModalShow(false); });
+$('#cardsTableWrap').addEventListener('click', async e => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const d = btn.dataset;
+  if (d.cardEdit) { openCardEdit(Number(d.cardEdit)); return; }
+  if (d.cardToggle) {
+    const c = CUSTOM_CARDS.find(x => x.local_id === Number(d.cardToggle));
+    if (!c) return;
+    try {
+      await api(`/api/custom-cards/${c.local_id}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !c.usable }),
+      });
+      loadCustomCards();
+    } catch (err) { showToast(err.message || '操作失败'); }
+    return;
+  }
+  if (d.cardDel) {
+    const c = CUSTOM_CARDS.find(x => x.local_id === Number(d.cardDel));
+    if (!c || !confirm(`删除这张卡？\n${c.mask}${c.label ? '（' + c.label + '）' : ''}`)) return;
+    try {
+      await api(`/api/custom-cards/${c.local_id}/delete`, { method: 'POST' });
+      showToast('已删除');
+      loadCustomCards();
+    } catch (err) { showToast(err.message || '删除失败'); }
+    return;
+  }
+  if (d.cardSecrets) {
+    try {
+      const s = await api(`/api/custom-cards/${d.cardSecrets}/secrets`);
+      const text = `${s.card_number}\n${s.exp_month}/${s.exp_year}\n${s.cvv}`;
+      if (confirm(`卡号：${s.card_number}\n有效期：${s.exp_month}/${s.exp_year}\nCVV：${s.cvv}\n\n点「确定」复制到剪贴板`)) {
+        copyText(text);
+      }
+    } catch (err) { showToast(err.message || '读取失败'); }
+  }
+});
 
 $('#btnCloseTeamCheckout').addEventListener('click', closeTeamCheckoutModal);
 $('#btnCancelTeamCheckout').addEventListener('click', closeTeamCheckoutModal);
