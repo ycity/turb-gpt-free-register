@@ -3724,7 +3724,7 @@ function debounce(fn, wait=250) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','proxies','promos','config'];
+  const allowed = ['register','accounts','codex','outlook','proxies','cards','promos','config'];
   if (!tab || !allowed.includes(tab)) tab = 'register';
   document.querySelectorAll('.sidebar-nav button.sidebar-item').forEach(x => {
     x.classList.toggle('active', x.dataset.tab === tab);

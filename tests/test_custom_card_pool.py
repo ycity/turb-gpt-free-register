@@ -185,6 +185,12 @@ class UiWiringTest(unittest.TestCase):
         self.assertIn('id="tab-cards"', HTML)
         self.assertIn("tab === 'cards') loadCustomCards()", HTML)
 
+    def test_tab_in_allowed_list(self):
+        """不在 allowed 里的话 activateTab 会把它重置成 register，点了没反应。"""
+        idx = HTML.index("const allowed = [")
+        line = HTML[idx:HTML.index("]", idx)]
+        self.assertIn("'cards'", line)
+
     def test_modal_in_global_selector(self):
         """不进这个列表的话弹窗没有 position:fixed，会垫在页面流里。"""
         self.assertIn("#cardEditModal:not(.hidden)", HTML)
