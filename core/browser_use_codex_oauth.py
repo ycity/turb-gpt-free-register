@@ -668,13 +668,18 @@ def _account_totp_code_for_email(email: str) -> str:
 
 
 def _looks_mfa_challenge_page(page) -> bool:
-    url = _page_url(page).lower()
-    if "/mfa-challenge/" in url or "/mfa-challenge" in url:
-        return True
+    """当前是否停在等待输入 MFA 验证码的页面。
+
+    不能只看 URL：这是个 SPA，验证码通过后 URL 仍是 /mfa-challenge/xxx，
+    页面内容已经换成了下一步（实测 add_phone）。只按 URL 判断会把成功的
+    流程认成失败，然后反复重填验证码直到超时。
+    """
     try:
-        return bool(page.locator('form[action*="/mfa-challenge" i] input[name="code"]').count())
+        return bool(page.locator(
+            'form[action*="/mfa-challenge" i] input[name="code"]').count())
     except Exception:
-        return False
+        # 取不到 DOM 时退回 URL 判断，至少不会把其它页面误判成 MFA 页
+        return "/mfa-challenge" in _page_url(page).lower()
 
 
 def _fill_mfa_challenge_if_present(page, email: str, timeout: int = 15) -> bool:

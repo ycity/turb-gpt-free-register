@@ -259,10 +259,13 @@ def _account_totp_code_for_email(email: str) -> str:
 
 
 def _is_mfa_challenge_page(driver) -> bool:
+    """当前是否停在等待输入 MFA 验证码的页面。
+
+    不能只看 URL：这是个 SPA，验证码通过后 URL 仍是 /mfa-challenge/xxx，
+    页面内容已经换成了下一步（实测 add_phone）。只按 URL 判断会把成功的
+    流程认成失败，然后反复重填验证码直到超时。
+    """
     try:
-        url = str(driver.current_url or "").lower()
-        if "/mfa-challenge/" in url or "/mfa-challenge" in url:
-            return True
         state = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
@@ -272,19 +275,34 @@ def _is_mfa_challenge_page(driver) -> bool:
         """) or {}
         return bool(state.get("ok"))
     except Exception:
-        return False
+        # 取不到 DOM 时退回 URL 判断，至少不会把其它页面误判成 MFA 页
+        try:
+            return "/mfa-challenge" in str(driver.current_url or "").lower()
+        except Exception:
+            return False
 
 
-def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 15) -> bool:
-    """如果当前进入 MFA challenge 页面，自动填入账号 TOTP 并提交。"""
-    code = _account_totp_code_for_email(email)
-    if not code:
+def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 75) -> bool:
+    """如果当前进入 MFA challenge 页面，自动填入账号 TOTP 并提交。
+
+    验证码每 30 秒换一次，所以在循环里现取而不是进函数时取一次：
+    页面加载慢的时候，函数入口取的码提交时可能已经过期。
+    """
+    if not _account_totp_code_for_email(email):
         return False
     end = time.time() + timeout
+    tried: set[str] = set()
     while time.time() < end:
         try:
             if not _is_mfa_challenge_page(driver):
                 time.sleep(0.4)
+                continue
+            code = _account_totp_code_for_email(email)
+            if not code:
+                return False
+            if code in tried:
+                # 同一个码刚被拒过，等下一个时间窗再试，重复提交没有意义
+                time.sleep(1.0)
                 continue
             result = driver.execute_script(r"""
             const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -294,23 +312,44 @@ def _fill_mfa_challenge_if_present(driver, email: str, timeout: int = 15) -> boo
             if (!form) return {ok:false, reason:'missing_form'};
             const input = [...form.querySelectorAll('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="6"]')].find(visible);
             if (!input) return {ok:false, reason:'missing_code_input'};
-            const button = [...form.querySelectorAll('button[type="submit"], button[data-dd-action-name="Continue"], button')].find(visible);
-            if (!button) return {ok:false, reason:'missing_submit'};
-            return {ok:true, input, button};
+            return {ok:true, input};
             """) or {}
             if not result.get("ok"):
                 time.sleep(0.4)
                 continue
             _human_type_text(driver, result.get("input"), code, clear=True)
             human_delay("otp_input")
-            _human_click(driver, result.get("button"), label="codex_mfa_submit")
+            # 按钮必须填完值才取：空框时提交键是 disabled，上面那个 visible
+            # 过滤会跳过它，fall back 到裸 'button' 选择器就点成了
+            # 「找不到验证码？」，表单根本没提交。
+            button = driver.execute_script(r"""
+            const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+              && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+              && !el.disabled && !el.readOnly;
+            const form = [...document.querySelectorAll('form')].find(f => /\/mfa-challenge/i.test(f.getAttribute('action') || ''));
+            if (!form) return null;
+            return [...form.querySelectorAll('button[type="submit"]')].find(visible) || null;
+            """)
+            if button is None:
+                logger.warning("[Codex][Browser] MFA 提交按钮仍不可用，换新验证码重试：%s", email)
+                tried.add(code)
+                time.sleep(1.0)
+                continue
+            _human_click(driver, button, label="codex_mfa_submit")
+            tried.add(code)
             logger.info("[Codex][Browser] 已填写并提交 MFA 验证码：%s", email)
             wait_end = time.time() + 12
             while time.time() < wait_end:
                 if not _is_mfa_challenge_page(driver):
                     return True
                 time.sleep(0.4)
-            return True
+            # 还停在 MFA 页说明这个码没被接受（最常见是 TOTP 跨了时间窗，
+            # 提交时已经过期）。不能 return True：那会让调用方以为登录
+            # 成功，跳过后面的步骤去等一个永远不会来的 callback。
+            # 这里继续外层循环，下一轮会拿新窗口的验证码重试。
+            logger.warning(
+                "[Codex][Browser] MFA 验证码提交后仍停在 challenge 页，换新验证码重试：%s", email)
+            continue
         except Exception as exc:
             logger.debug("[Codex][Browser] MFA challenge 处理失败：%s", str(exc)[:160])
             time.sleep(0.5)
@@ -362,7 +401,10 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
         wait_end = time.time() + 12
         while time.time() < wait_end:
             if _is_mfa_challenge_page(driver):
-                _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                if not _fill_mfa_challenge_if_present(driver, email, timeout=75):
+                    # MFA 没通过就不能报 next_step：调用方会据此认为登录完成，
+                    # 跳过后续步骤去等一个永远不会来的 callback
+                    return "mfa_failed"
                 return "next_step"
             if _is_email_verification_page(driver):
                 return "email_otp"
@@ -384,6 +426,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
 
     # 可能已经处于账号选择/授权页；如果有邮箱输入框则完整登录。
     # 非日本出口时按钮文案/顺序会变，不能按可见文字点“继续”，否则可能误点 Google。
+    mfa_failed = False
     try:
         _type_email_address(driver, email, timeout=12)
         logger.info("[Codex][Browser] 已填写邮箱：%s", email)
@@ -391,18 +434,27 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         _submit_email_step(driver)
         logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
         pw_result = _fill_login_password_if_present(driver, email, timeout=18)
-        if pw_result == "next_step":
+        if pw_result == "mfa_failed":
+            mfa_failed = True
+        elif pw_result == "next_step":
             if _is_mfa_challenge_page(driver):
-                _fill_mfa_challenge_if_present(driver, email, timeout=15)
-            logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
-            return
+                mfa_failed = not _fill_mfa_challenge_if_present(
+                    driver, email, timeout=75)
+            if not mfa_failed:
+                logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
+                return
         if pw_result == "email_otp":
             logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
-        else:
+        elif not mfa_failed and pw_result != "next_step":
             _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
         logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
         return
+
+    # MFA 没过就别往下走了：页面还停在 challenge 页，后面所有步骤都等不到结果。
+    # 放在 try 外面抛，否则会被上面那个 except Exception 吞掉变成静默 return。
+    if mfa_failed:
+        raise RuntimeError(f"MFA 验证码连续未通过，页面仍停在 challenge 页：{email}")
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
     # 避免页面已进入 OAuth consent 时误点授权按钮。
@@ -429,7 +481,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             pw_result = _fill_login_password_if_present(driver, email, timeout=12)
             if pw_result == "next_step":
                 if _is_mfa_challenge_page(driver):
-                    _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                    _fill_mfa_challenge_if_present(driver, email, timeout=75)
                 logger.info("[Codex][Browser] 重新提交邮箱后已用密码完成登录，进入后续步骤")
                 # 这里的 return 只退出本嵌套函数，外层得靠这个标记才知道
                 # 已经登录成功，否则会继续回去等一封永远不会来的验证码邮件
@@ -493,7 +545,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         outcome = _wait_after_email_otp_submit(driver, timeout=45)
         logger.info("[Codex][Browser] 邮箱 OTP 提交后状态：%s", outcome)
         if _is_mfa_challenge_page(driver):
-            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+            _fill_mfa_challenge_if_present(driver, email, timeout=75)
             return
         if outcome == "accepted":
             return

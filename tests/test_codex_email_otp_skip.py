@@ -101,5 +101,126 @@ class IncidentDocumentedTest(unittest.TestCase):
                           f"{name} 没点明嵌套函数 return 的陷阱")
 
 
+class MfaFailureNotTreatedAsSuccessTest(unittest.TestCase):
+    """MFA 验证码没通过时，不能当成登录成功继续往下走。
+
+    事故（2026-11-06）：#62 修掉邮箱 OTP 的问题后仍然失败，日志是
+        已填写并提交 MFA 验证码
+        已填写并提交 MFA 验证码        <- 提交了两次
+        账号已用密码完成登录，直接进入后续步骤  <- 却报成功
+        未检测到手机号验证页，跳过手机步骤
+        等待 Codex callback 超时，最后 URL=.../mfa-challenge/...
+
+    _fill_mfa_challenge_if_present 等 12 秒后页面还在 MFA 页，却 return
+    True。调用方据此认为登录完成，跳过后续步骤去等一个永远不会来的
+    callback，最后 3 分钟超时。
+    """
+
+    def test_timeout_does_not_return_true(self):
+        idx = ROXY.index("def _fill_mfa_challenge_if_present")
+        body = ROXY[idx:idx + 3000]
+        tail = body[body.index("已填写并提交 MFA 验证码"):]
+        # 等待窗口结束后不能直接 return True
+        self.assertNotIn("time.sleep(0.4)\n            return True", tail,
+                         "超时仍返回 True，调用方会误判登录成功")
+
+    def test_retries_with_fresh_code(self):
+        """TOTP 每 30 秒一换，重试必须取新码，重复提交同一个没有意义。"""
+        idx = ROXY.index("def _fill_mfa_challenge_if_present")
+        body = ROXY[idx:idx + 3000]
+        self.assertIn("tried", body, "没有记录已试过的验证码")
+        self.assertIn("if code in tried:", body, "会重复提交同一个验证码")
+
+    def test_code_fetched_inside_loop(self):
+        """进函数时取一次的话，页面加载慢就会提交一个已过期的码。"""
+        idx = ROXY.index("def _fill_mfa_challenge_if_present")
+        body = ROXY[idx:idx + 3000]
+        loop_at = body.index("while time.time() < end:")
+        after_loop = body[loop_at:]
+        self.assertIn("code = _account_totp_code_for_email(email)", after_loop,
+                      "验证码不是在循环里现取的")
+
+    def test_timeout_spans_totp_window(self):
+        """TOTP 窗口 30 秒，超时必须够长才能等到下一个码。"""
+        m = re.search(r"def _fill_mfa_challenge_if_present\([^)]*timeout: int = (\d+)",
+                      ROXY)
+        self.assertIsNotNone(m)
+        self.assertGreaterEqual(int(m.group(1)), 60,
+                                "超时太短，跨不过一个 TOTP 窗口")
+
+    def test_password_step_reports_mfa_failure(self):
+        self.assertIn('return "mfa_failed"', ROXY,
+                      "密码步骤没有把 MFA 失败这个状态传出来")
+
+    def test_mfa_failure_raises(self):
+        """必须抛错，不能静默 return——静默会让上层以为流程正常走完。"""
+        self.assertIn("MFA 验证码连续未通过", ROXY)
+        idx = ROXY.index("if mfa_failed:")
+        self.assertIn("raise RuntimeError", ROXY[idx:idx + 220])
+
+    def test_raise_is_outside_try(self):
+        """try 里面抛会被 except Exception 吞掉变成静默 return。"""
+        raise_at = ROXY.index("MFA 验证码连续未通过")
+        except_at = ROXY.index(
+            "logger.info(\"[Codex][Browser] 未检测到邮箱输入框")
+        self.assertGreater(raise_at, except_at,
+                           "raise 写在了 try 内部，会被 except 吞掉")
+
+    def test_failure_skips_passwordless_fallback(self):
+        """MFA 失败后不该再去点 passwordless，页面还停在 challenge 页。"""
+        self.assertIn("elif not mfa_failed and pw_result != \"next_step\":", ROXY)
+
+
+class MfaPageDetectionTest(unittest.TestCase):
+    """SPA 验证通过后 URL 不变，不能只看 URL 判断还在不在 MFA 页。
+
+    事故（2026-11-06）：#62 的 MFA 验证码其实通过了 ——
+        POST /api/accounts/mfa/verify -> 200
+        continue_url: https://auth.openai.com/add-phone
+        page.type: "add_phone"
+    页面已经是「需要电话号码」，但 URL 仍是 /mfa-challenge/6aebd2b5...，
+    而检测函数第一句就是 `if "/mfa-challenge/" in url: return True`，
+    于是判定仍在 MFA 页，反复重填验证码直到超时。
+    """
+
+    def test_roxy_does_not_shortcut_on_url(self):
+        idx = ROXY.index("def _is_mfa_challenge_page")
+        body = ROXY[idx:idx + 1600]
+        head = body[:body.index("driver.execute_script")]
+        self.assertNotIn("return True", head,
+                         "仍然只看 URL 就返回 True")
+
+    def test_browser_use_does_not_shortcut_on_url(self):
+        idx = BU.index("def _looks_mfa_challenge_page")
+        body = BU[idx:idx + 1200]
+        head = body[:body.index("page.locator")]
+        self.assertNotIn("return True", head,
+                         "仍然只看 URL 就返回 True")
+
+    def test_both_check_dom_first(self):
+        """判断依据必须是验证码输入框还在不在，而不是 URL。"""
+        idx = ROXY.index("def _is_mfa_challenge_page")
+        self.assertIn('input[name="code"]', ROXY[idx:idx + 1600])
+        idx = BU.index("def _looks_mfa_challenge_page")
+        self.assertIn('input[name="code"]', BU[idx:idx + 1200])
+
+    def test_url_kept_as_fallback(self):
+        """DOM 取不到时还是要有兜底，但只能当兜底。"""
+        for name, src, fn in (("roxy", ROXY, "_is_mfa_challenge_page"),
+                              ("browser_use", BU, "_looks_mfa_challenge_page")):
+            idx = src.index(f"def {fn}")
+            body = src[idx:idx + 1600]
+            tail = body[body.index("except Exception"):]
+            self.assertIn("/mfa-challenge", tail,
+                          f"{name} 没有 URL 兜底")
+
+    def test_spa_pitfall_documented(self):
+        for name, src, fn in (("roxy", ROXY, "_is_mfa_challenge_page"),
+                              ("browser_use", BU, "_looks_mfa_challenge_page")):
+            idx = src.index(f"def {fn}")
+            doc = src[idx:idx + 700]
+            self.assertIn("SPA", doc, f"{name} 没写明 SPA 这个坑")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
