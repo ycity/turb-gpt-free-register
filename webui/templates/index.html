@@ -4338,7 +4338,13 @@ function _codexCell(r) {
   const s = r.codex_status || '';
   const err = r.codex_error || '';
   const titleAttr = err ? ` title="${esc(err)}"` : '';
-  if (s === 'success') return `<span class="pill status-success">成功</span>`;
+  if (s === 'success') {
+    // 只有拿到订阅编号才能拼出 AG49-Team1 这种名字
+    const imp = r.subscription_no
+      ? `<button data-import-sub2="${esc(r.id)}" title="导入 sub2api（名称 AG${r.subscription_kind === 'weekly' ? 'Z' : ''}${esc(r.subscription_no)}-Team1）">导入sub2</button>`
+      : `<button disabled title="该账号还没有订阅编号">导入sub2</button>`;
+    return `<div class="agent-token-cell"><span class="pill status-success">成功</span>${imp}</div>`;
+  }
   if (s === 'retrying') return `<span class="pill status-running">补跑中</span>`;
   if (s === 'stopped') return `<span class="pill status-used"${titleAttr}>已停止</span>`;
   if (s === 'failed') return `<span class="pill status-failed"${titleAttr}>失败</span>`;
@@ -6507,6 +6513,12 @@ async function onAccountsBodyClick(e) {
     return;
   }
 
+  const importSub2Btn = e.target.closest('[data-import-sub2]');
+  if (importSub2Btn) {
+    await importOneAccountToSub2(Number(importSub2Btn.dataset.importSub2), importSub2Btn);
+    return;
+  }
+
   const qrBtn = e.target.closest('[data-qr-url]');
   if (qrBtn) {
     const url = qrBtn.dataset.qrUrl || '';
@@ -7229,6 +7241,31 @@ async function generateSelectedCodexAgents() {
     showToast('批量生成失败: ' + err.message);
     updateAccountSelectionUi();
   } finally {
+    btn.textContent = old;
+  }
+}
+
+async function importOneAccountToSub2(id, btn) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  if (!acc) { showToast('账号不存在'); return; }
+  if ((acc.codex_status || '') !== 'success') { showToast('该账号还没跑通 Codex'); return; }
+  if (!acc.subscription_no) { showToast('该账号还没有订阅编号'); return; }
+  const name = 'AG' + (acc.subscription_kind === 'weekly' ? 'Z' : '') + acc.subscription_no + '-Team1';
+  if (!confirm(`导入 sub2api？\n\n账号：${acc.email || ('#' + id)}\n名称：${name}\n分组：Composite\n代理：按注册时用的出口同名匹配`)) return;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+  try {
+    const res = await api(`/api/accounts/${encodeURIComponent(id)}/import-sub2`, { method:'POST' });
+    const r = res.result || {};
+    const tips = [r.name];
+    if (r.proxy_name) tips.push('代理 ' + r.proxy_name);
+    else tips.push('未匹配到代理');
+    showToast((r.updated ? '已更新 ' : '已导入 ') + tips.join('｜'), 2600);
+    btn.textContent = r.updated ? '已更新' : '已导入';
+  } catch(err) {
+    showToast('导入失败: ' + err.message, 3000);
+    btn.disabled = false;
     btn.textContent = old;
   }
 }

@@ -2188,6 +2188,59 @@ def create_app(auth_code: str | None = None) -> Flask:
             logger.exception("更新账号 sub2api 上传状态失败: account_id=%s", acc.get("id"))
         return result
 
+    @app.post("/api/accounts/<int:acc_id>/import-sub2")
+    def api_account_import_sub2(acc_id: int):
+        """把跑通 Codex 的账号一键导入 sub2api。
+
+        命名 AG<编号>-Team1（周限额编号前加 Z），代理按名字匹配，
+        分组默认 Composite。同名账号存在时更新而不是重复建。
+        """
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+
+        no = acc.get("subscription_no")
+        if not no:
+            return jsonify({
+                "ok": False,
+                "error": "该账号没有订阅编号，无法生成 sub2api 名称",
+            }), 400
+
+        email = str(acc.get("email") or "")
+        payload = db.get_codex_credential_payload(email)
+        if not payload:
+            return jsonify({
+                "ok": False,
+                "error": "没有 Codex 授权数据，请先跑通 Codex",
+            }), 400
+
+        # sub2api 里的代理名和我们代理池一致，直接按注册时用的那个找
+        proxy_name = ""
+        try:
+            from webui.proxy_pool import name_of_proxy
+            proxy_name = name_of_proxy(str(acc.get("proxy_used") or ""))
+        except Exception:  # noqa: BLE001 - 找不到代理不该挡住导入
+            logger.exception("解析代理名失败")
+
+        try:
+            from core.sub2api_import import Sub2apiError, import_account
+            result = import_account(
+                codex_payload=payload,
+                subscription_no=no,
+                subscription_kind=str(acc.get("subscription_kind") or ""),
+                proxy_name=proxy_name,
+            )
+        except Sub2apiError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("导入 sub2api 异常")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+        logger.info("[sub2api] 账号 #%s 已导入：%s", acc_id, result.get("name"))
+        return jsonify({"ok": True, "account_id": acc_id,
+                        "email": email, "result": result})
+
     @app.post("/api/accounts/<int:acc_id>/codex-agent/upload-sub2")
     def api_account_codex_agent_upload_sub2(acc_id: int):
         """单账号把已生成的 Codex Agent Token 上传到 sub2api。"""

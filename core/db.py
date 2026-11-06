@@ -3277,6 +3277,31 @@ def list_codex_accounts(
     return [_codex_content_to_record(content) for content in rows]
 
 
+def get_codex_credential_payload(email: str) -> dict | None:
+    """按邮箱取 Codex 授权产物（access_token / refresh_token / id_token）。
+
+    导入 sub2api 时要用它拼 oauth 凭据。同一邮箱可能有多条（不同 plan），
+    取最近更新的那条。
+    """
+    mail = str(email or "").strip().lower()
+    if not mail:
+        return None
+    _ensure_sqlite()
+    with closing(_sqlite_conn()) as conn:
+        row = conn.execute(
+            "SELECT payload FROM codex_accounts "
+            "WHERE lower(email)=? AND archived=0 "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (mail,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def upsert_codex_credential(content: dict, filename: str) -> str:
     """把 Codex 凭证写入 SQLite，返回逻辑文件名（不创建本地文件）。"""
     if not isinstance(content, dict) or not filename:

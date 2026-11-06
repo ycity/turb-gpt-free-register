@@ -1,0 +1,16 @@
+[Unit]
+Description=sub2api bridge for turb-gpt-free-register container
+After=network.target sub2api.service
+Wants=sub2api.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/turb-gpt-free-register/scripts/sub2api-bridge.py
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

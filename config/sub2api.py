@@ -69,6 +69,26 @@ SUB2_CODEX_AUTH_PREFIX: str = ""
 # exchange_code     => 只换 token，不创建账号（兼容旧逻辑）
 SUB2_CODEX_CALLBACK_PAYLOAD_MODE: str = "create_from_oauth"
 
+
+# ============================================================
+# 一键导入 sub2api（跑通 Codex 的账号）
+#
+# sub2api 跑在同一台机器上，只监听 127.0.0.1:8213，容器访问不到；
+# scripts/sub2api-bridge.service 把容器网段的 172.19.0.1:8215 转过去，
+# 所以这里填的是转发地址而不是 127.0.0.1。
+# ============================================================
+
+# 管理员账号。sub2api 没有长期 API Key，每次导入都要登录换 JWT。
+SUB2API_ADMIN_EMAIL: str = ""
+SUB2API_ADMIN_PASSWORD: str = ""
+
+# 导入后默认加入的分组。6 = Composite，和已有的 AG*-Team1 账号一致。
+SUB2API_GROUP_IDS: list = [6]
+
+# 新账号的并发和优先级，与现有账号保持一致。
+SUB2API_CONCURRENCY: int = 10
+SUB2API_PRIORITY: int = 1
+
 apply_env_overrides(globals(), {
     'SUB2API_AUTO_EXPORT': 'bool',
     'SUB2API_SYNC_MODE': 'str',
@@ -88,4 +108,8 @@ apply_env_overrides(globals(), {
     'SUB2_CODEX_AUTH_HEADER': 'str',
     'SUB2_CODEX_AUTH_PREFIX': 'str',
     'SUB2_CODEX_CALLBACK_PAYLOAD_MODE': 'str',
+    'SUB2API_ADMIN_EMAIL': 'str',
+    'SUB2API_ADMIN_PASSWORD': 'str',
+    'SUB2API_CONCURRENCY': 'int',
+    'SUB2API_PRIORITY': 'int',
 })

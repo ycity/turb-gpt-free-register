@@ -137,6 +137,24 @@ def resolve_by_name(name: str) -> str:
     return ""
 
 
+def name_of_proxy(url: str) -> str:
+    """按代理地址反查池里的名称，是 resolve_by_name 的反向。
+
+    账号记录里存的是完整代理地址，而 sub2api 那边按名字关联代理，
+    所以导入时要先把地址换回名字。
+    """
+    want = _identity(normalize_proxy_url(str(url or "")))
+    if not want:
+        return ""
+    for raw in _current_lines():
+        item_url, item_name, _enabled = split_proxy_pool_line(raw)
+        if not item_url:
+            continue
+        if _identity(normalize_proxy_url(item_url)) == want:
+            return _clean_name(item_name)
+    return ""
+
+
 def save_pool(items, *, version: str | None = None) -> dict:
     """整表保存。
 
