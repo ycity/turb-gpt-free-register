@@ -89,6 +89,13 @@ SUB2API_GROUP_IDS: list = [6]
 SUB2API_CONCURRENCY: int = 10
 SUB2API_PRIORITY: int = 1
 
+# 注册时用的出口如果已经挂了，导入时退到这个代理。
+# 账号挂着一个不可达的代理，sub2api 调度过去必然失败。
+SUB2API_FALLBACK_PROXY: str = "Aaitr-ATT"
+
+# 导入后测试连接用的模型。sub2api 默认用 gpt-5.4，而 Codex 账号不支持它。
+SUB2API_TEST_MODEL: str = "gpt-6-luna"
+
 apply_env_overrides(globals(), {
     'SUB2API_AUTO_EXPORT': 'bool',
     'SUB2API_SYNC_MODE': 'str',
@@ -112,4 +119,6 @@ apply_env_overrides(globals(), {
     'SUB2API_ADMIN_PASSWORD': 'str',
     'SUB2API_CONCURRENCY': 'int',
     'SUB2API_PRIORITY': 'int',
+    'SUB2API_FALLBACK_PROXY': 'str',
+    'SUB2API_TEST_MODEL': 'str',
 })

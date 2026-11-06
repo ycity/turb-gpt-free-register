@@ -26,6 +26,29 @@ NAME_SUFFIX = "-Team1"
 # 目前所有订阅都是埃及区
 REGION_PREFIX = "AG"
 
+# 调度优先级：周限额账号额度宽松（没有 5 小时滚动限制），排在前面多用；
+# 5h 账号容易触顶，优先级压低。数字越大越优先。
+PRIORITY_BY_KIND = {"weekly": 10, "5h": 3}
+
+# 账号能用哪些模型。不带这张表的话 sub2api 认不出可用模型，
+# 连测试连接都会被 OpenAI 以 model_not_found 拒掉。
+# 取自 sub2api 里已有账号（AG8-Team1）的 model_mapping，键值相同。
+MODEL_NAMES = (
+    "codex-auto-review",
+    "gpt-4o-audio-preview", "gpt-4o-realtime-preview",
+    "gpt-5.2", "gpt-5.2-2025-12-11", "gpt-5.2-chat-latest",
+    "gpt-5.2-pro", "gpt-5.2-pro-2025-12-11",
+    "gpt-5.3-codex-spark",
+    "gpt-5.4", "gpt-5.4-2026-03-05", "gpt-5.4-mini",
+    "gpt-5.5",
+    "gpt-5.6", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
+    "gpt-6", "gpt-6-astra", "gpt-6-chat-thinking", "gpt-6-luna", "gpt-6-sol",
+    "gpt-6.1-sol", "gpt-6.1-terra",
+    "gpt-image-1", "gpt-image-1.5", "gpt-image-2",
+    "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+    "gpt-reserve",
+)
+
 
 class Sub2apiError(RuntimeError):
     """导入失败。"""
@@ -132,21 +155,47 @@ def build_credentials(codex_payload: dict) -> dict:
         "expires_at": str(codex_payload.get("expired") or ""),
         "subscription_expires_at": str(
             auth.get("chatgpt_subscription_active_until") or ""),
+        "model_mapping": {m: m for m in MODEL_NAMES},
     }
 
 
-def find_proxy_id(token: str, proxy_name: str) -> int:
-    """按名字找代理。sub2api 的代理名和我们代理池一致，所以能直接匹配。"""
+def _proxy_reachable(host: str, port: int, timeout: float = 6.0) -> bool:
+    """代理端口通不通。不通就别往账号上挂，否则 sub2api 调度过去必然失败。"""
+    import socket
+    try:
+        with socket.create_connection((str(host), int(port)), timeout=timeout):
+            return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def find_proxy_id(token: str, proxy_name: str,
+                  *, fallback_name: str = "") -> tuple[int, str]:
+    """按名字找代理，顺带确认它还活着。
+
+    sub2api 的代理名和我们代理池一致，所以能直接按名匹配。但注册时用的
+    出口可能后来挂了（实测 Aaitr-Frontier 整台不可达），这种情况下退到
+    fallback_name，免得导进去的账号一调度就失败。
+
+    返回 (proxy_id, 实际用的名字)。
+    """
     name = str(proxy_name or "").strip()
-    if not name:
-        return 0
     out = _request("GET", "/api/v1/admin/proxies?page=1&page_size=200",
                    token=token)
     items = (out.get("data") or {}).get("items") or []
-    for p in items:
-        if str(p.get("name") or "").strip().lower() == name.lower():
-            return int(p.get("id") or 0)
-    return 0
+    by_name = {str(p.get("name") or "").strip().lower(): p for p in items}
+
+    for want in (name, str(fallback_name or "").strip()):
+        if not want:
+            continue
+        p = by_name.get(want.lower())
+        if not p:
+            continue
+        if _proxy_reachable(p.get("host"), p.get("port")):
+            return int(p.get("id") or 0), str(p.get("name") or "")
+        logger.warning("[sub2api] 代理 %s (%s:%s) 不可达，尝试回退",
+                       p.get("name"), p.get("host"), p.get("port"))
+    return 0, ""
 
 
 def find_account_by_name(token: str, name: str) -> dict | None:
@@ -159,13 +208,68 @@ def find_account_by_name(token: str, name: str) -> dict | None:
     return None
 
 
+def test_account(account_id: int, *, token: str = "", model: str = "",
+                 timeout: float = 90.0) -> dict:
+    """调 sub2api 的测试连接，返回 {ok, model, error, reply}。
+
+    参数名是 model_id（不是 model），留空时 sub2api 用自己的默认模型
+    gpt-5.4，而 Codex 账号不支持它，必然报 model_not_found。
+    响应是 SSE 流：test_start / content / test_complete / error。
+    """
+    tok = token or login()
+    want = str(model or _cfg("SUB2API_TEST_MODEL", "gpt-6-luna") or "gpt-6-luna")
+    url = _base_url() + f"/api/v1/admin/accounts/{int(account_id)}/test"
+    body = json.dumps({"model_id": want, "prompt": ""}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", "Bearer " + tok)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        return {"ok": False, "model": want,
+                "error": f"HTTP {exc.code}: {detail[:200]}"}
+    except Exception as exc:
+        return {"ok": False, "model": want,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    used, error, ok = want, "", False
+    chunks: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            evt = json.loads(line[5:].strip())
+        except Exception:  # noqa: BLE001 - 非 JSON 的心跳行跳过
+            continue
+        kind = str(evt.get("type") or "")
+        if kind == "test_start":
+            used = str(evt.get("model") or want)
+        elif kind == "content":
+            chunks.append(str(evt.get("text") or ""))
+        elif kind == "test_complete":
+            ok = bool(evt.get("success"))
+        elif kind == "error":
+            error = str(evt.get("error") or "")
+    return {
+        "ok": ok and not error,
+        "model": used,
+        "error": error,
+        "reply": "".join(chunks)[:200],
+    }
+
+
 def import_account(
     *,
     codex_payload: dict,
     subscription_no,
     subscription_kind: str,
     proxy_name: str = "",
+    fallback_proxy: str = "",
     group_ids: list[int] | None = None,
+    run_test: bool = True,
 ) -> dict:
     """导入一个账号，返回 {name, account_id, proxy, groups, updated}。
 
@@ -176,9 +280,13 @@ def import_account(
     creds = build_credentials(codex_payload)
     groups = list(group_ids or _cfg("SUB2API_GROUP_IDS", [6]) or [6])
 
-    proxy_id = find_proxy_id(token, proxy_name) if proxy_name else 0
+    proxy_id, used_proxy = (0, "")
+    if proxy_name or fallback_proxy:
+        proxy_id, used_proxy = find_proxy_id(
+            token, proxy_name, fallback_name=fallback_proxy)
     if proxy_name and not proxy_id:
-        logger.warning("[sub2api] 代理池里有 %s，但 sub2api 里没有同名代理", proxy_name)
+        logger.warning("[sub2api] 没找到可用代理（想要 %s，回退 %s）",
+                       proxy_name, fallback_proxy or "无")
 
     existing = find_account_by_name(token, name)
     body = {
@@ -187,7 +295,7 @@ def import_account(
         "type": "oauth",
         "credentials": creds,
         "concurrency": int(_cfg("SUB2API_CONCURRENCY", 10) or 10),
-        "priority": int(_cfg("SUB2API_PRIORITY", 1) or 1),
+        "priority": PRIORITY_BY_KIND.get(str(subscription_kind or ""), 3),
     }
 
     if existing:
@@ -210,11 +318,15 @@ def import_account(
     _request("PUT", f"/api/v1/admin/accounts/{acc_id}",
              token=token, payload=patch)
 
-    return {
+    result = {
         "name": name,
         "account_id": acc_id,
         "proxy_id": proxy_id,
-        "proxy_name": proxy_name if proxy_id else "",
+        "proxy_name": used_proxy,
         "group_ids": groups,
+        "priority": body["priority"],
         "updated": updated,
     }
+    if run_test:
+        result["test"] = test_account(acc_id, token=token)
+    return result

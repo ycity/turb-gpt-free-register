@@ -2188,13 +2188,23 @@ def create_app(auth_code: str | None = None) -> Flask:
             logger.exception("更新账号 sub2api 上传状态失败: account_id=%s", acc.get("id"))
         return result
 
+    def _cfg_fallback_proxy() -> str:
+        """注册出口挂了时用的备用代理。"""
+        try:
+            from config import sub2api as _s
+            return str(getattr(_s, "SUB2API_FALLBACK_PROXY", "") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
     @app.post("/api/accounts/<int:acc_id>/import-sub2")
     def api_account_import_sub2(acc_id: int):
         """把跑通 Codex 的账号一键导入 sub2api。
 
-        命名 AG<编号>-Team1（周限额编号前加 Z），代理按名字匹配，
-        分组默认 Composite。同名账号存在时更新而不是重复建。
+        命名 AG<编号>-Team1（周限额编号前加 Z），代理按注册时用的出口
+        同名匹配，不可达时退到备用代理，分组默认 Composite。
+        同名账号存在时更新而不是重复建。
         """
+        data = request.get_json(silent=True) or {}
         acc = db.get_account(acc_id)
         if not acc:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
@@ -2229,6 +2239,8 @@ def create_app(auth_code: str | None = None) -> Flask:
                 subscription_no=no,
                 subscription_kind=str(acc.get("subscription_kind") or ""),
                 proxy_name=proxy_name,
+                fallback_proxy=str(data.get("fallback_proxy")
+                                   or _cfg_fallback_proxy()),
             )
         except Sub2apiError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
