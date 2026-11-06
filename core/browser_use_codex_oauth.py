@@ -840,10 +840,13 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
         raise RuntimeError(f"Codex BrowserUse 授权页未出现邮箱输入框：{str(exc)[:220]}") from exc
 
     used_codes: set[str] = set()
+    # 重试时可能直接用密码 + MFA 登录成功，那就不该再等邮箱验证码：
+    # 登录都完成了，OpenAI 不会再发邮件，傻等必然超时。
+    logged_in_via_password = False
 
     def _restart_email_otp_flow(reason: str) -> None:
         """Codex Auth 上直接点 resend 可能触发服务端 500；改为重开授权地址并重新提交邮箱。"""
-        nonlocal otp_after_ts
+        nonlocal otp_after_ts, logged_in_via_password
         logger.info("[Codex][BrowserUse] 重新触发邮箱 OTP：%s", reason)
         otp_after_ts = time.time()
         try:
@@ -860,6 +863,9 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
                 if _looks_mfa_challenge_page(page):
                     _fill_mfa_challenge_if_present(page, email, timeout=15)
                 logger.info("[Codex][BrowserUse] 重新提交邮箱后已用密码完成登录，进入后续步骤")
+                # 这里的 return 只退出本嵌套函数，外层得靠这个标记才知道
+                # 已经登录成功，否则会继续回去等一封永远不会来的验证码邮件
+                logged_in_via_password = True
                 return
             if pw_result != "email_otp":
                 if _looks_mfa_challenge_page(page):
@@ -893,6 +899,9 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
                 str(exc)[:180],
             )
             _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500")
+            if logged_in_via_password:
+                logger.info("[Codex][BrowserUse] 重试时已用密码 + MFA 登录成功，不再等邮箱验证码")
+                return
             continue
         used_codes.add(str(code))
         logger.info("[Codex][BrowserUse] 邮箱 OTP 收到：%s", code)
@@ -929,6 +938,9 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
         if attempt >= 3:
             raise RuntimeError("Codex 邮箱验证码连续错误/过期")
         _restart_email_otp_flow("验证码错误/过期或页面未跳转，避免点击 resend 导致 500")
+        if logged_in_via_password:
+            logger.info("[Codex][BrowserUse] 重试时已用密码 + MFA 登录成功，不再等邮箱验证码")
+            return
 
 
 def _select_sms_channel(page) -> None:
