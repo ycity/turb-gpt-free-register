@@ -1932,8 +1932,11 @@ def create_app(auth_code: str | None = None) -> Flask:
                 card_id = _card_id_req
                 client = build_client_from_config()
                 if not card_id:
-                    picked = client.pick_card(min_balance=0.0)
+                    from core.auto_subscribe_scheduler import pick_vcc_card_for_payment
+                    picked = pick_vcc_card_for_payment(client)
                     card_id = str(picked.get("cardId") or "")
+                    if card_id:
+                        run_cfg.VCC_CARD_ID = card_id
                 check = ensure_funds(client, card_id, run_cfg)
                 funds_info = check.as_dict()
                 if check.recharged:
@@ -2146,6 +2149,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         """
         cards = []
         vcc_error = ""
+        client = None
         try:
             from core.vcc_client import VccError, build_client_from_config
             client = build_client_from_config()
@@ -2159,11 +2163,14 @@ def create_app(auth_code: str | None = None) -> Flask:
         # 的 auto_sub_card_usage 计数 + AUTO_SUBSCRIBE_CARD_BLACKLIST），
         # 卡池页要展示这两列。读不到就按全 0/不在黑名单，别挡住卡列表。
         try:
-            from core.auto_subscribe_scheduler import _card_blacklist, card_usage
+            from core.auto_subscribe_scheduler import (
+                _card_blacklist, _low_balance_threshold, card_usage,
+            )
             usage = card_usage()
             blacklist = _card_blacklist()
+            low_bal_threshold = _low_balance_threshold()
         except Exception:  # noqa: BLE001
-            usage, blacklist = {}, set()
+            usage, blacklist, low_bal_threshold = {}, set(), 18.0
 
         for r in rows:
             status = str(r.get("cardStatus") or "")
@@ -2198,8 +2205,21 @@ def create_app(auth_code: str | None = None) -> Flask:
                 return jsonify({"ok": False,
                                 "error": f"{type(exc).__name__}: {exc}"}), 500
 
+        account_balance = None
+        if client is not None and not vcc_error:
+            try:
+                from core.auto_subscribe_scheduler import _query_account_balance
+                account_balance = _query_account_balance(client)
+            except Exception:  # noqa: BLE001
+                account_balance = None
+
         cards.sort(key=lambda c: (not c["usable"], -c["balance"]))
-        out = {"ok": True, "cards": cards}
+        out = {
+            "ok": True,
+            "cards": cards,
+            "account_balance": account_balance,
+            "low_balance_threshold": low_bal_threshold,
+        }
         if vcc_error:
             out["vcc_error"] = vcc_error
         return jsonify(out)
@@ -2465,7 +2485,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             from core.vcc_funds import preflight
             client = build_client_from_config()
             if not card_id:
-                card_id = str(client.pick_card(min_balance=0.0).get("cardId") or "")
+                from core.auto_subscribe_scheduler import pick_vcc_card_for_payment
+                card_id = str(pick_vcc_card_for_payment(client).get("cardId") or "")
             return jsonify(preflight(client, card_id, cfg))
         except Exception as exc:
             logger.exception("余额预检异常")

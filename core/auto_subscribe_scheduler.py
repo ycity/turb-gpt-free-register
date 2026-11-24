@@ -431,14 +431,71 @@ def note_card_used(card_mask: str) -> None:
         logger.warning("[自动订阅] 记录卡使用次数失败", exc_info=True)
 
 
-def _pick_balanced(cards: list[dict]) -> dict:
+def _low_balance_threshold() -> float:
+    """账户低余额阈值（USD）；<= 0 表示关闭低余额优先选卡策略。"""
+    try:
+        val = float(_cfg("AUTO_SUBSCRIBE_LOW_BALANCE_USD", 18.0) or 0.0)
+    except (TypeError, ValueError):
+        return 18.0
+    return max(0.0, val)
+
+
+def _card_balance(card: dict) -> float:
+    """从 VCC 卡记录读取可用余额（USD），字段口径与 VccClient._available 一致。"""
+    if not isinstance(card, dict):
+        return 0.0
+    for name in ("availableBalance", "availableAmount", "balance"):
+        value = card.get(name)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _query_account_balance(client) -> float | None:
+    """查询 VCC 账户可用余额（USD）。查询失败或返回值非法时返回 None。"""
+    from decimal import Decimal
+
+    fn = getattr(client, "account_balance", None)
+    if not callable(fn):
+        return None
+    try:
+        val = fn()
+    except Exception as exc:  # noqa: BLE001 - 查余额失败不阻断订阅，回退默认选卡
+        logger.warning("[自动订阅] 查询 VCC 账户余额失败，按默认策略选卡：%s", exc)
+        return None
+    # 过滤掉未配置的 MagicMock 等非标量对象（float(MagicMock()) 为 1.0，会误触发低余额模式）
+    if isinstance(val, bool) or not isinstance(val, (int, float, str, Decimal)):
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_balanced(cards: list[dict], *, min_balance: float = 0.0) -> dict:
     """从使用次数最少的那一档里随机选一张。
 
     为什么不是纯随机：纯随机在样本少时会严重偏科，某张卡连用五次而
     另一张一次没用。先按次数分档、只在最低档里随机，既保证均衡，
     又不会变成固定轮转（固定顺序容易被风控识别成规律）。
+
+    当 min_balance > 0（VCC 账户余额低于阈值、无法给空卡充值）时：
+      优先把候选收缩到卡内余额 >= min_balance 的充足卡里，再按使用次数
+      最少挑；若已无余额充足的卡，则退回全量候选（保持"优先"而非硬拦）。
     """
     import random
+
+    pool_src = cards
+    prefer_applied = False
+    if min_balance > 0:
+        sufficient = [c for c in cards if _card_balance(c) >= min_balance]
+        if sufficient:
+            pool_src = sufficient
+            prefer_applied = True
 
     usage = card_usage()
 
@@ -447,12 +504,42 @@ def _pick_balanced(cards: list[dict]) -> dict:
         tail = "".join(ch for ch in mask if ch.isdigit())[-4:]
         return usage.get(tail, 0)
 
-    fewest = min(times(c) for c in cards)
-    pool = [c for c in cards if times(c) == fewest]
+    fewest = min(times(c) for c in pool_src)
+    pool = [c for c in pool_src if times(c) == fewest]
     pick = random.choice(pool)
-    logger.info("[自动订阅] 均衡选卡：最少用过 %d 次的有 %d 张，选中 %s",
-                fewest, len(pool), pick.get("cardNoMask"))
+    if prefer_applied:
+        logger.info("[自动订阅] 低余额优先选卡（>= %.2f USD，充足卡 %d/%d 张）："
+                    "最少用过 %d 次的有 %d 张，选中 %s（余额 %.2f USD）",
+                    min_balance, len(pool_src), len(cards),
+                    fewest, len(pool), pick.get("cardNoMask"), _card_balance(pick))
+    else:
+        logger.info("[自动订阅] 均衡选卡：最少用过 %d 次的有 %d 张，选中 %s",
+                    fewest, len(pool), pick.get("cardNoMask"))
     return pick
+
+
+def pick_vcc_card_for_payment(client) -> dict:
+    """未显式指定卡片时选一张可用 VCC 卡（复用自动订阅的低余额优先与均衡策略）。"""
+    blacklist = _card_blacklist()
+    usable = []
+    for c in client.list_cards(page_size=100) or []:
+        status = c.get("cardStatus")
+        is_active = (status.strip().upper() == "ACTIVE" if isinstance(status, str)
+                     else str(status or "") == "1")
+        if not is_active:
+            continue
+        mask = str(c.get("cardNoMask") or "")
+        tail = "".join(ch for ch in mask if ch.isdigit())[-4:]
+        if tail and tail in blacklist:
+            continue
+        usable.append(c)
+    if not usable:
+        return client.pick_card(min_balance=0.0)
+    threshold = _low_balance_threshold()
+    acct_bal = _query_account_balance(client) if threshold > 0 else None
+    prefer_min = threshold if (acct_bal is not None and acct_bal < threshold) else 0.0
+    return (_pick_balanced(usable, min_balance=prefer_min)
+            if prefer_min > 0 else _pick_balanced(usable))
 
 
 def _addr_is_payable(client, card: dict) -> bool:
@@ -615,8 +702,11 @@ def start_subscription(account_id: int) -> dict:
 
     # ---- 选卡（只读）：黑名单之外均衡挑一张，不在此处划钱充值 ----
     #
-    # 不按余额筛卡：卡内不够时会从 VCC 账户划钱过来（和手动订阅同一套逻辑）。
-    # 按余额筛会让刚用过的卡长期选不中，失去"分散单卡用量"的意义。
+    # 账户余额充足（>= 低余额阈值）时不按卡余额筛：卡内不够会从 VCC 账户划钱，
+    # 保持单卡用量分散。
+    # 账户余额低于阈值（默认 18 USD）时：账户已不够给空卡充值，优先从卡内余额
+    # 充足（>= 阈值）的卡里按使用次数最少挑，避免选中低余额卡后在 ensure_funds
+    # 才因账户充不起钱而失败。
     client = build_client_from_config()
     need = required_usd(cfg)
     blacklist = _card_blacklist()
@@ -639,7 +729,19 @@ def start_subscription(account_id: int) -> dict:
         return {"ok": False,
                 "error": "没有可用的 VCC 卡（黑名单跳过 %d 张）" % len(skipped_black)}
 
-    pick = _pick_balanced(usable)
+    low_bal_threshold = _low_balance_threshold()
+    acct_bal = _query_account_balance(client) if low_bal_threshold > 0 else None
+    prefer_min_balance = 0.0
+    if acct_bal is not None and acct_bal < low_bal_threshold:
+        prefer_min_balance = low_bal_threshold
+        rich_cnt = sum(1 for c in usable if _card_balance(c) >= prefer_min_balance)
+        logger.info("[自动订阅] VCC 账户余额 %.2f USD < %.2f USD，"
+                    "优先从余额充足（>= %.2f USD）的卡里选使用次数少的（充足卡 %d/%d 张）",
+                    acct_bal, low_bal_threshold, prefer_min_balance,
+                    rich_cnt, len(usable))
+
+    pick = (_pick_balanced(usable, min_balance=prefer_min_balance)
+            if prefer_min_balance > 0 else _pick_balanced(usable))
     card_id = str(pick.get("cardId") or "")
     card_mask = str(pick.get("cardNoMask") or "")
 
@@ -647,7 +749,8 @@ def start_subscription(account_id: int) -> dict:
     if not _addr_is_payable(client, pick):
         rest = [c for c in usable if c is not pick]
         for _ in range(len(rest)):
-            pick = _pick_balanced(rest)
+            pick = (_pick_balanced(rest, min_balance=prefer_min_balance)
+                    if prefer_min_balance > 0 else _pick_balanced(rest))
             if _addr_is_payable(client, pick):
                 break
             rest = [c for c in rest if c is not pick]
@@ -831,6 +934,7 @@ def status() -> dict:
         "candidates": n,
         "card_usage": card_usage(),
         "card_blacklist": sorted(_card_blacklist()),
+        "low_balance_threshold_usd": _low_balance_threshold(),
         "running": _THREAD is not None and _THREAD.is_alive(),
         "last_action": last,
     }

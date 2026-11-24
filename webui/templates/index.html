@@ -5658,6 +5658,8 @@ function _autoPayFillAddrForm(a) {
 
 let _autoPayAddrCache = [];
 let _autoPayCardCache = [];
+let _autoPayAccountBalance = null;
+let _autoPayLowBalanceThreshold = 18;
 let _autoPayCardLinks = {};
 let _autoPayProxyCache = [];
 // 本单实际指定的出口名；会话跑起来后配置区隐藏，靠它在信息栏里显示
@@ -5837,12 +5839,20 @@ async function _autoPayLoadSetup() {
   const sel = $('#autoPayCardSelect');
   sel.innerHTML = '<option value="">加载中…</option>';
   _autoPayCardCache = [];
+  _autoPayAccountBalance = null;
+  _autoPayLowBalanceThreshold = 18;
   try {
     const r = await fetch('/api/pay/cards');
     const s = await r.json();
     if (!s.ok) throw new Error(s.error || '查询失败');
     const cards = s.cards || [];
     _autoPayCardCache = cards;
+    _autoPayAccountBalance = (typeof s.account_balance === 'number' && !Number.isNaN(s.account_balance))
+      ? s.account_balance : null;
+    if (s.low_balance_threshold !== undefined && s.low_balance_threshold !== null) {
+      const th = Number(s.low_balance_threshold);
+      if (!Number.isNaN(th) && th >= 0) _autoPayLowBalanceThreshold = th;
+    }
     if (!cards.length) {
       sel.innerHTML = '<option value="">（没有可用卡）</option>';
       $('#autoPayCardHint').textContent = '未查询到卡片';
@@ -5889,6 +5899,8 @@ async function _autoPayLoadSetup() {
         _autoPayFillAddrForm(s.billing || {});
       }
       // 选卡优先级：上次用过的 > 配置值 > 余额够付的第一张。
+      // 若 VCC 账户余额低于阈值（默认 18 USD），则优先从非黑名单且余额充足的
+      // VCC 卡里选使用次数最少的，避免账户充不起低余额卡。
       // 前两者都可能指向一张余额不足或已冻结的卡（配置是写死的，卡会被花光），
       // 那样弹窗一打开就摆着一张提交不了的卡，还得手动换。
       const sel2 = $('#autoPayCardSelect');
@@ -5912,13 +5924,34 @@ async function _autoPayLoadSetup() {
       const _isCustom = (c) => !!c && (c.source === 'custom' ||
         String(c.card_id || '').startsWith('local:'));
       const _affords = (c) => !!c && (_isCustom(c) || Number(c.balance || 0) >= need);
-      const affordable = (_autoPayCardCache || []).find(
+      const _lowAcct = _autoPayAccountBalance !== null
+        && _autoPayLowBalanceThreshold > 0
+        && _autoPayAccountBalance < _autoPayLowBalanceThreshold;
+      const _lowBalPick = (() => {
+        if (!_lowAcct) return null;
+        const pool = (_autoPayCardCache || []).filter(
+          c => c.usable && !_isCustom(c) && !c.auto_sub_blacklist
+            && Number(c.balance || 0) >= _autoPayLowBalanceThreshold
+            && pickable(c.card_id));
+        if (!pool.length) return null;
+        pool.sort((a, b) => ((a.auto_sub_used || 0) - (b.auto_sub_used || 0))
+          || (Number(b.balance || 0) - Number(a.balance || 0)));
+        return pool[0];
+      })();
+      const affordable = _lowBalPick || (_autoPayCardCache || []).find(
         c => c.usable && _affords(c) && pickable(c.card_id));
 
       let chosen = '';
       let why = '';
-      if (pickable(s.card_id)) {
-        const c = (_autoPayCardCache || []).find(x => x.card_id === s.card_id);
+      const _prefCard = pickable(s.card_id)
+        ? (_autoPayCardCache || []).find(x => x.card_id === s.card_id) : null;
+      if (_lowBalPick && (!_prefCard || !_isCustom(_prefCard))) {
+        chosen = _lowBalPick.card_id;
+        why = `，账户余额 ${_autoPayAccountBalance.toFixed(2)} 低于 ${_autoPayLowBalanceThreshold} USD，`
+          + `已优先选余额充足且使用最少的 ${_lowBalPick.mask}`
+          + `（用过 ${_lowBalPick.auto_sub_used || 0} 次）`;
+      } else if (_prefCard) {
+        const c = _prefCard;
         const enough = !need || _affords(c);
         if (enough) {
           chosen = s.card_id;

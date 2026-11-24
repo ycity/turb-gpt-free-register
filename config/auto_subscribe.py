@@ -52,6 +52,14 @@ AUTO_SUBSCRIBE_WORKSPACE = "MyTeam"
 #       余额 23.36 充足、出口也是 EG，仍被拒 → 判定该卡已被 Stripe 风控标记。
 AUTO_SUBSCRIBE_CARD_BLACKLIST = "5931,8361"
 
+# 账户低余额阈值（USD）。
+#
+# 当 VCC 账户可用余额低于该值时（账户已不足以给低余额卡充值），选卡策略从
+# "全量卡均衡"切换为"优先从卡内余额充足（>= 该值）的卡里挑使用次数最少的"；
+# 账户余额 >= 该值时仍按全量卡均衡选卡，保持单卡用量分散。
+# 设为 0 表示关闭该策略。
+AUTO_SUBSCRIBE_LOW_BALANCE_USD = 18.0
+
 # 调度线程多久醒一次（秒）。整点判断精确到小时，一分钟足够。
 AUTO_SUBSCRIBE_POLL_INTERVAL = 60.0
 
@@ -74,6 +82,7 @@ apply_env_overrides(globals(), {
     'AUTO_SUBSCRIBE_MAX_AMOUNT': 'float',
     'AUTO_SUBSCRIBE_WORKSPACE': 'str',
     'AUTO_SUBSCRIBE_CARD_BLACKLIST': 'str',
+    'AUTO_SUBSCRIBE_LOW_BALANCE_USD': 'float',
     'AUTO_SUBSCRIBE_POLL_INTERVAL': 'float',
     'AUTO_SUBSCRIBE_RETRY_INTERVAL_MIN': 'int',
     'AUTO_SUBSCRIBE_PAY_WAIT_SEC': 'float',
