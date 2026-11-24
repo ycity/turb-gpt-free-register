@@ -21,10 +21,41 @@ from core.roxy_registration import (  # noqa: F401
     _maybe_accept, _submit_email_and_wait_next, _fill_password_page_if_present,
     _clear_otp_inputs, _type_otp, _click_continue, _wait_after_email_otp_submit,
     _click_resend_email_otp, _complete_profile_page, _fetch_chatgpt_session, _check_manual_stop,
+    _email_otp_page_state,
     recover_session_after_token_failure,
 )
 
 logger = logging.getLogger(__name__)
+
+# 点过"重新发送验证码"后，取码的基准时间往回放多少秒。
+#
+# OpenAI 对同一地址短时间内不会真的再发一封邮件，点了重发往往什么都没发生。
+# 如果基准时间卡在"点击重发的那一刻"，刚收到的那封就变成"旧邮件"被跳过，
+# 于是一直等不到码、整单失败——#172/#173/#174 连续三次都是这么挂的
+# （日志里同一封 08:28:18 的邮件被反复判成 after=False）。
+# 180s 足够覆盖"上一封还能用"的窗口，又不会吃到更早的历史验证码。
+_OTP_RESEND_LOOKBACK = 180.0
+
+
+def _try_resend_email_otp(driver) -> bool:
+    """点"重新发送验证码"，点不到也不要让整单失败。
+
+    原来直接调 _click_resend_email_otp，找不到按钮就抛 RuntimeError，
+    外层没接住，整单就挂了（#174 最后那条
+    "找不到可点击的重新发送验证码按钮" 就是这么来的）。
+
+    但点不到按钮不等于没救：邮箱里往往已经有一封能用的验证码，
+    下一轮按放宽后的 after_ts 就能取到。所以这里只记日志、不抛。
+    """
+    try:
+        _click_resend_email_otp(driver, timeout=25)
+        return True
+    except Exception as exc:  # noqa: BLE001 - 点不到就靠下一轮取旧码
+        logger.warning(
+            "[Cloak注册][OTP] 没点到重新发送按钮（%s），"
+            "继续用已放宽的时间窗等码：%s",
+            type(exc).__name__, str(exc)[:160])
+        return False
 
 
 def run_cloak_registration(
@@ -105,8 +136,10 @@ def run_cloak_registration(
                         type(exc).__name__,
                         str(exc)[:180],
                     )
-                    otp_after_ts = time.time()
-                    _click_resend_email_otp(driver, timeout=25)
+                    # 同上：重发未必真的产生新邮件，基准时间要留回看窗口，
+                    # 否则下一轮还是只能看到同一封"旧"邮件然后再次超时。
+                    otp_after_ts = time.time() - _OTP_RESEND_LOOKBACK
+                    _try_resend_email_otp(driver)
                     human_delay("api")
                     current_otp = None
                     continue
@@ -116,16 +149,40 @@ def run_cloak_registration(
             human_delay("otp_input")
             try:
                 _click_continue(driver)
+                logger.info("[Cloak注册][OTP] 已提交验证码 %s，等待页面跳转",
+                            current_otp)
             except Exception as exc:
                 logger.info("[Cloak注册][OTP] 未找到显式提交按钮，继续等待页面状态：%s", str(exc)[:120])
 
-            outcome = _wait_after_email_otp_submit(driver, timeout=10)
+            # 10s 太短：实测这一步要过 Cloudflare 再跳转，慢的时候 20s 开外。
+            # 误判成 invalid 的代价很大——会去点"重新发送"，而 OpenAI 对同一
+            # 地址短时间内不会真的再发一封，于是旧邮件被 after_ts 挡住、
+            # 陷入死等，最后整单失败（#172/#173/#174 都是这么挂的）。
+            outcome = _wait_after_email_otp_submit(driver, timeout=30)
             if outcome == "accepted":
                 break
+            # 判成 invalid 时必须留下判据：这一步原来完全静默，
+            # 日志里只能看到"收到验证码"后隔十几秒突然去点重发，
+            # 根本分不清是验证码真错、页面被打回，还是误判。
+            try:
+                snap = _email_otp_page_state(driver)
+            except Exception:  # noqa: BLE001 - 取快照失败不影响主流程
+                snap = {}
+            logger.warning(
+                "[Cloak注册][OTP] 验证码 %s 被判定无效（第 %s/%s 次）"
+                "url=%s errors=%s inputs=%s",
+                current_otp, otp_attempt, max_otp_attempts,
+                str(snap.get("url") or "?")[:90],
+                str(snap.get("errors") or [])[:200],
+                [{"ariaInvalid": i.get("ariaInvalid"), "value": i.get("value")}
+                 for i in (snap.get("inputs") or [])][:4])
             if otp_attempt >= max_otp_attempts:
                 raise RuntimeError("邮箱验证码连续错误/过期，已达到最大重试次数")
-            otp_after_ts = time.time()
-            _click_resend_email_otp(driver, timeout=25)
+            # 重发前把基准时间往回放一点：OpenAI 常常不会真发新邮件，
+            # 此时只能复用刚才那封。往回 180s 足够覆盖"上一封还能用"的窗口，
+            # 又不会吃到更早的历史验证码。
+            otp_after_ts = time.time() - _OTP_RESEND_LOOKBACK
+            _try_resend_email_otp(driver)
             human_delay("api")
             current_otp = None
 
@@ -187,6 +244,7 @@ def run_cloak_registration(
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
             proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
+            proxy_region=((opened.raw or {}).get("proxy_region") if opened else None) or None,
             batch_dir=batch_dir,
             extra={
                 "user": session_info.get("user"),
@@ -221,12 +279,12 @@ def run_cloak_registration(
             data_saver.stop()
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
-        try:
-            if email:
-                from core.email_provider import release_email
-                release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
-        except Exception:
-            pass
+        # 这里不要自己回收邮箱。registration_service 收到 success=False 后会
+        # 统一处理：按错误类型决定停用还是放回，放回时走 release_unconsumed_*
+        # 累加连续失败计数、到阈值自动停用。
+        # worker 抢先把邮箱改回 available 会让那套计数失效——
+        # release_unconsumed_outlook 看到 status 已不是 used 就直接返回，
+        # 计数永远涨不上去，坏邮箱于是被反复领取（KleinmannDriskoll26 连废 7 次）。
         return {
             "success": False,
             "email": email,

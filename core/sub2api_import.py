@@ -28,7 +28,7 @@ REGION_PREFIX = "AG"
 
 # 调度优先级：周限额账号额度宽松（没有 5 小时滚动限制），排在前面多用；
 # 5h 账号容易触顶，优先级压低。数字越大越优先。
-PRIORITY_BY_KIND = {"weekly": 10, "5h": 3}
+PRIORITY_BY_KIND = {"weekly": 8, "5h": 3}
 
 # 账号能用哪些模型。不带这张表的话 sub2api 认不出可用模型，
 # 连测试连接都会被 OpenAI 以 model_not_found 拒掉。
@@ -261,6 +261,34 @@ def test_account(account_id: int, *, token: str = "", model: str = "",
     }
 
 
+def set_privacy(acc_id: int, token: str = "") -> dict:
+    """调 sub2api 的「设置隐私」，关掉 ChatGPT 侧的训练数据共享。
+
+    成功时 sub2api 把结果写进账号 extra.privacy_mode，只有 training_off
+    才算真关掉；training_set_cf_blocked 表示被 Cloudflare 拦了，训练可能还开着。
+    """
+    tok = token or login()
+    try:
+        _request("POST", f"/api/v1/admin/accounts/{int(acc_id)}/set-privacy",
+                 token=tok, timeout=90.0)
+    except Exception as exc:  # noqa: BLE001 - 隐私没关掉不该让导入整体失败
+        return {"ok": False, "mode": "", "error": f"{type(exc).__name__}: {exc}"}
+
+    mode = ""
+    try:
+        out = _request("GET", f"/api/v1/admin/accounts/{int(acc_id)}", token=tok)
+        extra = ((out.get("data") or {}).get("extra") or {})
+        mode = str(extra.get("privacy_mode") or "")
+    except Exception as exc:  # noqa: BLE001 - 回读失败只影响判定，不影响已下发的操作
+        return {"ok": False, "mode": "", "error": f"回读失败: {exc}"}
+
+    if mode == "training_off":
+        return {"ok": True, "mode": mode, "error": ""}
+    if mode == "training_set_cf_blocked":
+        return {"ok": False, "mode": mode, "error": "被 Cloudflare 拦截，训练可能仍开启"}
+    return {"ok": False, "mode": mode, "error": "关闭训练数据共享失败"}
+
+
 def import_account(
     *,
     codex_payload: dict,
@@ -270,6 +298,7 @@ def import_account(
     fallback_proxy: str = "",
     group_ids: list[int] | None = None,
     run_test: bool = True,
+    disable_training: bool = True,
 ) -> dict:
     """导入一个账号，返回 {name, account_id, proxy, groups, updated}。
 
@@ -327,6 +356,8 @@ def import_account(
         "priority": body["priority"],
         "updated": updated,
     }
+    if disable_training:
+        result["privacy"] = set_privacy(acc_id, token=token)
     if run_test:
         result["test"] = test_account(acc_id, token=token)
     return result

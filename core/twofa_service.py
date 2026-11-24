@@ -133,6 +133,45 @@ def _persist_refreshed_token(account_id: int, email: str, refreshed: dict) -> No
         logger.exception("[2FA] 回写新 accessToken 失败: account_id=%s", account_id)
 
 
+def _probe_single_seat_after_2fa(account_id: int, email: str) -> None:
+    """2FA 完成后顺带探测这个账号能不能只买 1 席。
+
+    只创建 checkout session 读限制，不改席位、不支付、不传优惠码，
+    所以既不扣款也不消耗码。探测结果写进账号，提链时直接用。
+
+    任何异常都吞掉：2FA 已经成功了，不能因为一个附加探测把结果搞成失败。
+    """
+    try:
+        from config import register as reg_cfg
+        if not bool(getattr(reg_cfg, "TEAM_PROBE_SINGLE_SEAT_AFTER_2FA", True)):
+            return
+    except Exception:  # noqa: BLE001 - 读不到配置按开启处理
+        pass
+
+    try:
+        acc = db.get_account(int(account_id))
+        if not acc:
+            return
+        from core.single_seat import probe_single_seat
+        res = probe_single_seat(acc)
+        db.update_account_single_seat(int(account_id), res)
+        if res.get("ok"):
+            msg = ("支持单席位（最少 1 席，可省一半订阅费）"
+                   if res.get("supported")
+                   else f"不支持单席位（最少 {res.get('minimum_seats')} 席）")
+            _append_log(email, f"[单席位] {msg}")
+            logger.info("[单席位] %s：%s", email, msg)
+        else:
+            _append_log(email, f"[单席位] 探测失败：{res.get('error')}")
+            logger.info("[单席位] %s 探测失败：%s", email, res.get("error"))
+    except Exception:  # noqa: BLE001 - 2FA 已成功，探测失败不能影响它
+        logger.exception("[单席位] 探测异常：account_id=%s", account_id)
+        try:
+            _append_log(email, "[单席位] 探测异常，已跳过")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _run_twofa(
     *, account_id: int, email: str, access_token: str, proxy: str | None,
     trigger: str,
@@ -177,6 +216,23 @@ def _run_twofa(
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
         logger.info("[2FA] 开始后台设置：email=%s trigger=%s", email, trigger)
+
+        # 1024proxy 注册的号，传进来的是临时出口（保留 120 分钟就失效），
+        # 而 2FA 往往在注册后几分钟到几小时才跑。继续用它轻则撞 Cloudflare
+        # 403，重则直接连不通（2026-11-17 #114 就是连续 3 次 authorize 403）。
+        # 和查活、席位探测统一：换成代理池同地区出口，并固化为注册代理。
+        try:
+            from core.region_proxy import adopt_pool_exit
+            acc_row = db.get_account(int(account_id)) or {}
+            picked, why = adopt_pool_exit(
+                int(account_id), str(proxy or acc_row.get("proxy_used") or ""),
+                str(acc_row.get("proxy_region") or ""), label="2FA")
+            if picked and picked != proxy:
+                _append_log(email, "[2FA] 注册用的是临时出口，改用代理池：%s" % why)
+                proxy = picked
+        except Exception:  # noqa: BLE001 - 选路失败沿用原出口，别让 2FA 起不来
+            logger.warning("[2FA] 按地区选出口失败，沿用原出口", exc_info=True)
+
         real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
         identity = email.strip().lower()
         session = BrowserSession(proxy=real_proxy, fingerprint_seed=f"account:{identity}")
@@ -225,6 +281,7 @@ def _run_twofa(
         )
         _append_log(email, f"[2FA] 完成：secret={secret[:4]}...{secret[-4:]}")
         logger.info("[2FA] 完成：email=%s secret=%s...%s", email, secret[:4], secret[-4:])
+        _probe_single_seat_after_2fa(account_id, email)
         return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
     except Exception as exc:
         result = {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}

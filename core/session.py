@@ -825,3 +825,15 @@ class BrowserSession:
         headers = self._attach_openai_target_headers_for_url(url, headers)
         resp = self.session.post(url, headers=headers, **kwargs)
         return self._observe_response_for_circuit_breaker(resp, url)
+
+    def delete(self, url: str, headers: dict = None, **kwargs):
+        """发送 DELETE 请求。
+
+        走和 get/post 同一条路径，保留熔断与 target header 注入；
+        直接用 self.session.delete 会绕过这两者。
+        ChatGPT 的撤销邀请接口要带 body，所以不能用无 body 的写法。
+        """
+        self._raise_if_circuit_open()
+        headers = self._attach_openai_target_headers_for_url(url, headers)
+        resp = self.session.delete(url, headers=headers, **kwargs)
+        return self._observe_response_for_circuit_breaker(resp, url)

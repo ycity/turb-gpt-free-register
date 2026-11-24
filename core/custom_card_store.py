@@ -289,6 +289,9 @@ def get_secrets(local_id: int) -> dict[str, str]:
         "exp_year": str(row["exp_year"]),
         "cvv": str(row["cvv"]),
         "holder_name": str(row["holder_name"] or ""),
+        # 备注名：支付成功后要记到账号上（"这单是哪张卡付的"），
+        # 顺手一起返回，省得调用方再查一次卡池。
+        "label": str(row["label"] or ""),
     }
 
 

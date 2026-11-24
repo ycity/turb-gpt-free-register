@@ -21,10 +21,28 @@ AUTO_REGISTER_POLL_INTERVAL = 30.0
 # 否则 2FA 卡死会让自动注册永久停摆。
 AUTO_REGISTER_2FA_TIMEOUT = 1800.0
 
+# 注册失败后多久重试（秒）。
+#
+# 为什么要单独配：AUTO_REGISTER_INTERVAL 是"成功一个号之后歇多久"，
+# 用来控制注册频率、避免被风控。但注册失败时根本没建成号，再等半小时
+# 纯属浪费——失败往往是出口被挡、邮箱已废这类换一组就能解决的问题。
+# 失败后换出口+换邮箱立刻重试，效率差别很大。
+#
+# 注意这不会削弱风控节流：失败意味着 OpenAI 侧没有新账号产生。
+AUTO_REGISTER_RETRY_INTERVAL = 120.0
+
+# 连续失败多少次后回落到正常间隔。
+#
+# 防的是"出口全废/邮箱池全是坏号"这类系统性故障：那种情况下快速重试
+# 只会以 2 分钟一次的频率持续烧号，不如慢下来等人介入。
+AUTO_REGISTER_MAX_FAST_RETRIES = 3
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'AUTO_REGISTER_ENABLED': 'bool',
     'AUTO_REGISTER_INTERVAL': 'float',
     'AUTO_REGISTER_POLL_INTERVAL': 'float',
     'AUTO_REGISTER_2FA_TIMEOUT': 'float',
+    'AUTO_REGISTER_RETRY_INTERVAL': 'float',
+    'AUTO_REGISTER_MAX_FAST_RETRIES': 'int',
 })

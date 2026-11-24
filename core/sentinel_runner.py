@@ -58,6 +58,8 @@ _FLOW_PAGE_URL = {
     "email_otp_validate": "https://auth.openai.com/email-verification",
     "authorize_continue": "https://auth.openai.com/email-verification",
     "oauth_create_account": "https://auth.openai.com/about-you",
+    "password_reset": "https://auth.openai.com/reset-password/new-password",
+    "password_verify": "https://auth.openai.com/log-in/password",
 }
 
 # Node 子进程超时（秒）。sdk.js 内部可能要做 PoW，留充裕一点

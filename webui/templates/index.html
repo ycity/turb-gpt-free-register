@@ -199,8 +199,8 @@
       width: 100%; max-width: 100%; min-width: 0;
       max-height: 320px; overflow: auto; line-height: 1.5;
     }
-    #logPanel, #retryLogPanel, #liveLogPanel, #totpLogPanel, #emailChangeLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
-    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden), #totpLogPanel:not(.hidden), #emailChangeLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+    #logPanel, #retryLogPanel, #liveLogPanel, #totpLogPanel, #pwdLogPanel, #rebindLogPanel, #emailChangeLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden), #totpLogPanel:not(.hidden), #pwdLogPanel:not(.hidden), #rebindLogPanel:not(.hidden), #rebindModal:not(.hidden), #emailChangeLogPanel:not(.hidden), #qrPanel:not(.hidden) {
       position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
       z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
       max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
@@ -208,9 +208,9 @@
       background: var(--surface); box-shadow: 0 0 0 9999px rgba(15,23,42,.45), 0 24px 70px rgba(15,23,42,.34);
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
-    #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #totpLogPanel h3, #emailChangeLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #totpLogPanel h3 .btn, #emailChangeLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
-    #logPanel .log, #retryLogPanel .log, #liveLogPanel .log, #totpLogPanel .log, #emailChangeLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
+    #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #totpLogPanel h3, #pwdLogPanel h3, #rebindLogPanel h3, #rebindModal h3, #emailChangeLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #totpLogPanel h3 .btn, #pwdLogPanel h3 .btn, #rebindLogPanel h3 .btn, #rebindModal h3 .btn, #emailChangeLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel .log, #retryLogPanel .log, #liveLogPanel .log, #totpLogPanel .log, #pwdLogPanel .log, #rebindLogPanel .log, #emailChangeLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
     .hidden { display: none !important; }
@@ -745,16 +745,16 @@
       text-align: left; vertical-align: middle;
     }
     .accounts-table-v2 .col-id { width: 72px; }
-    .accounts-table-v2 .col-email { width: 330px; }
-    .accounts-table-v2 .col-proxy { width: 110px; }
+    .accounts-table-v2 .col-email { width: 280px; }
+    .accounts-table-v2 .col-proxy { width: 120px; }
     .accounts-table-v2 .col-token { width: 100px; }
-    .accounts-table-v2 .col-password { width: 120px; }
     .accounts-table-v2 .col-plan { width: 220px; }
-    .accounts-table-v2 .col-small { width: 170px; }
-    .accounts-table-v2 .col-status { width: 100px; }
+    .accounts-table-v2 .col-small { width: 330px; }
+    .accounts-table-v2 .col-status { width: 110px; }
     .accounts-table-v2 .col-agent { width: 140px; }
-    .accounts-table-v2 .col-time { width: 170px; }
-    .accounts-table-v2 .col-actions { width: 148px; }
+    .accounts-table-v2 .col-time { width: 200px; }
+    .accounts-table-v2 .col-card { width: 120px; }
+    .accounts-table-v2 .col-actions { width: 185px; }
     .accounts-table-v2 input[type="checkbox"] {
       width: 16px !important; height: 16px !important;
       min-width: 16px !important; min-height: 16px !important;
@@ -783,7 +783,7 @@
     .accounts-table-v2 tbody td:first-child { padding-left: 16px; }
     .accounts-table-v2 tbody td:last-child { padding-right: 16px; }
     .accounts-table-v2 .col-email,
-    .accounts-table-v2 .col-password,
+    .accounts-table-v2 .col-small,
     .accounts-table-v2 .col-plan,
     .accounts-table-v2 .col-agent,
     .accounts-table-v2 .col-actions {
@@ -906,14 +906,52 @@
       font-size: 13px; font-weight: 900; line-height: 1; letter-spacing: .08em;
       white-space: nowrap;
     }
+    /* Codex 状态做成带底色的徽章：原来只有纯文字 + 颜色，
+       「已通过」#377DFF 和「已跳过」#79bbff 都是蓝色，扫一眼分不开。
+       现在靠底色 + 边框 + 色相区分，不再依赖深浅差异。 */
     .accounts-table-v2 .acc-v2-codex {
-      font-size: 13px; font-weight: 500;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 56px; padding: 3px 9px; border-radius: 999px;
+      font-size: 12px; font-weight: 700; line-height: 1.5;
+      border: 1px solid transparent; white-space: nowrap;
     }
-    .accounts-table-v2 .acc-v2-codex.is-ok { color: #377DFF; }
-    .accounts-table-v2 .acc-v2-codex.is-skip { color: #79bbff; }
-    .accounts-table-v2 .acc-v2-codex.is-fail { color: #f56c6c; }
-    .accounts-table-v2 .acc-v2-codex.is-run { color: #e6a23c; }
-    .accounts-table-v2 .acc-v2-codex.is-mute { color: #c0c4cc; }
+    /* 已通过：绿色——和「跳过/失败」彻底拉开，一眼看出这个号能用 */
+    .accounts-table-v2 .acc-v2-codex.is-ok {
+      color: #15803d; background: #f0fdf4; border-color: #bbf7d0;
+    }
+    /* 已跳过：灰色——它是「没做」不是「做成了」，不该用蓝色暗示成功 */
+    .accounts-table-v2 .acc-v2-codex.is-skip {
+      color: #64748b; background: #f8fafc; border-color: #e2e8f0;
+    }
+    .accounts-table-v2 .acc-v2-codex.is-fail {
+      color: #b91c1c; background: #fef2f2; border-color: #fecaca;
+    }
+    .accounts-table-v2 .acc-v2-codex.is-run {
+      color: #b45309; background: #fffbeb; border-color: #fde68a;
+    }
+    .accounts-table-v2 .acc-v2-codex.is-mute {
+      color: #94a3b8; background: #f8fafc; border-color: #e8ecf1;
+    }
+    /* 建号时间和下次账单合成一格两行。标签固定宽度，时间才能左对齐成一列 */
+    .accounts-table-v2 .acc-v2-time-line {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; line-height: 1.7; white-space: nowrap;
+    }
+    .accounts-table-v2 .acc-v2-time-k {
+      flex: 0 0 auto; width: 30px;
+      color: #a8b0bd; font-size: 11px;
+    }
+    .accounts-table-v2 .acc-v2-time-v {
+      color: #606266; font-variant-numeric: tabular-nums;
+    }
+    /* 快到期/已过期只给时间上色，不做成 pill：这里是两行密排，
+       加了底色反而让整格显得杂乱 */
+    .accounts-table-v2 .acc-v2-time-line.is-soon .acc-v2-time-v {
+      color: #b45309; font-weight: 700;
+    }
+    .accounts-table-v2 .acc-v2-time-line.is-expired .acc-v2-time-v {
+      color: #b91c1c; font-weight: 700;
+    }
     .accounts-table-v2 .agent-token-cell {
       display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
     }
@@ -1607,7 +1645,8 @@
     /* ---- 邮箱池导入弹窗 ---- */
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
     #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden),
-    #mailboxModal:not(.hidden), #manualPayModal:not(.hidden), #cardEditModal:not(.hidden) {
+    #mailboxModal:not(.hidden), #manualPayModal:not(.hidden), #cardEditModal:not(.hidden),
+    #teamMembersModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -2557,8 +2596,10 @@
             </span>
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
-          <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
+          <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已订阅付费套餐的账号（Team/Plus/Pro/Go/Business）">已订阅</button>
+          <button type="button" class="acc-v2-toggle" id="showUnsubscribedAccountsOnlyV2" aria-pressed="false" title="只查询/显示未归档且未订阅任何付费套餐的账号；尚未查过套餐的账号不包含">未订阅</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
+          <button type="button" class="acc-v2-toggle" id="hideMultiSeatAccountsV2" aria-pressed="false" title="隐藏已确定需要 2 席的账号（订阅要多花一倍钱）；尚未探测席位的账号仍会显示，它们约有一半是单席位">过滤2席位</button>
           <label class="acc-v2-inline" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">优惠类型
             <select id="promoTypeFilterV2"><option value="">全部</option><option value="plus">Plus</option><option value="pro">Pro</option><option value="go">Go</option><option value="team">Team</option><option value="business">Business</option></select>
           </label>
@@ -2616,6 +2657,9 @@
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">批量</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSetupSelectedTotpV2" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">批量开2FA</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnBackfillSelectedPasswordsV2" disabled title="给选中无密码的 outlook/hotmail 账号批量补设 ChatGPT 登录密码（忘记密码邮件流）">批量补密码</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRebindSelectedCardsV2" disabled title="给选中已订阅账号批量换绑扣款卡（加黑名单牺牲卡设默认并删旧卡）">批量换绑卡</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRotateSelectedTotpV2" onclick="rotateTotpBulk()" title="给选中已开 2FA 的账号批量更换密钥：重新登录生成全新密钥并激活，旧密钥替换前自动备份">批量换密钥</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnChangeSelectedEmailsV2" disabled title="为选中的账号从指定邮箱来源领取新邮箱并换绑">批量换邮箱</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
@@ -2640,8 +2684,9 @@
           <colgroup>
             <col class="col-check"><col class="col-id"><col class="col-email">
             <col class="col-proxy">
-            <col class="col-token"><col class="col-password"><col class="col-plan"><col class="col-small">
-            <col class="col-status"><col class="col-time"><col class="col-actions">
+            <col class="col-token"><col class="col-plan"><col class="col-small">
+            <col class="col-status"><col class="col-time"><col class="col-card">
+            <col class="col-actions">
           </colgroup>
           <thead>
             <tr>
@@ -2650,11 +2695,11 @@
               <th class="col-email">邮箱</th>
               <th class="col-proxy" title="注册该账号时使用的代理在代理池中的名称">注册代理</th>
               <th class="col-token">Token</th>
-              <th class="col-password">密码</th>
               <th class="col-plan">套餐</th>
-              <th class="col-small">2FA</th>
+              <th class="col-small" title="密码与 2FA：有「复制密钥」「看验证码」就说明 2FA 已启用">密码 / 2FA</th>
               <th class="col-status">Codex</th>
-              <th class="col-time">创建时间</th>
+              <th class="col-time" title="建号时间和下次账单（续费扣款）时间，均为新加坡时间 UTC+8">时间</th>
+              <th class="col-card" title="开通订阅时使用的银行卡：VCC-后四位（VCC 托管卡）或卡池备注名（自有卡）">银行卡</th>
               <th class="col-actions">操作</th>
             </tr>
           </thead>
@@ -2680,6 +2725,32 @@
         <button class="btn" id="btnCloseTotpLog" style="float:right;min-height:28px;">关闭</button>
       </h3>
       <div class="log" id="totpLogContent">加载中…</div>
+    </div>
+    <div class="body hidden" id="pwdLogPanel">
+      <h3>补密码日志：<span id="pwdLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+        <button class="btn" id="btnClosePwdLog" style="float:right;min-height:28px;">关闭</button>
+      </h3>
+      <div class="log" id="pwdLogContent">加载中…</div>
+    </div>
+    <div class="body hidden" id="rebindLogPanel">
+      <h3>换绑日志：<span id="rebindLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+        <button class="btn" id="btnCloseRebindLog" style="float:right;min-height:28px;">关闭</button>
+      </h3>
+      <div class="log" id="rebindLogContent">加载中…</div>
+    </div>
+    <div class="body hidden" id="rebindModal" style="max-width:460px;">
+      <h3>换绑支付卡：<span id="rebindModalEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span></h3>
+      <div style="margin:10px 0;">
+        <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:4px;">目标卡（默认黑名单牺牲卡）</label>
+        <select id="rebindCardSelect" style="width:100%;min-height:32px;"></select>
+      </div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:12px;" id="rebindModalHint">
+        流程：登录管理后台 → 加新卡（自动过 hCaptcha）→ 设默认 → 删旧卡。全程约 1-3 分钟。
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" class="btn" id="btnRebindCancel">取消</button>
+        <button type="button" class="btn btn--primary" id="btnRebindStart">开始换绑</button>
+      </div>
     </div>
     <div class="body hidden" id="emailChangeLogPanel">
       <h3>换绑日志：<span id="emailChangeLogAccount" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
@@ -2911,6 +2982,7 @@
             <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="imap" role="option">通用 IMAP 邮箱池</button>
+            <button type="button" class="outlook-v2-select-item" data-value="akmoz" role="option">akmoz 闪取邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="cloudflare_domain" role="option">域名邮箱池</button>
           </div>
           <input type="hidden" id="poolSourceV2" value="all">
@@ -3017,6 +3089,7 @@
             <button type="button" class="outlook-v2-select-item is-active" data-value="outlook" role="option">Outlook 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 取码邮箱</button>
             <button type="button" class="outlook-v2-select-item" data-value="imap" role="option">通用 IMAP 取码邮箱</button>
+            <button type="button" class="outlook-v2-select-item" data-value="akmoz" role="option">akmoz 闪取邮箱</button>
           </div>
           <input type="hidden" id="importSourceV2" value="outlook">
         </div>
@@ -3364,17 +3437,67 @@
       </div>
 
       <div style="font-size:13px;font-weight:600;color:#475569;margin:14px 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
-        ⑤ 支付成功后登记
+        ⑤ 支付成功后点这里
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px;line-height:1.6;">
+        在你自己的浏览器里付款成功后点下面的按钮，后续动作和自动支付完全一致：
+        登记优惠码、记录支付时间、清掉用过的长链，并在 30 秒后自动查套餐、分配订阅编号。
+        <b>付款没成功就别点</b>，否则会记下一个并不存在的支付。
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
         <input type="text" id="manualPayPromo" placeholder="本次用掉的优惠码（可留空）"
                style="flex:1;padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px;">
-        <button type="button" class="jobs-tb-btn" id="btnManualPayDone">登记并查套餐</button>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnManualPayDone">我已完成支付</button>
       </div>
       <div id="manualPayDoneTip" class="muted" style="margin-top:6px;font-size:12px;"></div>
     </div>
     <div class="outlook-import-foot">
       <button type="button" class="jobs-tb-btn" id="btnManualPayClose2">关闭</button>
+    </div>
+  </div>
+</div>
+<div id="teamMembersModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="teamMembersTitle">
+  <div class="outlook-import-dialog" role="document" style="width:min(760px,100%);">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="teamMembersTitle">团队成员</h3>
+        <p class="muted" style="margin:4px 0 0;font-size:12px;">
+          席位用完后再发邀请，对方点了也进不来。邀请前先看下面的占用情况。
+        </p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnTeamMembersClose" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div id="teamMembersWho" style="margin:0 0 12px;padding:8px 10px;border-radius:6px;background:#f6f8fa;border:1px solid #e5e9ef;font-size:13px;"></div>
+      <div id="teamSeatBox" style="margin:0 0 14px;padding:10px 12px;border-radius:6px;font-size:13px;">读取中…</div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;">现有成员</div>
+      <div id="teamMemberList" style="margin-bottom:14px;"></div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;">待处理邀请</div>
+      <div id="teamInviteList" style="margin-bottom:14px;"></div>
+
+      <div style="font-size:13px;font-weight:600;color:#475569;margin:0 0 6px;border-top:1px solid #ebeef5;padding-top:12px;">
+        邀请新成员
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <input type="text" id="teamInviteEmail" placeholder="邮箱，多个用逗号或空格分隔"
+               style="flex:1;min-width:260px;padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px;">
+        <select id="teamInviteSeat" style="padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px;">
+          <option value="default">ChatGPT 席位</option>
+          <option value="usage_based">Codex 席位</option>
+        </select>
+        <select id="teamInviteRole" style="padding:6px 8px;border:1px solid var(--line,#ddd);border-radius:6px;font-size:13px;">
+          <option value="standard-user">普通成员</option>
+          <option value="account-admin">管理员</option>
+        </select>
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnTeamInvite">发送邀请</button>
+      </div>
+      <div id="teamInviteTip" class="muted" style="margin-top:6px;font-size:12px;"></div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnTeamMembersRefresh">刷新</button>
+      <button type="button" class="jobs-tb-btn" id="btnTeamMembersClose2">关闭</button>
     </div>
   </div>
 </div>
@@ -3495,8 +3618,12 @@ const TOTP_CODE_CACHE = new Map();
 let OUTLOOK_TOTAL = 0;
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
+let SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 let SHOW_FREE_ACCOUNTS_ONLY = false;
+// 席位筛选独立于套餐筛选：它是另一个维度，要能和「未订阅」叠加使用
+//（"未订阅且不是 2 席"才是真正可订阅的号）。
+let HIDE_MULTI_SEAT_ACCOUNTS = false;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -3660,14 +3787,26 @@ function pillV2(status) {
   return `<span class="jobs-v2-pill ${cls}">${esc(map[s]||s||'-')}</span>`;
 }
 function formatDateTime(v) {
+  // 统一按新加坡时间（UTC+8）展示，和账号表那边口径一致。
+  //
+  // 这里原本用 d.getFullYear()/getHours() 取值，那是**浏览器本地**时区。
+  // 后端 created_at/started_at 这类是容器 datetime.now() 产出的裸 UTC
+  // （形如 2026-11-17T04:17:20，没有 Z），直接丢给 new Date() 会被当成
+  // 本地时间解析——于是注册任务那几列显示的其实是 UTC，却按本地时间标注，
+  // 整整差 8 小时。
+  //
+  // 复用 _toSgt：没带时区后缀的按 UTC 解析，带了就尊重它。
   if (v == null || v === '') return '-';
-  const d = v instanceof Date ? v : new Date(v);
-  if (Number.isNaN(d.getTime())) {
+  const d = (typeof _toSgt === 'function') ? _toSgt(v)
+    : (v instanceof Date ? v : new Date(v));
+  if (!d || Number.isNaN(d.getTime())) {
     const s = String(v).replace('T', ' ').replace(/\.\d+.*$/, '').replace(/Z$/, '').replace(/[+-]\d{2}:\d{2}$/, '');
     return s || '-';
   }
+  // 取 UTC 值再加 8 小时，不依赖浏览器所在时区
+  const t = new Date(d.getTime() + 8 * 3600 * 1000);
   const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth()+1)}-${p(t.getUTCDate())} ${p(t.getUTCHours())}:${p(t.getUTCMinutes())}:${p(t.getUTCSeconds())}`;
 }
 function formatTraffic(t) {
   if (!t || !t.available) return '-';
@@ -4021,6 +4160,9 @@ function updateModalScrollLock() {
     || !$('#retryLogPanel').classList.contains('hidden')
     || !$('#liveLogPanel').classList.contains('hidden')
     || !$('#totpLogPanel').classList.contains('hidden')
+    || !$('#pwdLogPanel').classList.contains('hidden')
+    || !$('#rebindLogPanel').classList.contains('hidden')
+    || !$('#rebindModal').classList.contains('hidden')
     || !$('#emailChangeLogPanel').classList.contains('hidden')
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
@@ -4030,7 +4172,8 @@ function updateModalScrollLock() {
     || !$('#proxyPoolEditModal').classList.contains('hidden')
     || !$('#proxyPoolImportModal').classList.contains('hidden')
     || !$('#manualPayModal').classList.contains('hidden')
-    || !$('#cardEditModal').classList.contains('hidden');
+    || !$('#cardEditModal').classList.contains('hidden')
+    || !$('#teamMembersModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -4244,12 +4387,19 @@ function getAccountsTotpFilter() {
   const el = document.getElementById('totpStatusFilterV2');
   return (el ? el.value : '').trim();
 }
+function getAccountsSeatFilter() {
+  // not_multi：滤掉确定要 2 席的号；没探过席位的保留
+  //（实测约 55% 是单席位，一并滤掉会误伤大半可用号）
+  return HIDE_MULTI_SEAT_ACCOUNTS ? 'not_multi' : '';
+}
 function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
 }
 function getAccountsPlanFilter() {
-  if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
+  // 后端认 subscribed/unsubscribed；老值 plus 仍兼容，但新代码一律用 subscribed
+  if (SHOW_PLUS_ACCOUNTS_ONLY) return 'subscribed';
+  if (SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY) return 'unsubscribed';
   if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
     const type = (document.getElementById('promoTypeFilterV2')?.value || '').trim().toLowerCase();
     const discount = (document.getElementById('promoDiscountFilterV2')?.value || '').trim();
@@ -4272,7 +4422,7 @@ async function loadAccounts() {
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`, {signal: controller.signal});
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&seat=${encodeURIComponent(getAccountsSeatFilter())}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`, {signal: controller.signal});
     // 有更新请求时丢弃旧快照，finally 合并读取最新列表。
     if (accountsReloadPending) return;
     ACCOUNTS = res.items || [];
@@ -4303,7 +4453,7 @@ async function pollAccountPlanStatuses() {
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&seat=${encodeURIComponent(getAccountsSeatFilter())}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -4322,9 +4472,15 @@ async function pollAccountPlanStatuses() {
         const isExtracting = ['queued', 'running'].includes(item.extract_link_status);
         const wasAgenting = ['queued', 'running'].includes(account?.codex_agent_status);
         const isAgenting = ['queued', 'running'].includes(item.codex_agent_status);
+        const wasBackfillingPwd = ['queued', 'running'].includes(account?.password_backfill_status);
+        const isBackfillingPwd = ['queued', 'running'].includes(item.password_backfill_status);
+        const wasRebinding = ['queued', 'running'].includes(account?.card_rebind_status);
+        const isRebinding = ['queued', 'running'].includes(item.card_rebind_status);
         if (wasChecking && !isChecking) needsFullReload = true;
         if (wasExtracting && !isExtracting) needsFullReload = true;
         if (wasAgenting && !isAgenting) needsFullReload = true;
+        if (wasBackfillingPwd && !isBackfillingPwd) needsFullReload = true;
+        if (wasRebinding && !isRebinding) needsFullReload = true;
         Object.assign(account, item);
       });
       planStatusRevision = snapshot.revision || '';
@@ -4364,27 +4520,65 @@ function _codexCellV2(r) {
   if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="acc-v2-muted">-</span>`;
 }
+function _singleSeatTag(r) {
+  // 2FA 完成后会自动探测一次；没探测过就给个按钮补测
+  const checked = r.single_seat_checked_at;
+  const sup = r.single_seat_supported;
+  if (sup === true) {
+    return `<span class="pill status-success" title="服务端允许该账号只买 1 席，提链时会自动用 1 席（省一半订阅费）${checked ? '\n探测时间: ' + esc(checked) : ''}">1席</span>`;
+  }
+  if (sup === false) {
+    const mn = r.single_seat_minimum;
+    return `<span class="acc-v2-muted" title="该账号最少 ${esc(mn || 2)} 席${checked ? '\n探测时间: ' + esc(checked) : ''}">${esc(mn || 2)}席</span>`;
+  }
+  const err = r.single_seat_error || '';
+  const t = err ? `上次探测失败：${esc(err)}` : '检测该账号能否只买 1 席 Team（不支付、不消耗优惠码）';
+  return `<button type="button" class="acc-v2-twofa-btn" data-probe-single-seat="${esc(r.id)}" title="${t}">测席位</button>`;
+}
 function _totpCellV2(r) {
   const enabled = !!r.totp_enabled;
   const status = r.totp_setup_status || '';
   const titleText = r.totp_setup_message || r.totp_setup_error || '';
   const titleAttr = titleText ? ` title="${esc(titleText)}"` : '';
+
+  // 密码和 2FA 合成一列。密码按需从后端取，不渲染在 DOM 里。
+  const pwdStatus = r.password_backfill_status || '';
+  const pwdTitleText = r.password_backfill_message || r.password_backfill_error || '';
+  const pwdTitleAttr = pwdTitleText ? ` title="${esc(pwdTitleText)}"` : '';
+  const pwdBtn = r.password
+    ? `<button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="password" data-account-id="${esc(r.id)}" title="复制该账号的注册密码">复制密码</button>`
+    : (['queued', 'running'].includes(pwdStatus)
+        ? `<span class="pill status-running"${pwdTitleAttr}>${pwdStatus === 'queued' ? '补密排队' : '补密中'}</span>`
+        : ((r.email_source || 'outlook') === 'outlook'
+            ? `<button type="button" class="acc-v2-twofa-btn" data-account-password-backfill="${esc(r.id)}"${pwdTitleAttr || ' title="通过忘记密码邮件流给该账号补设 ChatGPT 登录密码"'}>补密码</button>`
+            : '<span class="acc-v2-muted" title="该账号没有记录密码">无密码</span>'));
+
+  // 席位徽章和 2FA 没关系：席位探测只用 access_token 直连 API。
+  // 以前只在 enabled 分支里渲染，于是没开 2FA 的号即便已经探出 1 席，
+  // 界面也只显示「复制密码 / 开启2FA」，席位看不到（2026-11-17 实测 #103）。
+  // 三个分支都带上它。
+  const seat = _singleSeatTag(r);
+
   if (enabled) {
     const cached = TOTP_CODE_CACHE.get(Number(r.id));
     const codeHtml = cached?.code
       ? `<span class="acc-v2-twofa-code" title="${esc(cached.at || '')}">${esc(cached.code)}</span><button type="button" class="acc-v2-twofa-btn" data-account-show-totp-code="${esc(r.id)}" title="刷新当前验证码">刷新</button><button type="button" class="acc-v2-twofa-btn" data-account-copy-shown-totp-code="${esc(r.id)}" title="复制当前显示的验证码">复制验证码</button>`
       : `<button type="button" class="acc-v2-twofa-btn" data-account-show-totp-code="${esc(r.id)}" title="显示当前验证码">看验证码</button>`;
-    return `<div class="acc-v2-twofa-actions"><span class="acc-v2-twofa-badge"${titleAttr}>已启用</span><button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="totp_secret" data-account-id="${esc(r.id)}" title="复制当前 2FA 密钥">复制密钥</button>${codeHtml}</div>`;
+    // 不再显示「已启用」徽章：有「复制密钥」和「看验证码」就说明已启用，
+    // 徽章纯属占地方。2FA 的提示信息挪到密钥按钮上，不丢失。
+    const keyTitle = titleText
+      ? `复制当前 2FA 密钥\n${titleText}` : '复制当前 2FA 密钥';
+    return `<div class="acc-v2-twofa-actions">${pwdBtn}<button type="button" class="acc-v2-twofa-btn" data-account-copy-secret="totp_secret" data-account-id="${esc(r.id)}" title="${esc(keyTitle)}">复制密钥</button>${codeHtml}${seat}</div>`;
   }
   if (['queued', 'running'].includes(status)) {
     const label = status === 'queued' ? '排队中' : '开启中';
-    return `<div class="agent-token-cell"><span class="pill status-running"${titleAttr}>${label}</span></div>`;
+    return `<div class="acc-v2-twofa-actions">${pwdBtn}<span class="pill status-running"${titleAttr}>${label}</span>${seat}</div>`;
   }
   const btnTitle = titleText ? ` title="${esc(titleText)}"` : ` title="为该账号开启 2FA，并把 TOTP 密钥写回账号信息"`;
   const btn = r.has_access_token
     ? `<button type="button" class="acc-v2-twofa-btn" data-account-totp-setup="${esc(r.id)}"${btnTitle}>开启2FA</button>`
     : `<span class="acc-v2-muted">无Token</span>`;
-  return `<div class="agent-token-cell">${btn}</div>`;
+  return `<div class="acc-v2-twofa-actions">${pwdBtn}${btn}${seat}</div>`;
 }
 function _codexAgentCell(r) {
   const s = r.codex_agent_status || '';
@@ -4405,26 +4599,119 @@ function _codexAgentCell(r) {
   if (s === 'failed') return `<div class="agent-token-cell"><span class="pill status-failed" title="${title}">失败</span>${gen}</div>`;
   return gen ? `<div class="agent-token-cell">${gen}</div>` : '<span class="muted">-</span>';
 }
+// 后端存的时间分两类：
+//   1. 带时区的（renews_at 等，形如 2026-12-13T09:25:43+00:00）
+//   2. 不带时区的（created_at 等，由容器 datetime.now() 产生，容器跑在 UTC）
+// 第 2 类如果直接丢给 new Date()，浏览器会按**本地**时区解析，差出好几个小时。
+// 统一按新加坡时间（UTC+8）展示。
+function _toSgt(v) {
+  if (!v) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  // 没有时区后缀的当成 UTC
+  const hasTz = /(Z|[+-]\d{2}:?\d{2})$/i.test(s);
+  if (!hasTz) s = s.replace(' ', 'T') + 'Z';
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+function _fmtSgt(v, dateOnly = false) {
+  const d = _toSgt(v);
+  if (!d) return v ? String(v) : '';
+  // 用 UTC 取值再加 8 小时，避免依赖浏览器所在时区
+  const t = new Date(d.getTime() + 8 * 3600 * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  const day = `${t.getUTCFullYear()}-${pad(t.getUTCMonth() + 1)}-${pad(t.getUTCDate())}`;
+  return dateOnly ? day
+    : `${day} ${pad(t.getUTCHours())}:${pad(t.getUTCMinutes())}`;
+}
 function _fmtPlanTime(v, dateOnly = false) {
   if (!v) return '';
-  try {
-    const d = new Date(v);
-    if (Number.isNaN(d.getTime())) {
-      const raw = String(v).replace('T', ' ').replace(/(\+00:00|Z)$/, '');
-      return dateOnly ? raw.slice(0, 10) : raw;
-    }
-    const pad = n => String(n).padStart(2, '0');
-    const day = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
-    return dateOnly ? day : `${day} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  } catch(e) {
-    return String(v);
-  }
+  return _fmtSgt(v, dateOnly);
 }
 function _billingLabel(v) {
   const x = (v || '').toString().toLowerCase();
   if (x === 'monthly') return '月付';
   if (x === 'yearly' || x === 'annual' || x === 'annually') return '年付';
   return v || '';
+}
+function _renewAtValue(r) {
+  // 下次账单（续费扣款）时间。来自 accounts/check 的 renews_at，
+  // 查套餐时就已经拿到了，不用额外调接口。
+  // 注意 renews_at 比 expires_at 早几小时：前者是扣款时刻，后者是权益到期。
+  const v = r.plan_renews_at || r.renews_at;
+  if (!v) return null;
+  const txt = _fmtPlanTime(v, false);
+  if (!txt) return null;
+
+  const d = new Date(v);
+  let tip = `下次扣款: ${v}`;
+  const exp = r.plan_expires_at || r.expires_at;
+  if (exp) tip += `\n权益到期: ${exp}`;
+  const stamp = r.plan_checked_at || r.plan_last_success_at;
+  if (stamp) tip += `\n查询时间: ${stamp}`;
+
+  let cls = '';
+  let suffix = '';
+  if (!Number.isNaN(d.getTime())) {
+    const days = Math.ceil((d.getTime() - Date.now()) / 86400000);
+    if (days < 0) {
+      cls = 'is-expired';
+      suffix = '（已过期）';
+    } else {
+      tip += `\n还有 ${days} 天`;
+      // 三天内要续费，标出来免得漏掉
+      if (days <= 3) {
+        cls = 'is-soon';
+        suffix = `（${days}天）`;
+      }
+    }
+  }
+  return { txt: txt + suffix, tip, cls };
+}
+function _payCardCellV2(r) {
+  // 开通订阅用的银行卡。只有付过款的号才有值：
+  //   VCC-1771   VCC 托管卡（VCC- + 卡号后四位）
+  //   自定义名    自有卡池里填的备注名
+  // 不展示卡号明文，也不展示卡 ID——对账只需要认出是哪张。
+  // 换绑状态/按钮也挂在这一列：换绑=把订阅扣款卡换成黑名单牺牲卡。
+  const rebindStatus = String(r.card_rebind_status || '');
+  const rebindTip = r.card_rebind_message || r.card_rebind_error || '';
+  const card = String(r.pay_card_label || '').trim();
+  const paid = !!(r.paid_at || r.subscription_no || card);
+  const rebindTag = !paid ? '' :
+    (['queued', 'running'].includes(rebindStatus)
+      ? `<span class="pill status-running" title="${esc(rebindTip)}">${rebindStatus === 'queued' ? '换绑排队' : '换绑中'}</span>`
+      : `<button type="button" class="acc-v2-twofa-btn" data-account-card-rebind="${esc(r.id)}"${rebindTip ? ` title="${esc(rebindTip)}"` : ' title="把这个订阅的扣款卡换成黑名单牺牲卡（加新卡设默认并删旧卡）"'}>换绑卡</button>`);
+  if (!card) {
+    // 付过款但没记卡的，是这套机制上线前的老账号，标注清楚免得以为丢了
+    return paid
+      ? `${rebindTag}<div><span class="acc-v2-muted" title="该订阅在卡片记录功能上线前开通，没有留下卡信息">-</span></div>`
+      : `<div><span class="acc-v2-muted" title="尚未开通订阅">-</span></div>`;
+  }
+  const tip = ['订阅由该卡支付：' + card,
+               r.paid_at ? '付款时间: ' + _fmtSgt(r.paid_at) : '',
+               r.subscription_no ? '订阅编号: ' + r.subscription_no : ''
+              ].filter(Boolean).join('\n');
+  return `${rebindTag}<div><span class="pill status-success" title="${esc(tip)}">${esc(card)}</span></div>`;
+}
+function _timeCellV2(r) {
+  // 建号时间和下次账单合成一格两行：两个时间各占一列太占地方，
+  // 而且它们总是一起看（这号什么时候建的、什么时候该续费）。
+  // 付款卡片另有独立的「银行卡」列，不挤在这里。
+  const created = _fmtSgt(r.created_at);
+  const renew = _renewAtValue(r);
+  const lines = [];
+  lines.push(
+    `<div class="acc-v2-time-line" title="${esc(r.created_at || '-')} (UTC)">` +
+    `<span class="acc-v2-time-k">建号</span>` +
+    `<span class="acc-v2-time-v">${esc(created || '-')}</span></div>`);
+  lines.push(renew
+    ? `<div class="acc-v2-time-line ${renew.cls}" title="${esc(renew.tip)}">` +
+      `<span class="acc-v2-time-k">账单</span>` +
+      `<span class="acc-v2-time-v">${esc(renew.txt)}</span></div>`
+    : `<div class="acc-v2-time-line"><span class="acc-v2-time-k">账单</span>` +
+      `<span class="acc-v2-time-v acc-v2-muted">-</span></div>`);
+  return lines.join('');
 }
 function _discountLabel(r) {
   const amount = r.discount_amount;
@@ -4614,7 +4901,12 @@ function _planAction(r) {
     const label = automatic ? (queued ? '自动查询排队中…' : '自动查询中…') : (queued ? '查询排队中…' : '查询中…');
     return `<button data-plan-check="${esc(r.id)}" disabled title="套餐查询正在执行，完成后可再次查询">${label}</button>`;
   }
-  return `<button data-plan-check="${esc(r.id)}" title="查询当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>`;
+  // Team 账号多给一个成员管理入口：邀请前要先看清席位占了几个
+  const isTeam = String(r.current_plan_type || r.plan_type || '').toLowerCase() === 'team';
+  const team = isTeam
+    ? `<button data-team-members="${esc(r.id)}" title="查看团队成员、席位占用，并邀请新成员">成员</button>`
+    : '';
+  return `<button data-plan-check="${esc(r.id)}" title="查询当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>${team}`;
 }
 function _fmtExtractExpire(v) {
   if (!v) return '';
@@ -4836,7 +5128,8 @@ async function loadPromosList() {
         <td><span class="pill ${stCls}">${stTxt}</span></td>
         <td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
             title="${esc(item.account_email || '')}">${esc(item.account_email || (item.account_id ? '#' + item.account_id : '-'))}</td>
-        <td style="font-size:12px; color:#64748b;">${esc((item.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+        <td style="font-size:12px; color:#64748b;"
+            title="${esc(item.created_at || '-')}">${esc(formatDateTime(item.created_at))}</td>
         <td style="font-size:12px; color:#ef4444; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
             title="${esc(item.last_error || '')}">${esc(item.last_error || '-')}</td>
       </tr>`;
@@ -5010,8 +5303,62 @@ function _autoPayBindLive() {
   if (!img || img._liveBound) return;
   img._liveBound = true;
 
+  // 拖拽状态：人机验证里的"把图块拖到空位"只能靠 down/move/up 三段，
+  // 单发 click 过不了。节流 move 是因为后端每条指令都要过一次队列，
+  // 原生 mousemove 一秒上百条会把队列堵死、画面反而更卡。
+  let dragging = false;
+  let movedWhileDown = false;
+  let lastMoveAt = 0;
+  const MOVE_INTERVAL_MS = 40;
+  const DRAG_SLOP_PX = 4;       // 手抖几像素不算拖拽
+  let downAt = null;
+
+  img.addEventListener('mousedown', (ev) => {
+    if (!_autoPayLive || ev.button !== 0) return;
+    const p = _autoPayCoords(ev);
+    if (!p) return;
+    ev.preventDefault();        // 不让浏览器自己起图片拖拽
+    dragging = true;
+    movedWhileDown = false;
+    lastMoveAt = 0;
+    downAt = p;
+    _autoPaySend('down', p);
+  });
+
+  img.addEventListener('mousemove', (ev) => {
+    if (!_autoPayLive || !dragging) return;
+    const p = _autoPayCoords(ev);
+    if (!p) return;
+    if (!movedWhileDown && downAt &&
+        (Math.abs(p.x - downAt.x) > DRAG_SLOP_PX ||
+         Math.abs(p.y - downAt.y) > DRAG_SLOP_PX)) {
+      movedWhileDown = true;
+    }
+    const now = Date.now();
+    if (now - lastMoveAt < MOVE_INTERVAL_MS) return;
+    lastMoveAt = now;
+    _autoPaySend('move', p);
+  });
+
+  // 松手可能发生在图片外（拖出边界），所以监听 document 而不是 img
+  document.addEventListener('mouseup', (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    if (!_autoPayLive) return;
+    const p = _autoPayCoords(ev);
+    // 拖出图片范围时坐标会越界，夹回视口内，免得落点落在页面外
+    if (p) {
+      p.x = Math.max(0, Math.min(_autoPayViewport.w, p.x));
+      p.y = Math.max(0, Math.min(_autoPayViewport.h, p.y));
+      _autoPaySend('up', p);
+    }
+  });
+
+  // 点击仍然保留：验证码里多数题目是点选，走 click 比 down+up 更稳。
+  // 真正拖动过才跳过它，否则普通点击会被这里吞掉。
   img.addEventListener('click', (ev) => {
     if (!_autoPayLive) return;
+    if (movedWhileDown) { movedWhileDown = false; return; }
     const p = _autoPayCoords(ev);
     if (p) _autoPaySend('click', p);
   });
@@ -5162,8 +5509,11 @@ function _autoPayRenderWho(id) {
   // 本单改过出口就显示实际在用的那个：会话跑起来后配置区会整块隐藏，
   // 信息栏是唯一还能看到"这单走哪个出口"的地方。
   const picked = String(_autoPayUsedProxyName || '').trim();
+  const pickedLabel = picked.startsWith(PAY_1024_PREFIX)
+    ? `1024proxy · ${picked.slice(PAY_1024_PREFIX.length) || _autoPayWantCc()}`
+    : picked;
   const proxy = picked
-    ? `${picked}（本单指定，注册代理为 ${regProxy}）`
+    ? `${pickedLabel}（本单指定，注册代理为 ${regProxy}）`
     : regProxy;
   const plan = String(acc.current_plan_type || acc.plan_type || '').trim();
   box.classList.remove('hidden');
@@ -5239,6 +5589,19 @@ let _autoPayUsedProxyName = '';
 // 支付出口选择。出口对能否过 Stripe 风控有实际影响（同为美国，
 // Aaitr-ATT 付不通而 Aaitr-Frontier 能通），所以要能逐单手动指定。
 // 停用的节点也列出来：enabled 只管注册时随机抽不抽它，不代表支付不能用。
+//
+// 默认用 1024proxy 按结算国家现取：结算货币和出口国家必须同区
+// （EGP 单从美国出口打开会被 Stripe 拒），而代理池里未必常备每个
+// 国家的节点——埃及尤其没有。
+const PAY_1024_PREFIX = '__1024__:';
+function _autoPayWantCc() {
+  const c = String(($('#apCountry2') || {}).value || '').trim().toUpperCase();
+  return c || 'EG';
+}
+function _autoPay1024Option() {
+  const cc = _autoPayWantCc();
+  return `<option value="${PAY_1024_PREFIX}">1024proxy · 跟随结算国家（${esc(cc)}）</option>`;
+}
 async function _autoPayLoadProxies() {
   const sel = $('#autoPayProxySelect');
   if (!sel) return;
@@ -5247,7 +5610,10 @@ async function _autoPayLoadProxies() {
     const s = await r.json();
     _autoPayProxyCache = (s.items || []).filter(p => p.valid);
   } catch (err) {
-    return;  // 出口选择是辅助功能，拉不到就只用注册代理
+    // 出口选择是辅助功能，池子拉不到也要留着 1024proxy 和注册代理两条路
+    sel.innerHTML = _autoPay1024Option()
+      + '<option value="">— 用注册代理 —</option>';
+    return;
   }
   // 按国家分组，方便挑一个和账单地址同国家的
   const byCc = {};
@@ -5263,22 +5629,33 @@ async function _autoPayLoadProxies() {
     }).join('');
     return `<optgroup label="${esc(cc)}（${byCc[cc].length}）">${opts}</optgroup>`;
   }).join('');
-  sel.innerHTML = '<option value="">— 用注册代理 —</option>' + groups;
+  sel.innerHTML = _autoPay1024Option()
+    + '<option value="">— 用注册代理 —</option>' + groups;
+  // 默认选 1024proxy：它一定和结算国家同区，注册代理不一定
+  sel.value = PAY_1024_PREFIX;
+  _autoPayProxyHintSync();
 }
 
 function _autoPayProxyHintSync() {
   const sel = $('#autoPayProxySelect');
   const hint = $('#autoPayProxyHint');
   if (!sel || !hint) return;
-  if (!sel.value) { hint.textContent = '默认走注册时的代理'; return; }
+  // 决定能否付通的是"出口国家 vs 结算国家"：EGP 单从美国出口打开会被
+  // Stripe 拒。账单地址国家是另一回事（卡的归属地），不要混为一谈。
+  const want = _autoPayWantCc();
+  if (sel.value === PAY_1024_PREFIX) {
+    hint.textContent = `现取 ${want} 出口，与结算国家一致（推荐）`;
+    return;
+  }
+  if (!sel.value) {
+    hint.textContent = `走注册代理 —— 它未必在 ${want}，可能被拒`;
+    return;
+  }
   const p = _autoPayProxyCache.find(x => x.name === sel.value) || {};
   const cc = ((p.test || {}).country || '?').toUpperCase();
-  const addr = _autoPayAddrCache.find(
-    a => String(a.id) === $('#autoPayAddrSelect').value);
-  const want = String((addr || {}).country || '').toUpperCase();
-  hint.textContent = (want && cc !== want)
-    ? `出口 ${cc}，账单地址 ${want} —— 国家不一致`
-    : `出口 ${cc}${want ? '，与账单地址一致' : ''}`;
+  hint.textContent = (cc !== want)
+    ? `出口 ${cc}，结算国家 ${want} —— 国家不一致，大概率被拒`
+    : `出口 ${cc}，与结算国家一致`;
 }
 
 // 按"这张卡用过 / 没用过"把地址分两组渲染，用过的排前面。
@@ -5344,6 +5721,13 @@ async function _autoPayCheckFunds() {
       box.innerHTML = '<b>无法支付：</b>' + esc(s.error || '余额不足');
       return false;
     }
+    if (s.skipped) {
+      // 自定义卡查不到余额，别显示成绿色"足够"——那是假信息
+      box.style.cssText += ';background:#f8fafc;border:1px solid #cbd5e1;color:#475569;';
+      box.innerHTML = '自定义卡不由 VCC 托管，无法查询余额，也不会自动充值。' +
+        '请自行确认卡内余额足够支付。';
+      return true;
+    }
     if (s.need_recharge) {
       box.style.cssText += ';background:#fff6e5;border:1px solid #f0c36d;color:#92400e;';
       box.innerHTML = `卡内 <b>${s.card_balance.toFixed(2)}</b> USD 不足（本次约需 ` +
@@ -5386,11 +5770,17 @@ async function _autoPayLoadSetup() {
       sel.innerHTML = '<option value="">（没有可用卡）</option>';
       $('#autoPayCardHint').textContent = '未查询到卡片';
     } else {
-      sel.innerHTML = cards.map(c =>
-        `<option value="${esc(c.card_id)}" data-holder="${esc(c.holder_id || '')}"
+      sel.innerHTML = cards.map(c => {
+        const own = c.source === 'custom' || String(c.card_id || '').startsWith('local:');
+        // 自定义卡的 balance 是人工登记值，标注出来，免得 0.00 被当成没钱
+        const money = own
+          ? (c.label ? esc(c.label) + ' · 自有卡' : '自有卡')
+          : c.balance.toFixed(2) + ' USD';
+        return `<option value="${esc(c.card_id)}" data-holder="${esc(c.holder_id || '')}"
                  ${c.usable ? '' : 'disabled'}>
-           ${esc(c.mask)} — ${c.balance.toFixed(2)} USD — ${esc(c.holder_name)}${c.usable ? '' : '（' + esc(c.status) + '）'}
-         </option>`).join('');
+           ${esc(c.mask)} — ${money} — ${esc(c.holder_name)}${c.usable ? '' : '（' + esc(c.status) + '）'}
+         </option>`;
+      }).join('');
       $('#autoPayCardHint').textContent = `共 ${cards.length} 张，已按余额排序`;
     }
   } catch (err) {
@@ -5425,21 +5815,34 @@ async function _autoPayLoadSetup() {
       // 前两者都可能指向一张余额不足或已冻结的卡（配置是写死的，卡会被花光），
       // 那样弹窗一打开就摆着一张提交不了的卡，还得手动换。
       const sel2 = $('#autoPayCardSelect');
-      const need = Number(s.expected_amount || 0) > 0 && Number(s.usd_rate || 0) > 0
-        ? Number(s.expected_amount) / Number(s.usd_rate) : 0;
+      // 估算需要多少 USD：直接用后端算好的 needed_usd，不在前端重算。
+      // 以前这里是 funding_amount/usd_rate 的 EGP 折算，US 区改成直接配
+      // USD 后那套算法会得出过时的数（35 而不是 18），于是选卡和下面的
+      // 余额预检对不上。老后端没有 needed_usd 时才回退到旧折算。
+      let need = Number(s.needed_usd || 0);
+      if (!need) {
+        const _fund = Number(s.funding_amount || s.expected_amount || 0);
+        need = _fund > 0 && Number(s.usd_rate || 0) > 0
+          ? _fund / Number(s.usd_rate) : 0;
+      }
       const pickable = (cid) => {
         if (!cid) return null;
         const opt = [...sel2.options].find(o => o.value === cid);
         return (opt && !opt.disabled) ? opt : null;
       };
+      // 自定义卡的 balance 是人工填的，不是实时余额，拿它和 need 比没意义
+      // （默认 0 会让这张卡永远选不中）。它的余额由卡主自己保证。
+      const _isCustom = (c) => !!c && (c.source === 'custom' ||
+        String(c.card_id || '').startsWith('local:'));
+      const _affords = (c) => !!c && (_isCustom(c) || Number(c.balance || 0) >= need);
       const affordable = (_autoPayCardCache || []).find(
-        c => c.usable && Number(c.balance || 0) >= need && pickable(c.card_id));
+        c => c.usable && _affords(c) && pickable(c.card_id));
 
       let chosen = '';
       let why = '';
       if (pickable(s.card_id)) {
         const c = (_autoPayCardCache || []).find(x => x.card_id === s.card_id);
-        const enough = !need || Number((c || {}).balance || 0) >= need;
+        const enough = !need || _affords(c);
         if (enough) {
           chosen = s.card_id;
           why = (s.last_card_id && s.last_card_id === s.card_id)
@@ -5541,9 +5944,14 @@ async function openAutoPay(id) {
 
   // 长链能用好几天，且存在账号记录里；能不能复用只取决于这条长链本身，
   // 和"上一单会话还在不在内存里"无关（那个 10 分钟就过期，重启还会全丢）。
+  //
+  // ACCOUNTS 缓存只用来判断"有没有长链"。真正复用哪一条必须以后端为准：
+  // 缓存是打开页面时加载的，期间长链可能已经重新生成（换地区、换优惠码），
+  // 拿旧值去付会打开上一条链——踩过一次：明明换成了 US 链，复用却还是
+  // 旧的 EGP 页面。
   const savedUrl = String(acc.team_checkout_url || '').trim();
   if (savedUrl) {
-    const when = acc.team_checkout_created_at || '未知时间';
+    let when = acc.team_checkout_created_at || '未知时间';
     _autoPaySetStatus('', `该账号已有长链（${esc(when)}），正在检查是否还能用（最多约 30 秒）…`);
     let probe = null;
     try {
@@ -5552,15 +5960,19 @@ async function openAutoPay(id) {
     } catch (e) { /* 探不到就按不可用处理 */ }
 
     if (probe && probe.ok && probe.usable) {
+      // probe 返回的是后端当前记录的那条，比缓存可信
+      const useUrl = String(probe.url || '').trim() || savedUrl;
+      if (probe.created_at) when = probe.created_at;
       const switched = probe.switched
         ? `\n注意：本账号自己的代理打不开结账页（${probe.original_reason || ''}），\n已找到可用出口，支付会改走它。`
         : '';
       await _autoPayLoadSetup();
-      if (confirm(`该账号已有一条长链（${when}），经检查仍然有效。\n` +
+      const detail = probe.reason ? `\n当前内容：${probe.reason}` : '';
+      if (confirm(`该账号已有一条长链（${when}），经检查仍然有效。${detail}\n` +
                   `它已经消耗过一个优惠码。${switched}\n\n` +
                   `点「确定」复用这条长链，不再消耗新的优惠码（推荐）。\n` +
                   `点「取消」生成新长链（会再消耗一个优惠码）。`)) {
-        _autoPayUseExistingLink(savedUrl, when, probe.switched ? probe.proxy : '');
+        _autoPayUseExistingLink(useUrl, when, probe.switched ? probe.proxy : '');
       } else {
         _autoPaySetStatus('warn', '本次将生成新长链，会消耗一个新的优惠码。');
       }
@@ -5712,16 +6124,29 @@ async function _manualPayOpen() {
   updateModalScrollLock();
   $('#manualPayDoneTip').textContent = '';
   $('#manualPayPromo').value = '';
+  // 上次点完会把按钮改成"已登记"并禁用，重开面板要复位
+  const _mpd = $('#btnManualPayDone');
+  if (_mpd) { _mpd.disabled = false; _mpd.textContent = '我已完成支付'; }
 
   const acc = (typeof ACCOUNTS !== 'undefined'
     ? ACCOUNTS.find(a => Number(a.id) === Number(id)) : null) || {};
   $('#manualPayWho').innerHTML =
     `账号 <b>${esc(acc.email || '')}</b>　代理 <b>${esc(acc.register_proxy_name || '未绑定代理')}</b>`;
 
-  // 长链：优先用弹窗里已复用的，其次取账号上存着的
+  // 长链：优先用弹窗里已复用的，其次问后端，最后才回退到账号缓存。
+  // 必须问后端：长链常常是本次会话刚生成的，ACCOUNTS 缓存还是打开页面时
+  // 的旧数据，直接读缓存会错误地显示"这个账号还没有长链"。
   let url = '';
   const reuse = $('#apReuseLink');
   if (reuse && reuse.dataset.url) url = reuse.dataset.url;
+  if (!url) {
+    $('#manualPayUrl').value = '（正在读取长链…）';
+    try {
+      const lr = await fetch('/api/pay/checkout-link?account_id=' + encodeURIComponent(id));
+      const ls = await lr.json();
+      if (ls && ls.ok) url = String(ls.url || '').trim();
+    } catch (e) { /* 读不到就退回缓存 */ }
+  }
   if (!url) url = String(acc.team_checkout_url || '').trim();
   $('#manualPayUrl').value = url || '（这个账号还没有长链，请先在自动支付里生成）';
   const open = $('#btnManualPayOpen');
@@ -5753,16 +6178,15 @@ async function _manualPayOpen() {
              (as.options[0] && as.options[0].value) || '';
   $('#manualPayAddrHint').textContent = mine.length ? '已选该卡上次用的地址' : '';
 
-  // 手动支付走的是人自己的浏览器和网络，和服务端出口无关；
-  // 这里提示账单地址国家，方便判断是否需要自己挂梯子到同一国家。
+  // 手动支付走的是人自己的浏览器和网络，和服务端出口无关。
+  // 要提示的是结算国家：结算货币和出口国家不同区会被 Stripe 拒，
+  // 这正是手动付最容易踩的坑（账单地址国家是另一回事）。
   const tip = $('#manualPayProxyTip');
   if (tip) {
-    const a = _autoPayAddrCache.find(x => String(x.id) === as.value);
-    const cc = String((a || {}).country || '').toUpperCase();
-    const used = String(_autoPayUsedProxyName || '').trim();
+    const cc = _autoPayWantCc();
     tip.textContent = cc
-      ? `账单地址在 ${cc}；手动支付走你本机网络，服务端出口（${used || '注册代理'}）不生效。`
-        + `若怀疑地区不匹配，请自行把本机出口切到 ${cc}。`
+      ? `这条链按 ${cc} 结算；手动支付走你本机网络，服务端出口不生效。`
+        + `请把本机出口切到 ${cc}，否则会被拒。`
       : '手动支付走你本机网络，服务端出口不生效。';
   }
 
@@ -5776,6 +6200,15 @@ async function _manualPayDone() {
   const addrId = $('#manualPayAddr').value;
   const tip = $('#manualPayDoneTip');
   const btn = $('#btnManualPayDone');
+
+  // 点错的代价不小：会记下一个不存在的支付时间，还会占掉一个订阅编号
+  const acc = (ACCOUNTS || []).find(a => Number(a.id) === Number(id));
+  const who = (acc && acc.email) || ('#' + id);
+  if (!confirm(`确认已在浏览器里付款成功？\n\n账号：${who}\n` +
+               (promo ? `优惠码：${promo}\n` : '') +
+               `\n将登记支付时间、清掉长链，并在 30 秒后查套餐。\n` +
+               `若实际没付成功，会留下一条错误记录。`)) return;
+
   btn.disabled = true;
   tip.textContent = '处理中…';
   try {
@@ -5790,10 +6223,12 @@ async function _manualPayDone() {
     const s = await r.json();
     if (!s.ok) throw new Error(s.error || '登记失败');
     tip.textContent = s.message || '已登记，套餐查询已入队';
+    btn.textContent = '已登记';
     if (typeof loadAccounts === 'function') loadAccounts();
+    // 套餐是延迟查的，过一会儿再刷一次，好让编号和套餐显示出来
+    setTimeout(() => { if (typeof loadAccounts === 'function') loadAccounts(); }, 40000);
   } catch (err) {
     tip.textContent = '失败：' + err.message;
-  } finally {
     btn.disabled = false;
   }
 }
@@ -5954,6 +6389,19 @@ function _autoPayBind() {
   const proxySel = $('#autoPayProxySelect');
   if (proxySel) proxySel.onchange = _autoPayProxyHintSync;
 
+  // 结算国家一改，1024proxy 那一项的文案和提示都要跟着变，
+  // 否则会出现"选项写着 EG、实际按 US 取"这种误导
+  const ccInput = $('#apCountry2');
+  if (ccInput) ccInput.oninput = () => {
+    const sel = $('#autoPayProxySelect');
+    if (sel) {
+      const opt = sel.querySelector(`option[value="${PAY_1024_PREFIX}"]`);
+      if (opt) opt.textContent =
+        `1024proxy · 跟随结算国家（${_autoPayWantCc()}）`;
+    }
+    _autoPayProxyHintSync();
+  };
+
   const addrSel = $('#autoPayAddrSelect');
   if (addrSel) addrSel.onchange = () => {
     const hint = $('#autoPayAddrHint');
@@ -6111,6 +6559,27 @@ function _mailboxBind() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _mailboxBind);
 else _mailboxBind();
 
+function _teamMembersBind() {
+  const x = $('#btnTeamMembersClose'); if (x) x.onclick = closeTeamMembers;
+  const c = $('#btnTeamMembersClose2'); if (c) c.onclick = closeTeamMembers;
+  const rf = $('#btnTeamMembersRefresh'); if (rf) rf.onclick = loadTeamMembers;
+  const inv = $('#btnTeamInvite'); if (inv) inv.onclick = _teamInvite;
+
+  // 成员/邀请行是动态渲染的，用委托；绑在各自容器上避免影响别处
+  ['#teamMemberList', '#teamInviteList'].forEach(sel => {
+    const box = $(sel);
+    if (!box) return;
+    box.addEventListener('click', (e) => {
+      const rm = e.target.closest('[data-team-remove]');
+      if (rm) { _teamRemove(rm.dataset.teamRemove, rm.dataset.email || ''); return; }
+      const rv = e.target.closest('[data-team-revoke]');
+      if (rv) _teamRevoke(rv.dataset.teamRevoke);
+    });
+  });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _teamMembersBind);
+else _teamMembersBind();
+
 function _accountsV2MoreMenu(r) {  const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
     `<button type="button" data-account-copy-secret="login_credentials" data-account-id="${esc(r.id)}" title="复制邮箱、注册密码和 2FA 密钥">复制登录凭据</button>`,
@@ -6121,13 +6590,17 @@ function _accountsV2MoreMenu(r) {  const parts = [
     `<button type="button" onclick="checkSelectedLive([Number('${esc(r.id)}')], this); return false;" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活刷新AT</button>`,
     `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,
+    `<button type="button" data-account-password-log="${esc(r.email)}" title="查看该账号最近一次补密码日志">补密码日志</button>`,
+    `<button type="button" data-account-rebind-log="${esc(r.email)}" title="查看该账号最近一次换绑卡日志">换绑日志</button>`,
+    r.totp_secret ? `<button type="button" onclick="rotateTotp(${esc(r.id)}, this); return false;" title="重新登录该账号并生成全新 2FA 密钥（旧密钥自动作废，替换前会备份）">更换密钥</button>` : '',
     _planAction(r),
     `<button type="button" onclick="generateTeamLink(${esc(r.id)}, this); return false;" title="提取该账号的 Team 订阅 Stripe 支付长链接">生成Team长链</button>`,
-    `<button type="button" onclick="openAutoPay(${esc(r.id)}); return false;" title="生成 Team 长链并用该账号的注册代理在服务端填好支付表单，停在提交前等你确认">生成Team长链并支付</button>`,
     _extractLinkAction(r),
     _codexAction(r),
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,
     `<button type="button" data-account-archive="${esc(r.id)}" data-archived="${r.archived ? '0' : '1'}" title="${r.archived ? '恢复到默认账号列表' : '归档后默认账号列表不再显示'}">${r.archived ? '恢复' : '归档'}</button>`,
+    // 删除放最后并标红：它不可逆，不该和常用操作挨在一起误点
+    `<button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}" title="彻底删除该账号记录，不可恢复">删除</button>`,
   ].filter(html => String(html || '').trim());
   return parts.join('');
 }
@@ -6169,14 +6642,14 @@ function renderAccounts() {
       </td>
       <td class="col-proxy">${r.register_proxy_name ? `<span title="${esc(r.register_proxy_name)}">${esc(short(r.register_proxy_name, 16))}</span>` : '<span class="acc-v2-muted" title="注册代理未命名、已从代理池删除，或注册时未使用代理">-</span>'}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
-      <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
       <td class="col-small">${_totpCellV2(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
-      <td class="col-time" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
+      <td class="col-time">${_timeCellV2(r)}</td>
+      <td class="col-card">${_payCardCellV2(r)}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
-          <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button>
+          <button type="button" onclick="openAutoPay(${esc(r.id)}); return false;" title="生成 Team 长链并用该账号的注册代理在服务端填好支付表单，停在提交前等你确认">订阅Team</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-acc-more-toggle aria-haspopup="true" aria-expanded="false">更多</button>
             <div class="acc-v2-more-menu" role="menu">${_accountsV2MoreMenu(r)}</div>
@@ -6203,7 +6676,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const v2Ids = [
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
-    'btnSetupSelectedTotpV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
+    'btnSetupSelectedTotpV2', 'btnBackfillSelectedPasswordsV2', 'btnRebindSelectedCardsV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
     'btnDownloadSelectedTxtV2', 'btnDownloadSelectedFullExportV2', 'btnCopySelectedFullExportV2', 'btnCopySelectedLoginCredentialsV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
@@ -6321,6 +6794,42 @@ function closeTotpLogModal() {
 }
 $('#btnCloseTotpLog').addEventListener('click', closeTotpLogModal);
 
+// ---------- 补密码日志面板 ----------
+let pwdLogEmail = null, pwdLogTimer = null;
+
+function openPwdLog(email) {
+  pwdLogEmail = email;
+  $('#pwdLogEmail').textContent = email;
+  $('#pwdLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#pwdLogContent').textContent = '加载中…';
+  pollPwdLog();
+  clearInterval(pwdLogTimer);
+  pwdLogTimer = setInterval(pollPwdLog, 5000);
+}
+async function pollPwdLog() {
+  if (!pwdLogEmail) return;
+  try {
+    const r = await api(`/api/accounts/password-backfill-log?email=${encodeURIComponent(pwdLogEmail)}`);
+    const c = $('#pwdLogContent');
+    const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+    c.textContent = r.log || '(暂无日志，等待任务写入…)';
+    if (atBottom) c.scrollTop = c.scrollHeight;
+    if (!r.running) {
+      clearInterval(pwdLogTimer);
+      loadAccounts();
+    }
+  } catch(e) {}
+}
+function closePwdLogModal() {
+  $('#pwdLogPanel').classList.add('hidden');
+  updateModalScrollLock();
+  clearInterval(pwdLogTimer);
+  pwdLogTimer = null;
+  pwdLogEmail = null;
+}
+$('#btnClosePwdLog').addEventListener('click', closePwdLogModal);
+
 let emailChangeLogAccountId = null, emailChangeLogTimer = null;
 function openEmailChangeLog(accountId) {
   emailChangeLogAccountId = Number(accountId);
@@ -6402,6 +6911,7 @@ async function onAccountsBodyClick(e) {
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
         field === 'login_credentials' ? '邮箱、注册密码和 2FA 密钥已复制' :
         field === 'totp_secret' ? '2FA 密钥已复制' :
+        field === 'password' ? '密码已复制' :
         field === 'totp_code' ? `验证码已复制：${value}` :
         '账号整行已复制'
       );
@@ -6435,6 +6945,18 @@ async function onAccountsBodyClick(e) {
     return;
   }
 
+  const teamBtn = e.target.closest('[data-team-members]');
+  if (teamBtn) {
+    openTeamMembers(Number(teamBtn.dataset.teamMembers));
+    return;
+  }
+
+  const seatBtn = e.target.closest('[data-probe-single-seat]');
+  if (seatBtn) {
+    await probeSingleSeat(Number(seatBtn.dataset.probeSingleSeat), seatBtn);
+    return;
+  }
+
   const liveBtn = e.target.closest('[data-account-live-check]');
   if (liveBtn) {
     await checkSelectedLive([Number(liveBtn.dataset.accountLiveCheck)], liveBtn);
@@ -6450,6 +6972,18 @@ async function onAccountsBodyClick(e) {
   const totpLogBtn = e.target.closest('[data-account-totp-log]');
   if (totpLogBtn) {
     openTotpLog(totpLogBtn.dataset.accountTotpLog);
+    return;
+  }
+
+  const pwdLogBtn = e.target.closest('[data-account-password-log]');
+  if (pwdLogBtn) {
+    openPwdLog(pwdLogBtn.dataset.accountPasswordLog);
+    return;
+  }
+
+  const rebindLogBtn = e.target.closest('[data-account-rebind-log]');
+  if (rebindLogBtn) {
+    openRebindLog(rebindLogBtn.dataset.accountRebindLog);
     return;
   }
 
@@ -6492,6 +7026,18 @@ async function onAccountsBodyClick(e) {
   const totpBtn = e.target.closest('[data-account-totp-setup]');
   if (totpBtn) {
     await setupAccountTotp(Number(totpBtn.dataset.accountTotpSetup), totpBtn);
+    return;
+  }
+
+  const pwdBackfillBtn = e.target.closest('[data-account-password-backfill]');
+  if (pwdBackfillBtn) {
+    await backfillAccountPassword(Number(pwdBackfillBtn.dataset.accountPasswordBackfill), pwdBackfillBtn);
+    return;
+  }
+
+  const cardRebindBtn = e.target.closest('[data-account-card-rebind]');
+  if (cardRebindBtn) {
+    openRebindModal(Number(cardRebindBtn.dataset.accountCardRebind));
     return;
   }
 
@@ -6624,51 +7170,92 @@ function setAccountsFilterToggle(el, on) {
   el.classList.toggle('is-active', !!on);
   el.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
+
+// ---- 筛选状态持久化 ----
+// 刷新后筛选被重置很烦：挑号时经常要反复刷新看最新数据，
+// 每次都得重新点一遍「未订阅 + 过滤2席位」。
+//
+// 存成一个 JSON 而不是多个 key：加新筛选时只改这张表，
+// 不用再记得同步 save/load 两处（加「过滤2席位」时就差点漏掉）。
+const ACCOUNTS_FILTER_STORE_KEY = 'gpt_console_accounts_filters';
+const ACCOUNTS_FILTER_FIELDS = [
+  { key: 'archived',   get: () => SHOW_ARCHIVED_ACCOUNTS,          set: v => { SHOW_ARCHIVED_ACCOUNTS = v; },          el: '#showArchivedAccountsV2' },
+  { key: 'plus',       get: () => SHOW_PLUS_ACCOUNTS_ONLY,         set: v => { SHOW_PLUS_ACCOUNTS_ONLY = v; },         el: '#showPlusAccountsOnlyV2' },
+  { key: 'unsub',      get: () => SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY, set: v => { SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY = v; }, el: '#showUnsubscribedAccountsOnlyV2' },
+  { key: 'promo',      get: () => SHOW_PLUS_TRIAL_ACCOUNTS_ONLY,   set: v => { SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = v; },   el: '#showPlusTrialAccountsOnlyV2' },
+  { key: 'free',       get: () => SHOW_FREE_ACCOUNTS_ONLY,         set: v => { SHOW_FREE_ACCOUNTS_ONLY = v; },         el: '#showFreeAccountsOnlyV2' },
+  { key: 'hideMulti',  get: () => HIDE_MULTI_SEAT_ACCOUNTS,        set: v => { HIDE_MULTI_SEAT_ACCOUNTS = v; },        el: '#hideMultiSeatAccountsV2' },
+];
+function saveAccountsFilters() {
+  try {
+    const data = {};
+    for (const f of ACCOUNTS_FILTER_FIELDS) data[f.key] = !!f.get();
+    localStorage.setItem(ACCOUNTS_FILTER_STORE_KEY, JSON.stringify(data));
+  } catch (e) {
+    // 隐私模式/存储已满时 localStorage 会抛错，不能让筛选本身失效
+  }
+}
+function restoreAccountsFilters() {
+  let data = null;
+  try {
+    data = JSON.parse(localStorage.getItem(ACCOUNTS_FILTER_STORE_KEY) || 'null');
+  } catch (e) { data = null; }
+  if (!data || typeof data !== 'object') return false;
+  let any = false;
+  for (const f of ACCOUNTS_FILTER_FIELDS) {
+    const on = !!data[f.key];
+    f.set(on);
+    setAccountsFilterToggle($(f.el), on);
+    if (on) any = true;
+  }
+  return any;
+}
 async function applyAccountsArchivedFilter(on) {
   SHOW_ARCHIVED_ACCOUNTS = !!on;
   setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
+  saveAccountsFilters();
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
+// 套餐类筛选互斥：开一个就关掉其余几个。
+// 以前每个 apply* 函数各自手写一遍"关掉另外两个 + 同步三个按钮"，
+// 加第四个筛选（未订阅）时极易漏掉某一处，所以收口到一张表。
+const ACCOUNTS_PLAN_TOGGLES = [
+  { id: '#showPlusAccountsOnlyV2',         get: () => SHOW_PLUS_ACCOUNTS_ONLY,         set: v => { SHOW_PLUS_ACCOUNTS_ONLY = v; } },
+  { id: '#showUnsubscribedAccountsOnlyV2', get: () => SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY, set: v => { SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY = v; } },
+  { id: '#showPlusTrialAccountsOnlyV2',    get: () => SHOW_PLUS_TRIAL_ACCOUNTS_ONLY,    set: v => { SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = v; } },
+  { id: '#showFreeAccountsOnlyV2',         get: () => SHOW_FREE_ACCOUNTS_ONLY,          set: v => { SHOW_FREE_ACCOUNTS_ONLY = v; } },
+];
+async function applyAccountsPlanFilter(which, on) {
+  for (const t of ACCOUNTS_PLAN_TOGGLES) {
+    t.set(t.id === which ? !!on : false);
+    setAccountsFilterToggle($(t.id), t.get());
+  }
+  saveAccountsFilters();
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
 async function applyAccountsPlusFilter(on) {
-  SHOW_PLUS_ACCOUNTS_ONLY = !!on;
-  if (SHOW_PLUS_ACCOUNTS_ONLY) {
-    SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
-    SHOW_FREE_ACCOUNTS_ONLY = false;
-  }
-  setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
-  ACCOUNT_SELECTED.clear();
-  PAGERS.accounts.page = 1;
-  await loadAccounts();
-  await pollAccountPlanStatuses();
+  await applyAccountsPlanFilter('#showPlusAccountsOnlyV2', on);
+}
+async function applyAccountsUnsubscribedFilter(on) {
+  await applyAccountsPlanFilter('#showUnsubscribedAccountsOnlyV2', on);
 }
 async function applyAccountsPlusTrialFilter(on) {
-  SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = !!on;
-  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
-    SHOW_PLUS_ACCOUNTS_ONLY = false;
-    SHOW_FREE_ACCOUNTS_ONLY = false;
-  }
-  setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
-  ACCOUNT_SELECTED.clear();
-  PAGERS.accounts.page = 1;
-  await loadAccounts();
-  await pollAccountPlanStatuses();
+  await applyAccountsPlanFilter('#showPlusTrialAccountsOnlyV2', on);
 }
 async function applyAccountsFreeFilter(on) {
-  SHOW_FREE_ACCOUNTS_ONLY = !!on;
-  if (SHOW_FREE_ACCOUNTS_ONLY) {
-    SHOW_PLUS_ACCOUNTS_ONLY = false;
-    SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
-  }
-  setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
-  setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
+  await applyAccountsPlanFilter('#showFreeAccountsOnlyV2', on);
+}
+async function applyHideMultiSeatFilter(on) {
+  // 席位筛选不参与套餐筛选的互斥，可以和「未订阅」等叠加
+  HIDE_MULTI_SEAT_ACCOUNTS = !!on;
+  setAccountsFilterToggle($('#hideMultiSeatAccountsV2'), HIDE_MULTI_SEAT_ACCOUNTS);
+  saveAccountsFilters();
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
   await loadAccounts();
@@ -6720,6 +7307,10 @@ async function refreshAccountsList(btn) {
   if (plusV2) plusV2.addEventListener('click', () => {
     applyAccountsPlusFilter(!SHOW_PLUS_ACCOUNTS_ONLY);
   });
+  const unsubV2 = $('#showUnsubscribedAccountsOnlyV2');
+  if (unsubV2) unsubV2.addEventListener('click', () => {
+    applyAccountsUnsubscribedFilter(!SHOW_UNSUBSCRIBED_ACCOUNTS_ONLY);
+  });
   const plusTrialV2 = $('#showPlusTrialAccountsOnlyV2');
   if (plusTrialV2) plusTrialV2.addEventListener('click', () => {
     applyAccountsPlusTrialFilter(!SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
@@ -6735,6 +7326,10 @@ async function refreshAccountsList(btn) {
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {
     applyAccountsFreeFilter(!SHOW_FREE_ACCOUNTS_ONLY);
+  });
+  const hideMultiSeatV2 = $('#hideMultiSeatAccountsV2');
+  if (hideMultiSeatV2) hideMultiSeatV2.addEventListener('click', () => {
+    applyHideMultiSeatFilter(!HIDE_MULTI_SEAT_ACCOUNTS);
   });
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
@@ -6840,6 +7435,197 @@ async function setupSelectedTotp() {
     updateAccountSelectionUi();
   }
 }
+
+async function backfillAccountPassword(id, btn) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  const email = acc?.email || '';
+  if (!confirm(`确定为该账号补设 ChatGPT 登录密码？\n\n${email}\n\n走忘记密码邮件流：OpenAI 发验证码到邮箱 → 自动收码 → 设置新密码。\n完成后查活等登录操作会优先用"密码+TOTP"，不再依赖邮箱验证码。`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api(`/api/accounts/${encodeURIComponent(id)}/password-backfill`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    showToast(r.message || r.error || '补密码任务已开始');
+    planStatusRevision = '';
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+  } catch (err) {
+    showToast('补密码失败: ' + err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function backfillSelectedPasswords() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`确定为选中的 ${ids.length} 个账号批量补设登录密码？\n\n走忘记密码邮件流在后台排队执行；已有密码、非 outlook/hotmail 邮箱或正在执行中的账号会自动跳过。`)) return;
+
+  const btn = document.getElementById('btnBackfillSelectedPasswordsV2');
+  if (!btn) return;
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '入队中…';
+  try {
+    const r = await api('/api/accounts/password-backfill-bulk', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids}),
+    });
+    (r.started || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
+    const busyCount = Number(r.busy_count ?? (r.busy || []).length) || 0;
+    const failedCount = Number(r.failed_count ?? (r.failed || []).length) || 0;
+    const details = [];
+    if (busyCount) details.push(`进行中 ${busyCount} 个`);
+    if (failedCount) details.push(`跳过/失败 ${failedCount} 个`);
+    showToast(`已入队 ${r.started_count || 0} 个${details.length ? '，' + details.join('，') : ''}`);
+    planStatusRevision = '';
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+  } catch (err) {
+    showToast('批量补密码失败: ' + err.message);
+  } finally {
+    btn.textContent = oldText;
+    updateAccountSelectionUi();
+  }
+}
+
+// ---------- 换绑支付卡 ----------
+let REBIND_TARGET_ID = null;
+let rebindCardsCache = null;
+
+async function _loadRebindCards() {
+  if (rebindCardsCache) return rebindCardsCache;
+  const r = await api('/api/accounts/card-rebind-cards');
+  rebindCardsCache = r;
+  return r;
+}
+
+async function openRebindModal(id) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  if (!acc) { showToast('账号不存在'); return; }
+  REBIND_TARGET_ID = Number(id);
+  $('#rebindModalEmail').textContent = acc.email || '';
+  const sel = $('#rebindCardSelect');
+  sel.innerHTML = '<option value="">加载中…</option>';
+  $('#rebindModal').classList.remove('hidden');
+  updateModalScrollLock();
+  try {
+    const r = await _loadRebindCards();
+    const cards = r.cards || [];
+    sel.innerHTML = cards.length
+      ? cards.map(c => `<option value="${esc(c.card_id)}">${esc(c.label)}</option>`).join('')
+      : '<option value="">（没有可用卡：黑名单里没有 ACTIVE 的 VCC 卡）</option>';
+    if (r.default_card_id) sel.value = r.default_card_id;
+  } catch (err) {
+    sel.innerHTML = `<option value="">加载失败: ${esc(err.message)}</option>`;
+  }
+}
+
+async function _startRebind(ids, cardId) {
+  const isBulk = Array.isArray(ids);
+  const url = isBulk ? '/api/accounts/card-rebind-bulk' : `/api/accounts/${encodeURIComponent(ids)}/card-rebind`;
+  const body = isBulk ? {account_ids: ids, card_id: cardId} : {card_id: cardId};
+  const r = await api(url, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+  if (isBulk) {
+    (r.started || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
+    const busyCount = Number(r.busy_count ?? (r.busy || []).length) || 0;
+    const failedCount = Number(r.failed_count ?? (r.failed || []).length) || 0;
+    const details = [];
+    if (busyCount) details.push(`进行中 ${busyCount} 个`);
+    if (failedCount) details.push(`跳过 ${failedCount} 个`);
+    showToast(`已入队 ${r.started_count || 0} 个${details.length ? '，' + details.join('，') : ''}`);
+    updateAccountSelectionUi();
+  } else {
+    showToast(r.message || r.error || '换绑任务已开始，可在「更多→换绑日志」看进度');
+  }
+  planStatusRevision = '';
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
+
+async function rebindSelectedCards() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let cards = [];
+  try { cards = (await _loadRebindCards()).cards || []; } catch (e) { showToast('读取卡列表失败: ' + e.message); return; }
+  const cardId = cards.length ? cards[0].card_id : '';
+  if (!confirm(`确定为选中的 ${ids.length} 个账号批量换绑扣款卡？\n\n将把订阅扣款卡换成${cards.length ? '「' + cards[0].label + '」' : '黑名单牺牲卡'}（加新卡设默认并删旧卡）。\n没有密码/没有订阅的账号会自动跳过。`)) return;
+  const btn = document.getElementById('btnRebindSelectedCardsV2');
+  if (!btn) return;
+  const oldText = btn.textContent;
+  btn.disabled = true; btn.textContent = '入队中…';
+  try {
+    await _startRebind(ids, cardId);
+  } catch (err) {
+    showToast('批量换绑失败: ' + err.message);
+  } finally {
+    btn.textContent = oldText;
+    updateAccountSelectionUi();
+  }
+}
+
+$('#btnRebindCancel').addEventListener('click', () => {
+  $('#rebindModal').classList.add('hidden');
+  updateModalScrollLock();
+  REBIND_TARGET_ID = null;
+});
+$('#btnRebindStart').addEventListener('click', async () => {
+  if (!REBIND_TARGET_ID) return;
+  const cardId = $('#rebindCardSelect').value || '';
+  const btn = $('#btnRebindStart');
+  btn.disabled = true;
+  try {
+    await _startRebind(REBIND_TARGET_ID, cardId);
+    $('#rebindModal').classList.add('hidden');
+    updateModalScrollLock();
+  } catch (err) {
+    showToast('换绑失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    REBIND_TARGET_ID = null;
+  }
+});
+
+let rebindLogEmail = null, rebindLogTimer = null;
+function openRebindLog(email) {
+  rebindLogEmail = email;
+  $('#rebindLogEmail').textContent = email;
+  $('#rebindLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#rebindLogContent').textContent = '加载中…';
+  pollRebindLog();
+  clearInterval(rebindLogTimer);
+  rebindLogTimer = setInterval(pollRebindLog, 5000);
+}
+async function pollRebindLog() {
+  if (!rebindLogEmail) return;
+  try {
+    const r = await api(`/api/accounts/card-rebind-log?email=${encodeURIComponent(rebindLogEmail)}`);
+    const c = $('#rebindLogContent');
+    const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+    c.textContent = r.log || '(暂无日志，等待任务写入…)';
+    if (atBottom) c.scrollTop = c.scrollHeight;
+    if (!r.running) {
+      clearInterval(rebindLogTimer);
+      loadAccounts();
+    }
+  } catch(e) {}
+}
+function closeRebindLogModal() {
+  $('#rebindLogPanel').classList.add('hidden');
+  updateModalScrollLock();
+  clearInterval(rebindLogTimer);
+  rebindLogTimer = null;
+  rebindLogEmail = null;
+}
+$('#btnCloseRebindLog').addEventListener('click', closeRebindLogModal);
 
 async function copySelectedAccountLines() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
@@ -7139,6 +7925,182 @@ async function checkOnePlan(id, btn) {
   }
 }
 
+let _teamMembersAccountId = null;
+
+function _teamSeatBoxHtml(s) {
+  const total = Number(s.total_seats || 0);
+  const used = Number(s.used_seats || 0);
+  const free = total ? Math.max(0, total - used) : null;
+  const box = $('#teamSeatBox');
+  if (!total) {
+    // 读不到购买数时不要瞎猜：说清楚"未知"，别让人以为还有空位
+    box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border-radius:6px;font-size:13px;background:#f8fafc;border:1px solid #cbd5e1;color:#475569;';
+    return `席位总数读不到（发票接口没返回数量）。当前已占用 <b>${used}</b> 个`
+      + `（成员 ${s.member_count} + 待处理邀请 ${s.pending_count}）。请自行确认还能邀几个。`;
+  }
+  if (free === 0) {
+    box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border-radius:6px;font-size:13px;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;';
+    return `<b>席位已满：${used}/${total}</b>　（成员 ${s.member_count} + 待处理邀请 ${s.pending_count}）`
+      + `<br>再发邀请对方也进不来。要加人请先移除成员或撤销邀请。`;
+  }
+  box.style.cssText = 'margin:0 0 14px;padding:10px 12px;border-radius:6px;font-size:13px;background:#f0fdf4;border:1px solid #86efac;color:#166534;';
+  return `席位 <b>${used}/${total}</b>，还可邀请 <b>${free}</b> 个`
+    + `　（成员 ${s.member_count} + 待处理邀请 ${s.pending_count}）`;
+}
+
+function _teamRow(cols, actionHtml) {
+  return `<div style="display:flex;align-items:center;gap:10px;padding:6px 8px;border-bottom:1px solid #f0f2f5;font-size:13px;">
+    ${cols}<div style="margin-left:auto;">${actionHtml}</div></div>`;
+}
+
+async function loadTeamMembers() {
+  const id = _teamMembersAccountId;
+  if (!id) return;
+  $('#teamSeatBox').textContent = '读取中…';
+  $('#teamMemberList').innerHTML = '<div class="muted" style="font-size:12px;">读取中…</div>';
+  $('#teamInviteList').innerHTML = '';
+  try {
+    const r = await fetch('/api/team/members?account_id=' + encodeURIComponent(id));
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '查询失败');
+
+    $('#teamSeatBox').innerHTML = _teamSeatBoxHtml(s);
+
+    $('#teamMemberList').innerHTML = (s.members || []).map(m => _teamRow(
+      `<div style="min-width:0;"><div style="font-weight:600;">${esc(m.email)}</div>
+       <div class="muted" style="font-size:11px;">${esc(m.seat_label)} · ${esc(m.role)}${m.name ? ' · ' + esc(m.name) : ''}</div></div>`,
+      m.is_owner
+        ? '<span class="muted" style="font-size:11px;">拥有者</span>'
+        : `<button class="jobs-tb-btn" data-team-remove="${esc(m.user_id)}" data-email="${esc(m.email)}">移除</button>`
+    )).join('') || '<div class="muted" style="font-size:12px;">（没有成员）</div>';
+
+    $('#teamInviteList').innerHTML = (s.pending_invites || []).map(i => _teamRow(
+      `<div style="min-width:0;"><div>${esc(i.email)}</div>
+       <div class="muted" style="font-size:11px;">${esc(i.seat_label)} · ${esc(i.role)} · 等待接受</div></div>`,
+      `<button class="jobs-tb-btn" data-team-revoke="${esc(i.email)}">撤销</button>`
+    )).join('') || '<div class="muted" style="font-size:12px;">（没有待处理邀请）</div>';
+
+    const full = s.total_seats && (s.used_seats >= s.total_seats);
+    $('#btnTeamInvite').disabled = !!full;
+    $('#teamInviteTip').textContent = full ? '席位已满，无法再邀请' : '';
+  } catch (err) {
+    $('#teamSeatBox').style.cssText = 'margin:0 0 14px;padding:10px 12px;border-radius:6px;font-size:13px;background:#fef2f2;border:1px solid #fca5a5;color:#b91c1c;';
+    $('#teamSeatBox').textContent = '读取失败：' + err.message;
+    $('#teamMemberList').innerHTML = '';
+  }
+}
+
+function openTeamMembers(id) {
+  _teamMembersAccountId = id;
+  const acc = (ACCOUNTS || []).find(a => Number(a.id) === Number(id)) || {};
+  $('#teamMembersWho').innerHTML =
+    `账号 <b>${esc(acc.email || ('#' + id))}</b>`
+    + (acc.subscription_no ? `　编号 <b>${esc(acc.subscription_no)}</b>` : '');
+  $('#teamInviteEmail').value = '';
+  $('#teamInviteTip').textContent = '';
+  $('#btnTeamInvite').disabled = false;
+  $('#teamMembersModal').classList.remove('hidden');
+  updateModalScrollLock();
+  loadTeamMembers();
+}
+
+function closeTeamMembers() {
+  $('#teamMembersModal').classList.add('hidden');
+  updateModalScrollLock();
+  _teamMembersAccountId = null;
+}
+
+async function _teamInvite() {
+  const id = _teamMembersAccountId;
+  const raw = $('#teamInviteEmail').value.trim();
+  const emails = raw.split(/[,;\s]+/).map(x => x.trim()).filter(Boolean);
+  if (!emails.length) { $('#teamInviteTip').textContent = '请填写邮箱'; return; }
+  const seat = $('#teamInviteSeat').value;
+  const role = $('#teamInviteRole').value;
+  const seatLabel = seat === 'usage_based' ? 'Codex' : 'ChatGPT';
+  if (!confirm(`确认发送邀请？\n\n${emails.join('\n')}\n\n席位：${seatLabel}　角色：${role}\n邀请发出即占用席位，对方接受前可以撤销。`)) return;
+
+  const btn = $('#btnTeamInvite');
+  btn.disabled = true;
+  $('#teamInviteTip').textContent = '发送中…';
+  try {
+    const r = await fetch('/api/team/invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: Number(id), emails, role, seat_type: seat }),
+    });
+    const s = await r.json();
+    if (!s.ok && !(s.invited || []).length) throw new Error(s.error || '发送失败');
+    const parts = [];
+    if ((s.invited || []).length) parts.push('已邀请 ' + s.invited.join('、'));
+    if ((s.already_member_emails || []).length) parts.push('已是成员：' + s.already_member_emails.join('、'));
+    if ((s.errored_emails || []).length) parts.push('失败：' + JSON.stringify(s.errored_emails));
+    $('#teamInviteTip').textContent = parts.join('；') || '已提交';
+    $('#teamInviteEmail').value = '';
+    await loadTeamMembers();
+  } catch (err) {
+    $('#teamInviteTip').textContent = '失败：' + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function _teamRevoke(email) {
+  if (!confirm(`撤销对 ${email} 的邀请？席位会放回去。`)) return;
+  $('#teamInviteTip').textContent = '撤销中…';
+  try {
+    const r = await fetch('/api/team/revoke-invite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: Number(_teamMembersAccountId), email }),
+    });
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '撤销失败');
+    $('#teamInviteTip').textContent = '已撤销 ' + email;
+    await loadTeamMembers();
+  } catch (err) {
+    $('#teamInviteTip').textContent = '失败：' + err.message;
+  }
+}
+
+async function _teamRemove(userId, email) {
+  if (!confirm(`移除成员 ${email}？\n\n对方会失去该 Team 的访问权限，席位放回去。`)) return;
+  $('#teamInviteTip').textContent = '移除中…';
+  try {
+    const r = await fetch('/api/team/remove-member', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id: Number(_teamMembersAccountId), user_id: userId }),
+    });
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '移除失败');
+    $('#teamInviteTip').textContent = '已移除 ' + email;
+    await loadTeamMembers();
+  } catch (err) {
+    $('#teamInviteTip').textContent = '失败：' + err.message;
+  }
+}
+
+async function probeSingleSeat(id, btn) {
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '检测中…';
+  try {
+    const r = await fetch(`/api/accounts/${encodeURIComponent(id)}/probe-single-seat`,
+                          { method: 'POST' });
+    const s = await r.json();
+    if (!s.ok) throw new Error(s.error || '探测失败');
+    showToast(s.supported
+      ? `支持单席位（最少 1 席，可省一半订阅费）`
+      : `不支持单席位，最少 ${s.minimum_seats} 席`, 2600);
+    if (typeof loadAccounts === 'function') loadAccounts();
+  } catch (err) {
+    showToast('探测失败: ' + err.message, 3000);
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
 async function extractOneLink(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   if (!acc) { showToast('账号不存在'); return; }
@@ -7251,7 +8213,7 @@ async function importOneAccountToSub2(id, btn) {
   if ((acc.codex_status || '') !== 'success') { showToast('该账号还没跑通 Codex'); return; }
   if (!acc.subscription_no) { showToast('该账号还没有订阅编号'); return; }
   const name = 'AG' + (acc.subscription_kind === 'weekly' ? 'Z' : '') + acc.subscription_no + '-Team1';
-  if (!confirm(`导入 sub2api？\n\n账号：${acc.email || ('#' + id)}\n名称：${name}\n分组：Composite\n代理：按注册时用的出口同名匹配`)) return;
+  if (!confirm(`导入 sub2api？\n\n账号：${acc.email || ('#' + id)}\n名称：${name}\n分组：Composite\n代理：按注册时用的出口同名匹配\n并关闭训练数据共享`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '导入中…';
@@ -7261,7 +8223,11 @@ async function importOneAccountToSub2(id, btn) {
     const tips = [r.name];
     if (r.proxy_name) tips.push('代理 ' + r.proxy_name);
     else tips.push('未匹配到代理');
-    showToast((r.updated ? '已更新 ' : '已导入 ') + tips.join('｜'), 2600);
+    const pv = r.privacy || {};
+    let dur = 2600;
+    if (pv.ok) tips.push('训练共享已关');
+    else if (pv.mode || pv.error) { tips.push('训练共享未关(' + (pv.error || pv.mode) + ')'); dur = 5000; }
+    showToast((r.updated ? '已更新 ' : '已导入 ') + tips.join('｜'), dur);
     btn.textContent = r.updated ? '已更新' : '已导入';
   } catch(err) {
     showToast('导入失败: ' + err.message, 3000);
@@ -7446,6 +8412,56 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
       btn.textContent = old;
       btn.disabled = false;
     }
+  }
+}
+
+async function rotateTotp(id, btnArg = null) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  const email = acc ? acc.email : `#${id}`;
+  if (!confirm(`确定更换 #${id}（${email}）的 2FA 密钥吗？
+
+流程：用旧密钥重新登录 → 立即生成全新密钥并激活。
+旧密钥随即作废，替换前会自动备份；全程约 1-5 分钟。
+完成后 2FA 列会显示新密钥，可在「2FA日志」看进度。`)) return;
+  const btn = btnArg;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '更换中…'; }
+  try {
+    const r = await api(`/api/accounts/${id}/totp-rotate`, {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{}',
+    });
+    showToast(r.message || '已开始更换密钥，完成后请刷新账号列表查看');
+    // 稍等一会再刷新：任务在后台跑，立即刷新看不到新密钥
+    setTimeout(() => { loadAccounts(); loadSummary(); }, 20000);
+    setTimeout(() => { loadAccounts(); loadSummary(); }, 60000);
+    if (acc && acc.email) openTotpLog(acc.email);
+  } catch(err) {
+    showToast('更换密钥失败: ' + err.message);
+  } finally {
+    if (btn) { btn.textContent = old; btn.disabled = false; }
+  }
+}
+
+async function rotateTotpBulk() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先勾选要更换密钥的账号'); return; }
+  if (!confirm(`确定为选中的 ${ids.length} 个账号更换 2FA 密钥吗？
+
+每个账号会重新登录并生成全新密钥，串行执行、每个间隔 30 秒，
+全部完成可能需要较长时间。未开启 2FA 的账号会自动跳过。
+旧密钥替换前会自动备份。`)) return;
+  try {
+    const r = await api('/api/accounts/totp-rotate-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids}),
+    });
+    const skipped = (r.skipped || []).length;
+    showToast(`更换密钥已开始：${r.started_count} 个${skipped ? `，跳过 ${skipped} 个（未开2FA或正在更换）` : ''}`);
+    // 批量耗时长，定时刷新几次
+    [30, 90, 180, 300].forEach(sec => setTimeout(() => { loadAccounts(); loadSummary(); }, sec * 1000));
+  } catch(err) {
+    showToast('批量更换失败: ' + err.message);
   }
 }
 
@@ -7773,6 +8789,8 @@ $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'e
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
   bind('btnSetupSelectedTotpV2', setupSelectedTotp);
+  bind('btnBackfillSelectedPasswordsV2', backfillSelectedPasswords);
+  bind('btnRebindSelectedCardsV2', rebindSelectedCards);
   bind('btnChangeSelectedEmailsV2', () => openEmailChangeModal(Array.from(ACCOUNT_SELECTED)));
   bind('btnNoteSelectedAccountsV2', noteSelectedAccounts);
   bind('btnCopySelectedLinesV2', copySelectedAccountLines);
@@ -7798,6 +8816,7 @@ const POOL_SOURCE_LABELS = {
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 邮箱池',
   imap: '通用 IMAP 邮箱池',
+  akmoz: 'akmoz 闪取邮箱池',
   cloudflare_domain: '域名邮箱池',
 };
 function setPoolSourceV2(val) {
@@ -7891,8 +8910,8 @@ function renderOutlook() {
       <td class="col-source">${esc(poolLabel(r.source))}</td>
       <td class="col-status">${pill(r.status)}</td>
       <td class="col-token">${_outlookTokenCell(r)}</td>
-      <td class="col-time" title="${esc(r.imported_at || r.created_at || '-')}">${esc(r.imported_at || r.created_at || '-')}</td>
-      <td class="col-time" title="${esc(r.used_at || '-')}">${esc(r.used_at || '-')}</td>
+      <td class="col-time" title="${esc(r.imported_at || r.created_at || '-')}">${esc(formatDateTime(r.imported_at || r.created_at))}</td>
+      <td class="col-time" title="${esc(r.used_at || '-')}">${esc(r.used_at ? formatDateTime(r.used_at) : '-')}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
           ${cbtn('复制邮箱', r.copy_line, 'primary')}
@@ -8052,6 +9071,7 @@ const IMPORT_SOURCE_LABELS = {
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 取码邮箱',
   imap: '通用 IMAP 取码邮箱',
+  akmoz: 'akmoz 闪取邮箱',
 };
 function setImportSourceV2(val) {
   const hidden = document.getElementById('importSourceV2');
@@ -8076,7 +9096,10 @@ function setImportSourceV2(val) {
     ? 'user@example.com----imapPassword\nuser2@example.com:imapPassword'
     : next === 'generic_api'
       ? 'email----取码地址'
-      : 'email----password----clientId----refreshToken';
+      : next === 'akmoz'
+        // akmoz 的素材行可以带中文说明前缀，直接整段粘贴即可
+        ? '邮箱---邮箱密码---接码链接（直接验证码登录openai）：a@hotmail.com----pwd----https://email.akmoz.com/email_query?email=a%40hotmail.com\n（也可只写 email----password，取码链接自动拼）'
+        : 'email----password----clientId----refreshToken';
 }
 function openOutlookImportModal() {
   const modal = $('#outlookImportModal');
@@ -8084,7 +9107,7 @@ function openOutlookImportModal() {
   const result = $('#importResultV2');
   if (result) result.innerHTML = '';
   const pool = getPoolSource();
-  if (pool === 'outlook' || pool === 'generic_api' || pool === 'imap') setImportSourceV2(pool);
+  if (pool === 'outlook' || pool === 'generic_api' || pool === 'imap' || pool === 'akmoz') setImportSourceV2(pool);
   else setImportSourceV2('outlook');
   modal.classList.remove('hidden');
   updateModalScrollLock();
@@ -10495,6 +11518,10 @@ document.addEventListener('click', (e) => {
 
 // ---------- 初始化 ----------
 loadSummary();
+// 先恢复筛选状态再激活标签页：activateTab('accounts') 会直接调
+// loadAccounts()，晚恢复的话第一次请求带的是空筛选，页面会先闪一下
+// 全量列表再跳到筛选结果。
+restoreAccountsFilters();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 10000);
 setInterval(loadSummary, 30000);

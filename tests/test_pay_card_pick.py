@@ -96,6 +96,28 @@ class WiringTest(unittest.TestCase):
         self.assertIn('"usd_rate"', seg, "前端要靠它估算需要多少 USD")
         self.assertIn('"last_card_id"', seg)
 
+    def test_backend_exposes_needed_usd(self):
+        """备款口径由后端给出，前端不再自己折算。
+
+        2026-11-17：US 区改成直接配 USD 备款后，前端那套
+        funding_amount/usd_rate 的 EGP 折算会算出 35 而不是 18，
+        选卡和余额预检两处对不上。
+        """
+        seg = APP[APP.index("def api_pay_defaults"):]
+        seg = seg[:seg.index('@app.get("/api/pay/active")')]
+        self.assertIn('"needed_usd"', seg)
+        self.assertIn("required_usd(cfg)", seg, "必须用 vcc_funds 的同一套算法")
+
+    def test_frontend_prefers_needed_usd(self):
+        """前端优先用后端算好的数，老后端才回退到折算。"""
+        seg = HTML[HTML.index("// 估算需要多少 USD"):]
+        seg = seg[:seg.index("const pickable")]
+        self.assertIn("s.needed_usd", seg)
+        # 回退分支仍在，但必须排在 needed_usd 之后。
+        # 比对 `s.usd_rate` 这个取值表达式，不是注释里的同名提及。
+        self.assertLess(seg.index("s.needed_usd"), seg.index("s.usd_rate"),
+                        "needed_usd 必须优先于旧折算")
+
     def test_frontend_caches_cards(self):
         self.assertIn("_autoPayCardCache", HTML)
 

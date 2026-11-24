@@ -16,8 +16,10 @@ from __future__ import annotations
 import base64
 import logging
 import queue
+import re
 import threading
 import time
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +55,12 @@ class PaySession:
     amount: float | None = None
     expected: float | None = None
     card_mask: str = ""
+    # 这一单用的卡的可读标签，支付成功后落到账号上备查：
+    #   VCC 托管卡  -> VCC-1771（VCC- 前缀 + 卡号后四位）
+    #   自有卡池卡  -> 卡池里填的备注名（label），没填才退回 VCC- 格式
+    # 以前只有全局 pay_last_card_id（每付一单就被覆盖），事后查不到
+    # 某个账号是哪张卡付的——续费、对账、某张卡被风控时都要用。
+    card_label: str = ""
     gate_error: str = ""          # 闸门未通过的原因；非空时禁止确认
     promo_code: str = ""          # 本单用掉的优惠码，支付成功后登记进池备查
     shot_b64: str = ""            # 最新截图，base64，不落盘
@@ -74,6 +82,7 @@ class PaySession:
             "amount": self.amount,
             "expected": self.expected,
             "card_mask": self.card_mask,
+            "card_label": self.card_label,
             "gate_error": self.gate_error,
             "can_confirm": self.state == ST_AWAITING_CONFIRM and not self.gate_error,
             "needs_human": self.state == ST_AWAITING_HUMAN,
@@ -86,6 +95,12 @@ class PaySession:
 
 _sessions: dict[str, PaySession] = {}
 _lock = threading.Lock()
+
+# 等待中的"支付后查套餐"：account_id -> 到期时间戳。
+# 这些任务跑在 daemon 线程里，重启会直接丢掉；登记在这里让
+# /api/busy 看得见，重启前能拦住。
+_PENDING_PLAN_CHECKS: dict[int, float] = {}
+_plan_check_lock = threading.Lock()
 
 
 def _touch(sess: PaySession, **kw) -> None:
@@ -119,12 +134,59 @@ def _record_promo(sess: PaySession) -> None:
         logger.exception("[pay-session] %s 优惠码登记失败", sess.sid)
 
 
+def _verify_subscription_active(page, cfg) -> tuple[bool | None, str]:
+    """提交后立刻确认订阅是否真的建立了。
+
+    返回 (状态, 说明)：
+      True  —— 确认已建立（页面出现了付款成功/订阅生效的迹象）
+      False —— 确认没建立（页面明确失败/仍在套餐配置页）
+      None  —— 判断不了（页面还没落定），交给延迟查套餐做最终结论
+
+    为什么不能只看"页面没报错"：2026-11-18 #110 用 9636 付款，提交后页面
+    跳回 "Configure your plan" 显示红框 "Payment was not approved"，但
+    _page_error 当时不认 OpenAI 的红框，于是被判成功——paid_at 落了、账号
+    移出候选队列，实际卡余额 20.96 一分没扣、subscriptions 接口 404。
+    """
+    # 1) 明确失败文案
+    try:
+        from core.vcc_checkout_pay import _page_error
+        err = _page_error(page)
+    except Exception:  # noqa: BLE001
+        err = ""
+    if err:
+        return False, str(err)[:200]
+
+    # 2) 仍在套餐配置页 = 没买成（成功的话会离开这页）
+    try:
+        body = (page.inner_text("body", timeout=2000) or "").lower()
+    except Exception:  # noqa: BLE001
+        body = ""
+    if body:
+        back_on_planner = ("configure your plan" in body
+                           or "monthly billing" in body)
+        if back_on_planner and "due today" in body:
+            return False, "提交后仍停在套餐配置页，订阅未建立"
+        # 明确的成功迹象
+        for phrase in ("you're all set", "subscription confirmed",
+                       "payment successful", "thanks for subscribing",
+                       "已订阅", "お支払いが完了"):
+            if phrase in body:
+                return True, phrase
+
+    # 3) 页面已经离开结账表单但要等后端写库 -> 交给延迟查套餐
+    return None, ""
+
+
 def _record_paid_at(sess: PaySession) -> None:
-    """记下支付成功的时间。
+    """记下支付成功的时间和用的哪张卡。
 
     编号不在这里分配：此刻还不知道买到的是 5h 还是周限额，那要等
     30 秒后的套餐查询回来才知道。所以这里只落时间，编号由
     db.assign_subscription_no 在限额类型确定后再给。
+
+    卡标签也在这里落库。以前只有一个全局 pay_last_card_id，每付一单
+    就被覆盖，事后根本查不到某个账号是哪张卡付的——续费扣款、对账、
+    某张卡被风控时想知道牵连哪些号，都需要这个。
     """
     account_id = int(sess.account_id or 0)
     if account_id <= 0:
@@ -136,12 +198,46 @@ def _record_paid_at(sess: PaySession) -> None:
     except Exception:  # noqa: BLE001 - 记录失败不能影响已完成的支付
         logger.exception("[pay-session] %s 记录支付时间失败", sess.sid)
 
+    label = str(getattr(sess, "card_label", "") or "").strip()
+    if not label:
+        return
+    try:
+        from core import db
+        db.set_account_pay_card(account_id, label)
+        logger.info("[pay-session] %s 已记录支付卡片：账号 #%s 用 %s",
+                    sess.sid, account_id, label)
+    except Exception:  # noqa: BLE001 - 同上，记录失败不能影响支付结果
+        logger.exception("[pay-session] %s 记录支付卡片失败", sess.sid)
+
+
+def _clear_checkout_link(sess: PaySession) -> None:
+    """支付成功后清掉长链。
+
+    长链付过一次就作废。留着的话下次点支付会提示"已有长链，可复用"，
+    拿它再付必然失败，还白等一轮探测。
+    """
+    account_id = int(sess.account_id or 0)
+    if account_id <= 0:
+        return
+    try:
+        from core import db
+        db.update_account_team_checkout(account_id, clear=True)
+        logger.info("[pay-session] %s 已清掉用过的长链：账号 #%s",
+                    sess.sid, account_id)
+    except Exception:  # noqa: BLE001 - 清理失败不能影响已完成的支付
+        logger.exception("[pay-session] %s 清长链失败", sess.sid)
+
 
 def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
     """支付成功后延迟查一次套餐，确认 Team 是否真的生效。
 
     提交成功只代表扣款发出，OpenAI 侧写套餐有延迟，立刻查多半还是旧值。
     用独立线程延时，不占用支付线程，也不让前端等。
+
+    等待期间会登记进 _PENDING_PLAN_CHECKS，让 /api/busy 看得见——
+    2026-11-18 线上：#94 付款后 7 秒我重启了服务，safe-restart.sh 报
+    "当前空闲"（延迟线程不在任何统计里），线程被杀，套餐查询从未执行，
+    订阅编号也就一直空着。重启窗口必须知道这件事还没做完。
     """
     if not bool(getattr(cfg, "VCC_AUTO_PLAN_CHECK", True)):
         return
@@ -154,39 +250,59 @@ def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
     if account_id <= 0:
         return
 
-    def _run() -> None:
-        if delay:
-            time.sleep(delay)
-        try:
-            from core import db
-            from core.plan_check_service import enqueue_account_plan_check
+    with _plan_check_lock:
+        _PENDING_PLAN_CHECKS[account_id] = time.time() + delay
 
-            acc = db.get_account(account_id)
-            if not acc:
-                logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 不存在", account_id)
-                return
-            token = str(acc.get("access_token") or "").strip()
-            if not token:
-                logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 没有 access_token",
-                               account_id)
-                return
-            res = enqueue_account_plan_check(
-                account_id=account_id,
-                email=str(acc.get("email") or ""),
-                access_token=token,
-                trigger="payment_auto",
-            )
-            if res.get("accepted"):
-                logger.info("[pay-session] 支付后已入队套餐查询：%s", acc.get("email"))
-            else:
-                logger.warning("[pay-session] 支付后套餐查询未入队：%s", res.get("error") or res)
-        except Exception as exc:  # noqa: BLE001 - 查套餐失败不影响已完成的支付
-            logger.warning("[pay-session] 支付后查套餐异常：%s: %s",
-                           type(exc).__name__, str(exc)[:160])
+    def _run() -> None:
+        try:
+            if delay:
+                time.sleep(delay)
+            try:
+                from core import db
+                from core.plan_check_service import enqueue_account_plan_check
+
+                acc = db.get_account(account_id)
+                if not acc:
+                    logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 不存在", account_id)
+                    return
+                token = str(acc.get("access_token") or "").strip()
+                if not token:
+                    logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 没有 access_token",
+                                   account_id)
+                    return
+                res = enqueue_account_plan_check(
+                    account_id=account_id,
+                    email=str(acc.get("email") or ""),
+                    access_token=token,
+                    trigger="payment_auto",
+                )
+                if res.get("accepted"):
+                    logger.info("[pay-session] 支付后已入队套餐查询：%s", acc.get("email"))
+                else:
+                    logger.warning("[pay-session] 支付后套餐查询未入队：%s", res.get("error") or res)
+            except Exception as exc:  # noqa: BLE001 - 查套餐失败不影响已完成的支付
+                logger.warning("[pay-session] 支付后查套餐异常：%s: %s",
+                               type(exc).__name__, str(exc)[:160])
+        finally:
+            with _plan_check_lock:
+                _PENDING_PLAN_CHECKS.pop(account_id, None)
 
     threading.Thread(target=_run, name=f"plan-after-pay-{account_id}",
                      daemon=True).start()
     logger.info("[pay-session] %s 支付成功，%.0fs 后自动查套餐", sess.sid, delay)
+
+
+def pending_plan_checks() -> list[dict]:
+    """还在等待的"支付后查套餐"任务。
+
+    给 /api/busy 用：这些任务跑在 daemon 线程里，重启会直接丢掉，
+    而丢掉的后果是账号付了款却没有套餐信息和订阅编号。
+    """
+    now = time.time()
+    with _plan_check_lock:
+        items = list(_PENDING_PLAN_CHECKS.items())
+    return [{"account_id": aid, "due_in": round(max(0.0, due - now), 1)}
+            for aid, due in items]
 
 
 def _shoot(page: Any, sess: PaySession, *, full: bool = True) -> None:
@@ -246,6 +362,167 @@ def _try_cloak_browser(cfg, proxy: str, sess):
     return browser
 
 
+def _login_cookies_for(email: str, proxy: str, *, rounds: int = 4,
+                       gap: float = 30.0) -> list[dict]:
+    """登录账号并取回可注入浏览器的 chatgpt.com 会话 cookie。
+
+    单席位结账页在 chatgpt.com 自己域下，必须有登录态才打得开，
+    否则直接 302 到 /auth/login。而协议会话靠的是 Bearer header，
+    光预热拿不到 session-token，必须真走完密码 + TOTP 登录。
+
+    OpenAI 对这些出口的 403 是间歇性的（实测同一出口几分钟后就好了），
+    所以这里重试几轮；全失败才放弃。
+    """
+    import time as _t
+
+    from core import db
+    from core.account_liveness import (_login_via_password_or_otp,
+                                       _network_preflight_with_retry)
+    from core.openai_auth import follow_authorize
+    from core.session import close_browser_session
+
+    acc = db.get_account_by_email(email) or {}
+    src = str(acc.get("email_source") or "")
+
+    for rd in range(1, int(rounds) + 1):
+        session = None
+        try:
+            session, authorize_url = _network_preflight_with_retry(
+                email, proxy, fingerprint_state={})
+            follow_authorize(session, authorize_url)
+            _login_via_password_or_otp(session, email, _t.time(),
+                                       email_source=src)
+            jar = session.session.cookies.get_dict() or {}
+            cookies = [_cookie_for_playwright(k, v) for k, v in jar.items()]
+            if any("session-token" in c["name"] for c in cookies):
+                logger.info("[pay-session] 第 %s 轮登录成功，取到 %s 个 cookie",
+                            rd, len(cookies))
+                return cookies
+            logger.warning("[pay-session] 第 %s 轮登录没拿到 session-token", rd)
+        except Exception as exc:  # noqa: BLE001 - 换一轮重试
+            logger.warning("[pay-session] 第 %s/%s 轮登录失败：%s",
+                           rd, rounds, str(exc)[:160])
+        finally:
+            if session is not None:
+                try:
+                    close_browser_session(session)
+                except Exception:  # noqa: BLE001
+                    pass
+        if rd < rounds:
+            _t.sleep(gap)
+    return []
+
+
+def _cookie_for_playwright(name: str, value: str) -> dict:
+    """把 cookie 转成 playwright 认的结构。
+
+    cookie 前缀有硬性规则，不满足 add_cookies 直接报
+    Invalid cookie fields，而且会连累整批：
+        __Host-   不能带 domain，必须用 url 指定，且 path=/ secure
+        __Secure- 必须 secure
+    踩过一次：漏了 secure，恰好 session-token 两个分片全被拒，
+    结果页面照样跳登录页。
+    """
+    c: dict[str, Any] = {"name": name, "value": value,
+                         "secure": True, "sameSite": "Lax"}
+    if name.startswith("__Host-"):
+        c["url"] = "https://chatgpt.com/"
+    else:
+        c["domain"] = ".chatgpt.com"
+        c["path"] = "/"
+    return c
+
+
+def _fill_elements_checkout(page, *, card: dict, billing: dict, cfg, result,
+                            out_dir, sess) -> None:
+    """填写单席位结账页。
+
+    和 classic 的区别：卡号三要素在 Stripe Elements iframe 里，
+    账单地址在另一个 iframe（渲染更晚，要滚动才挂上来）。
+
+    账单国家必须改成卡的归属国：页面默认跟着 checkout session 的
+    billing_details 走（我们按 EG 建单是为了拿 EGP 定价），
+    但卡是美国卡，不改会被发卡行判定地址不符而拒付。
+    """
+    from core.elements_checkout import (fill_elements_address,
+                                        fill_elements_card,
+                                        read_seat_quantity)
+    from core.vcc_checkout_pay import VccPayError
+
+    result.stage = "fill"
+    _touch(sess, message="正在填写卡片信息")
+
+    # Stripe Elements 的 iframe 渲染很不稳定：同一条链接有时十几秒就绪，
+    # 有时 60 秒还没挂上输入框。首次等不到就刷新页面重来——重载比干等有效。
+    page_timeout = float(getattr(cfg, "VCC_PAGE_TIMEOUT", 60) or 60)
+    filled = None
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            filled = fill_elements_card(page, card=card,
+                                        timeout_ms=int(page_timeout * 1000))
+            break
+        except Exception as exc:  # noqa: BLE001 - 重载后再试
+            last_exc = exc
+            logger.warning("[pay-session] %s 第 %s/3 次填卡失败：%s",
+                           sess.sid, attempt, str(exc)[:160])
+            if attempt >= 3:
+                break
+            _touch(sess, message=f"支付表单没加载出来，重试第 {attempt} 次")
+            try:
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_timeout(8000)
+            except Exception:  # noqa: BLE001 - 重载失败就直接再试一轮
+                logger.debug("[pay-session] 重载失败", exc_info=True)
+
+    if filled is None:
+        try:
+            frames = [str(getattr(f, "url", ""))[:90] for f in page.frames]
+            logger.error("[pay-session] %s 填卡失败，当前 %s 个 frame：%s",
+                         sess.sid, len(frames), frames)
+            logger.error("[pay-session] %s 页面 URL=%s", sess.sid, page.url)
+        except Exception:  # noqa: BLE001
+            pass
+        _screenshot_safe(page, out_dir, "elements_fill_failed", result)
+        raise VccPayError(f"填写卡片失败：{last_exc}") from last_exc
+    result.filled.update(filled)
+
+    # 账单地址：在另一个 iframe 里，渲染比卡号晚。
+    # 卡是美国卡，页面默认国家是建单时的 EG，必须改过来，
+    # 否则发卡行会因账单地址不符拒付。
+    _touch(sess, message="正在填写账单地址")
+    try:
+        addr_filled = fill_elements_address(
+            page, billing,
+            timeout_ms=int(float(getattr(cfg, "VCC_PAGE_TIMEOUT", 60)) * 1000))
+        result.filled.update(addr_filled)
+    except Exception as exc:  # noqa: BLE001
+        _screenshot_safe(page, out_dir, "elements_address_failed", result)
+        raise VccPayError(f"填写账单地址失败：{exc}") from exc
+
+    # 席位数直接决定扣多少钱。这条链路是"创建 2 席再改 1 席"，
+    # 万一 update 没生效就会按 2 席扣款，所以提交前必须核一次。
+    seats = read_seat_quantity(page)
+    if seats is not None:
+        logger.info("[pay-session] %s 页面席位数 = %s", sess.sid, seats)
+        if seats > 1:
+            _screenshot_safe(page, out_dir, "elements_seat_mismatch", result)
+            raise VccPayError(
+                f"页面显示 {seats} 席，不是预期的 1 席，已停止以免多扣款")
+    else:
+        logger.warning("[pay-session] %s 读不到席位数，继续靠金额闸门兜底",
+                       sess.sid)
+
+
+def _screenshot_safe(page, out_dir, name: str, result) -> None:
+    """截图，失败不影响主流程。"""
+    try:
+        from core.vcc_checkout_pay import _screenshot
+        _screenshot(page, out_dir, name, result.screenshots)
+    except Exception:  # noqa: BLE001
+        logger.debug("[pay-session] 截图 %s 失败", name, exc_info=True)
+
+
 def _plain_browser(pw, cfg, proxy: str):
     """裸 Playwright 回退路径。
 
@@ -287,25 +564,74 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
 
     # 取卡要走白名单 IP，不能走账号代理，所以在开浏览器之前做
     try:
-        card_row = client.pick_card(card_id=(cfg.VCC_CARD_ID or "").strip(),
-                                    min_balance=cfg.VCC_MIN_CARD_BALANCE)
-        card_id = str(card_row.get("cardId") or "")
-        _touch(sess, card_mask=str(card_row.get("cardNoMask") or ""))
-        logger.info("[pay-session] %s 选用卡 %s（%s）", sess.sid, card_id, sess.card_mask)
+        from core.custom_card_store import (CustomCardError, get_secrets,
+                                            is_custom_id, local_id_of,
+                                            mark_used)
+        want_card = (cfg.VCC_CARD_ID or "").strip()
+        if is_custom_id(want_card):
+            # 自定义卡不在 VCC 名下：pick_card / card_secrets 都会报"卡片不存在"，
+            # 三要素只能从本地卡池取。余额也无从查起，由卡主自己保证。
+            lid = local_id_of(want_card)
+            try:
+                sec = get_secrets(lid)
+            except CustomCardError as exc:
+                raise VccPayError(f"自定义卡不可用：{exc}") from exc
+            card_id = want_card
+            digits = "".join(ch for ch in str(sec["card_number"]) if ch.isdigit())
+            # 卡池存 4 位年（2030），但 Stripe 的有效期框是 MM / YY，
+            # 填 4 位会被截成 "03 / 20"，回读校验必然不符。统一取后两位。
+            yy = "".join(ch for ch in str(sec["exp_year"]) if ch.isdigit())[-2:]
+            mm = "".join(ch for ch in str(sec["exp_month"]) if ch.isdigit()).zfill(2)
+            card = {
+                "number": digits,
+                "exp_month": mm,
+                "exp_year": yy,
+                "cvc": str(sec["cvv"]).strip(),
+            }
+            mask = f"{digits[:6]}****{digits[-4:]}" if len(digits) > 10 else digits
+            # 自有卡优先用卡池备注名；没填才退回 VCC-后四位，保证总有个可读标识
+            label = str(sec.get("label") or "").strip()
+            if not label:
+                label = "VCC-%s" % digits[-4:] if len(digits) >= 4 else "自有卡"
+            _touch(sess, card_mask=mask, card_label=label)
+            logger.info("[pay-session] %s 选用自定义卡 %s（%s，标签 %s）",
+                        sess.sid, card_id, mask, label)
+            mark_used(lid)
 
-        if (cfg.VCC_NAME_SOURCE or "holder").lower() == "config":
-            name = (cfg.VCC_BILLING_NAME or "").strip()
+            if (cfg.VCC_NAME_SOURCE or "holder").lower() == "config":
+                name = (cfg.VCC_BILLING_NAME or "").strip()
+            else:
+                # 自定义卡没有 VCC 持卡人记录，用卡池里填的姓名
+                name = str(sec.get("holder_name") or "").strip()
+                if not name:
+                    name = (cfg.VCC_BILLING_NAME or "").strip()
             if not name:
-                raise VccPayError("VCC_NAME_SOURCE=config 但 VCC_BILLING_NAME 为空")
+                raise VccPayError("自定义卡未填持卡人姓名，请在卡池补填或设置 VCC_BILLING_NAME")
         else:
-            # 卡行自带 holderName，且它就是卡面姓名；持卡人表可能查不到这个
-            # holderId（老卡的持卡人记录会从列表里消失），所以优先用卡自己的。
-            name = str(card_row.get("holderName") or "").strip()
-            if not name:
-                holder = client.pick_cardholder(int(cfg.VCC_HOLDER_ID or 0))
-                name = str(holder.get("holderName") or "").strip()
-            if not name:
-                raise VccPayError("持卡人姓名为空，请改用 VCC_BILLING_NAME")
+            card_row = client.pick_card(card_id=want_card,
+                                        min_balance=cfg.VCC_MIN_CARD_BALANCE)
+            card_id = str(card_row.get("cardId") or "")
+            vcc_mask = str(card_row.get("cardNoMask") or "")
+            # VCC 托管卡统一记 VCC-后四位。掩码形如 537872713****1771
+            tail = "".join(ch for ch in vcc_mask if ch.isdigit())[-4:]
+            _touch(sess, card_mask=vcc_mask,
+                   card_label="VCC-%s" % tail if tail else "VCC")
+            logger.info("[pay-session] %s 选用卡 %s（%s，标签 %s）",
+                        sess.sid, card_id, sess.card_mask, sess.card_label)
+
+            if (cfg.VCC_NAME_SOURCE or "holder").lower() == "config":
+                name = (cfg.VCC_BILLING_NAME or "").strip()
+                if not name:
+                    raise VccPayError("VCC_NAME_SOURCE=config 但 VCC_BILLING_NAME 为空")
+            else:
+                # 卡行自带 holderName，且它就是卡面姓名；持卡人表可能查不到这个
+                # holderId（老卡的持卡人记录会从列表里消失），所以优先用卡自己的。
+                name = str(card_row.get("holderName") or "").strip()
+                if not name:
+                    holder = client.pick_cardholder(int(cfg.VCC_HOLDER_ID or 0))
+                    name = str(holder.get("holderName") or "").strip()
+                if not name:
+                    raise VccPayError("持卡人姓名为空，请改用 VCC_BILLING_NAME")
 
         billing = {
             "name": name,
@@ -316,11 +642,28 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
             "line2": (cfg.VCC_BILLING_LINE2 or "").strip(),
             "postal": (cfg.VCC_BILLING_POSTAL or "").strip(),
         }
+
+        if not is_custom_id(card_id):
+            card = client.card_secrets(card_id)   # 敏感明文，禁止写日志
+
+            # 按卡取它登记的账单地址。每张 VCC 卡绑定的地址不同，而配置里
+            # 只能写死一份；地址和卡对不上 Stripe 会直接拒付。姓名也用接口
+            # 返回的，它和地址同源（VCC 后台的 holderName 可能是另一个名字）。
+            if bool(getattr(cfg, "VCC_FETCH_CARD_ADDRESS", True)):
+                from core.card_address import CardAddressError, fetch_card_address
+                try:
+                    fetched = fetch_card_address(card.get("number") or "")
+                except CardAddressError as exc:
+                    raise VccPayError("取卡账单地址失败：%s" % exc) from exc
+                billing = fetched
+                name = fetched["name"]
+                logger.info("[pay-session] %s 账单地址按卡取得：%s, %s %s %s（%s）",
+                            sess.sid, fetched["city"], fetched["state"],
+                            fetched["postal"], fetched["country"], name)
+
         for key in ("country", "city", "line1"):
             if not billing[key]:
                 raise VccPayError(f"账单地址缺少必填项：{key}")
-
-        card = client.card_secrets(card_id)   # 敏感明文，禁止写日志
     except (VccError, VccPayError) as exc:
         _touch(sess, state=ST_FAILED, message=str(exc))
         logger.error("[pay-session] %s 准备失败：%s", sess.sid, exc)
@@ -363,18 +706,70 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
         if pw_ctx is not None:
             context.add_init_script(
                 "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+
+        # 单席位结账页在 chatgpt.com 自己域下，没登录态会被 302 到
+        # /auth/login，填表逻辑连表单都看不到。2 席的 Stripe 托管页
+        # 是匿名可访问的，不需要这步。
+        from core.elements_checkout import is_elements_checkout
+        use_elements = is_elements_checkout(checkout_url)
+        if use_elements:
+            logger.info("[pay-session] %s 单席位结账页，先登录注入 cookie",
+                        sess.sid)
+            _touch(sess, message="正在登录账号（单席位结账页需要登录态）")
+            cookies = _login_cookies_for(sess.email, proxy)
+            if not cookies:
+                raise VccPayError(
+                    "单席位结账页需要登录态，但多轮登录都没成功（多半是出口"
+                    "被临时风控）。稍后重试，或改用手动支付")
+            try:
+                context.add_cookies(cookies)
+            except Exception as exc:  # noqa: BLE001 - 整批失败就逐条来
+                logger.warning("[pay-session] cookie 整批注入失败（%s），改逐条",
+                               str(exc)[:80])
+                okn = 0
+                for c in cookies:
+                    try:
+                        context.add_cookies([c])
+                        okn += 1
+                    except Exception:  # noqa: BLE001
+                        logger.debug("[pay-session] cookie %s 注入失败",
+                                     c.get("name"))
+                if okn < len(cookies):
+                    logger.warning("[pay-session] cookie 注入 %s/%s",
+                                   okn, len(cookies))
+
         page = context.new_page()
         page.set_default_timeout(int(cfg.VCC_PAGE_TIMEOUT * 1000))
         page.goto(checkout_url, wait_until="domcontentloaded")
 
+        if use_elements and "auth/login" in str(page.url or ""):
+            raise VccPayError(
+                "登录态注入后仍被重定向到登录页，无法填表。"
+                "可能 cookie 已失效，请重试或改用手动支付")
+
         from core.vcc_checkout_pay import PayResult
         tmp = PayResult()
-        fill_checkout(page, card=card, email=sess.email, billing=billing,
-                      cfg=cfg, result=tmp, out_dir=out_dir)
+        if use_elements:
+            _fill_elements_checkout(page, card=card, billing=billing, cfg=cfg,
+                                    result=tmp, out_dir=out_dir, sess=sess)
+        else:
+            fill_checkout(page, card=card, email=sess.email, billing=billing,
+                          cfg=cfg, result=tmp, out_dir=out_dir)
 
         # 先等税费重算稳定，再读金额：地址决定税，重算期间读到的是中间值。
-        _wait_total_rendered(page)
-        currency, amount = read_total(page)
+        if use_elements:
+            from core.elements_checkout import read_elements_total
+            page.wait_for_timeout(1500)
+            # 这个页面只渲染货币符号，没有币种码（实采确认 HTML 里没有，
+            # 也没有 __NEXT_DATA__）。$ 可能是 USD/CAD/AUD，解析不出币种
+            # 会被闸门当成"无法识别币种"直接拦住。用配置里期望的币种兜底：
+            # 它本来就是下单时指定的那个，不是猜的。
+            currency, amount = read_elements_total(
+                page,
+                fallback_currency=(cfg.VCC_EXPECTED_CURRENCY or "").strip())
+        else:
+            _wait_total_rendered(page)
+            currency, amount = read_total(page)
         expected = float(cfg.VCC_EXPECTED_AMOUNT or 0.0)
         _touch(sess, currency=currency, amount=amount, expected=expected)
 
@@ -396,8 +791,16 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
                message=(f"表单已填好，应付 {shown}，等待确认"
                         if not gate_error else f"金额闸门未通过：{gate_error}"))
 
+        # 两种页面的提交按钮不是一个：classic 有 data-testid，
+        # 单席位页面只是个普通 button[type=submit]（文案 Subscribe，
+        # 但语言跟随出口，不能按文案找）。
+        if use_elements:
+            from core.elements_checkout import SEL_EL_SUBMIT
+            submit_sel = SEL_EL_SUBMIT
+        else:
+            submit_sel = SEL_SUBMIT
         _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
-                         currency, amount, SEL_SUBMIT, _page_error)
+                         currency, amount, submit_sel, _page_error)
     except Exception as exc:  # noqa: BLE001 - 汇总成状态而非上抛
         if sess.state not in _TERMINAL:
             _touch(sess, state=ST_FAILED,
@@ -451,9 +854,25 @@ def _wait_total_rendered(page, timeout: float = 12.0) -> None:
 
 def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
                      currency, amount, sel_submit, page_error) -> None:
-    """等人确认，确认后提交并处理 3DS。"""
+    """等人确认，确认后提交并处理 3DS。
+
+    自动订阅场景（VCC_AUTO_CONFIRM=True）不等人：金额闸门已经校验过
+    页面总额和币种，再让人点一次没有增加任何判断，只会让流程卡住——
+    实测等了 10 分钟后会话就被回收，整单白跑。
+    闸门没过时绝不自动提交，仍然停下等人。
+    """
     timeout = float(getattr(cfg, "VCC_SESSION_TIMEOUT", 900.0) or 900.0)
     deadline = time.time() + timeout
+
+    if bool(getattr(cfg, "VCC_AUTO_CONFIRM", False)):
+        if sess.gate_error:
+            logger.error("[pay-session] %s 闸门未通过，不自动提交：%s",
+                         sess.sid, sess.gate_error)
+            _touch(sess, message="闸门未通过，等待人工处理：%s" % sess.gate_error)
+        else:
+            logger.warning("[pay-session] %s 自动确认（闸门已通过 %s %s）",
+                           sess.sid, currency, amount)
+            sess._cmd.put({"op": "confirm", "auto": True})
 
     while time.time() < deadline:
         try:
@@ -481,20 +900,31 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
             return
 
         _touch(sess, state=ST_SUBMITTING, message="正在提交…")
-        logger.warning("[pay-session] %s 人工确认，提交支付 %s %s",
-                       sess.sid, currency, amount)
+        logger.warning("[pay-session] %s %s确认，提交支付 %s %s",
+                       sess.sid, "自动" if cmd.get("auto") else "人工",
+                       currency, amount)
         page.click(sel_submit)
         _touch(sess, submitted=True)
 
         # Stripe 的 Processing 可能持续几分钟，固定等几秒就判定会误判。
         submit_timeout = float(getattr(cfg, "VCC_SUBMIT_TIMEOUT", 180.0) or 180.0)
-        outcome = _wait_settled(page, sess, timeout=submit_timeout)
+        outcome = _wait_settled(page, sess, timeout=submit_timeout,
+                                submit_sel=sel_submit)
         _shoot(page, sess)
 
         # 人机验证可能反复出现，过一次继续等页面落定
         rounds = 0
         while outcome == "captcha" and rounds < 3:
             rounds += 1
+            # 先试自动打码：Stripe 的 Enterprise hCaptcha 能自动过就不用等人。
+            # 打码失败（没配 key / 平台失败 / 注入不成功）再回落人工接管，
+            # 不让打码成为新的单点故障。
+            if _try_solve_captcha(page, sess, cfg):
+                logger.info("[pay-session] %s 打码已注入，继续等结果", sess.sid)
+                outcome = _wait_settled(page, sess, timeout=submit_timeout,
+                                        submit_sel=sel_submit)
+                _shoot(page, sess)
+                continue
             if not getattr(cfg, "VCC_REMOTE_CONTROL", True):
                 _touch(sess, state=ST_FAILED,
                        message="页面要求人机验证，但远程交互未开启，无法完成")
@@ -505,7 +935,8 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
             if got != "resolved":
                 return
             _touch(sess, state=ST_SUBMITTING, message="验证已完成，继续等待结果…")
-            outcome = _wait_settled(page, sess, timeout=submit_timeout)
+            outcome = _wait_settled(page, sess, timeout=submit_timeout,
+                                    submit_sel=sel_submit)
             _shoot(page, sess)
 
         if outcome == "challenge" and getattr(cfg, "VCC_3DS_ENABLED", True):
@@ -524,12 +955,31 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
         err = page_error(page)
         if err:
             _touch(sess, state=ST_FAILED, message=f"提交后页面报错：{err}")
+            return
+
+        # 页面没报错 ≠ 支付成功。必须再确认订阅真的建立了，否则会把失败单
+        # 记成成功（paid_at 一落，账号就被移出候选队列，再也不重试）。
+        verified, why = _verify_subscription_active(page, cfg)
+        if verified is False:
+            logger.error("[pay-session] %s 提交后核验未通过：%s", sess.sid, why)
+            _touch(sess, state=ST_FAILED,
+                   message=f"提交未成功：{why}。请到 VCC 后台确认该卡是否扣款，"
+                           f"若未扣款可重试")
+            return
+
+        shown = f"{currency} {amount:.2f}" if amount is not None else ""
+        if verified is True:
+            _touch(sess, state=ST_DONE,
+                   message=f"已提交支付 {shown}（页面已确认订阅生效）".strip())
         else:
-            shown = f"{currency} {amount:.2f}" if amount is not None else ""
-            _touch(sess, state=ST_DONE, message=f"已提交支付 {shown}".strip())
-            _record_promo(sess)
-            _record_paid_at(sess)
-            _schedule_plan_check(sess, cfg)
+            # 页面没落定：先记为已提交，但把"待核验"写进 message，
+            # 由延迟查套餐给出最终结论。
+            _touch(sess, state=ST_DONE,
+                   message=f"已提交支付 {shown}，等待订阅核验".strip())
+        _record_promo(sess)
+        _record_paid_at(sess)
+        _clear_checkout_link(sess)
+        _schedule_plan_check(sess, cfg)
         return
 
     if sess.state not in _TERMINAL:
@@ -544,31 +994,237 @@ def read_total_safe(page) -> tuple[str, float | None]:
         return "", None
 
 
-def _detect_captcha(page) -> bool:
-    """页面是否在等人过人机验证。
+def _extract_hcaptcha_params(page) -> dict:
+    """从当前页面抓出解 hCaptcha 需要的参数。
 
-    hCaptcha 的答案绑定在解题的那个浏览器上（鼠标轨迹、指纹、IP），
-    没法在别处解完把 token 搬过来，所以只能让人直接操作这个浏览器。
+    必须从**真实会话**里抓，不能照抄常量：Stripe 一次支付会话里同时存在
+    好几个 hCaptcha（普通 hCaptcha 和 Enterprise 各一套 sitekey），只有带
+    rqdata 的那个才是和本次 SetupIntent/PaymentIntent 绑定的那个。rqdata
+    每次都变，抄上一次的必然校验失败。
+
+    返回 {sitekey, rqdata, pageurl, userAgent, found}。
     """
+    out = {"sitekey": "", "rqdata": "", "pageurl": "", "userAgent": "", "found": False}
+    try:
+        out["pageurl"] = str(page.url or "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["userAgent"] = str(page.evaluate("() => navigator.userAgent") or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 优先从 Stripe 的 hcaptcha-inner iframe URL 里取：那里的 sitekey 和
+    # rqdata 是 Stripe 自己拼上去的，就是当次真正生效的那一份。
+    best = None
+    for fr in page.frames:
+        url = str(getattr(fr, "url", "") or "")
+        if "hcaptcha" not in url.lower():
+            continue
+        parsed = urllib.parse.urlparse(url)
+        frag = urllib.parse.parse_qs(parsed.fragment or "")
+        query = urllib.parse.parse_qs(parsed.query or "")
+        merged = {**query, **frag}
+        sitekey = (merged.get("sitekey") or [""])[0]
+        rqdata = (merged.get("rqdata") or [""])[0]
+        if not sitekey:
+            continue
+        # 带 rqdata 的那个才是 Enterprise 任务，优先选它
+        cand = {"sitekey": sitekey, "rqdata": rqdata}
+        if best is None or (rqdata and not best.get("rqdata")):
+            best = cand
+    if best:
+        out.update(best)
+        out["found"] = True
+        return out
+
+    # 兜底：从页面 HTML 里找 sitekey/rqdata 属性
+    try:
+        html = page.content() or ""
+    except Exception:  # noqa: BLE001
+        html = ""
+    m = re.search(r'sitekey["\']?\s*[:=]\s*["\']([0-9a-f-]{20,})', html, re.I)
+    if m:
+        out["sitekey"] = m.group(1)
+        out["found"] = True
+    m2 = re.search(r'rqdata["\']?\s*[:=]\s*["\']([^"\']{20,})', html, re.I)
+    if m2:
+        out["rqdata"] = m2.group(1)
+    return out
+
+
+def _inject_hcaptcha_token(page, token: str) -> bool:
+    """把打码平台解出的 token 注入页面，让 hCaptcha 认为已通过。
+
+    注入方式按可靠性递进：
+      1. 对每个 hCaptcha 表单填 g-recaptcha-response / h-captcha-response
+         两个隐藏域（hCaptcha 两者都认），并触发 input/change；
+      2. 调页面上的 hcaptcha.setResponse（如果暴露了）；
+      3. 点提交按钮让 Stripe 重新发起校验。
+
+    返回是否至少注入成功一处。
+    """
+    token = str(token or "").strip()
+    if not token:
+        return False
+    js = """
+    (token) => {
+      let touched = 0;
+      const names = ['g-recaptcha-response', 'h-captcha-response'];
+      for (const n of names) {
+        let els = document.querySelectorAll(`[name="${n}"]`);
+        if (!els.length) {
+          const ta = document.createElement('textarea');
+          ta.name = n; ta.style.display = 'none';
+          document.body.appendChild(ta);
+          els = document.querySelectorAll(`[name="${n}"]`);
+        }
+        for (const el of els) {
+          el.value = token;
+          el.innerHTML = token;
+          el.dispatchEvent(new Event('input', {bubbles: true}));
+          el.dispatchEvent(new Event('change', {bubbles: true}));
+          touched++;
+        }
+      }
+      try {
+        if (window.hcaptcha && typeof window.hcaptcha.setResponse === 'function') {
+          window.hcaptcha.setResponse(token);
+          touched++;
+        }
+      } catch (e) {}
+      return touched;
+    }
+    """
+    ok = 0
+    for target in [page, *page.frames]:
+        try:
+            n = target.evaluate(js, token)
+            if isinstance(n, (int, float)) and n > 0:
+                ok += int(n)
+        except Exception:  # noqa: BLE001 - 跨域 frame 会抛，跳过
+            continue
+    return ok > 0
+
+
+def _try_solve_captcha(page, sess, cfg) -> bool:
+    """尝试用打码平台自动过掉当前的人机验证。成功返回 True。
+
+    失败一律返回 False 而不是抛异常：打码是"锦上添花"的加速路径，
+    它挂了也不能把整笔支付带崩，调用方会回落到人工接管。
+    """
+    if not bool(getattr(cfg, "CAPTCHA_SOLVER_ENABLED", False)):
+        return False
+    api_key = str(getattr(cfg, "CAPTCHA_2CAPTCHA_KEY", "") or "").strip()
+    if not api_key:
+        logger.warning("[打码] 已开启但没配 CAPTCHA_2CAPTCHA_KEY，回落人工")
+        return False
+
+    from core.captcha_solver import CaptchaError, solve_hcaptcha
+
+    params = _extract_hcaptcha_params(page)
+    if not params.get("found") or not params.get("sitekey"):
+        logger.warning("[打码] 抓不到 sitekey，无法打码，回落人工")
+        return False
+    logger.info("[打码] 抓到 sitekey=%s rqdata=%s",
+                str(params["sitekey"])[:12], "有" if params.get("rqdata") else "无")
+
+    _touch(sess, state=ST_SUBMITTING, message="正在自动完成人机验证…")
+    try:
+        token = solve_hcaptcha(
+            api_key=api_key,
+            sitekey=params["sitekey"],
+            pageurl=params["pageurl"],
+            user_agent=params.get("userAgent") or "",
+            rqdata=params.get("rqdata") or "",
+            enterprise=True,
+            timeout=float(getattr(cfg, "CAPTCHA_SOLVE_TIMEOUT", 180.0) or 180.0),
+            poll_interval=float(getattr(cfg, "CAPTCHA_POLL_INTERVAL", 5.0) or 5.0),
+        )
+    except CaptchaError as exc:
+        logger.warning("[打码] 失败：%s", exc)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[打码] 异常：%s: %s", type(exc).__name__, exc)
+        return False
+
+    if not _inject_hcaptcha_token(page, token):
+        logger.warning("[打码] token 注入失败，回落人工")
+        return False
+
+    logger.info("[打码] token 已注入，等页面确认")
+    try:
+        page.wait_for_timeout(4000)
+    except Exception:  # noqa: BLE001
+        pass
+    # 注入后再点一次提交，让 Stripe 带着新 token 重新校验
+    try:
+        from core.vcc_checkout_pay import SEL_SUBMIT
+        from core.elements_checkout import SEL_EL_SUBMIT
+        for sel in (SEL_EL_SUBMIT, SEL_SUBMIT):
+            el = page.query_selector(sel)
+            if el is not None:
+                el.click()
+                logger.info("[打码] 已重新提交")
+                break
+    except Exception:  # noqa: BLE001
+        logger.debug("[打码] 重新提交失败", exc_info=True)
+    try:
+        page.wait_for_timeout(4000)
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+def _detect_captcha(page) -> bool:
+    """页面是否真的在等人过人机验证。
+
+    2026-11-18 事故：这里原来把 `body` 当成"验证码可见"的判据，而 body 在任何
+    iframe 里永远可见。Stripe 结账页会**预加载** hCaptcha iframe（只是挂着，
+    并不显示挑战），于是每一笔提交后都被误判成"要求人机验证"，停在
+    awaiting_human 干等一个根本不存在的东西。
+
+    实际那一单的真实错误是页面上的 "Payment was not approved"（拒付），
+    而当天早些时候成功的 5 笔支付全程没有出现任何验证码。
+
+    现在只认"真的有可见挑战"的信号：
+      - hCaptcha 的复选框 / 挑战框（明确的 id、class 或 role）
+      - Stripe 的 "One more step before you're done" 等文案
+    iframe 自身 visible=False 的一律不算。
+    """
+    # Stripe 只有在真要人验证时才渲染这段文案，是最可靠的判据
+    for text in ("One more step before you're done",
+                 "Select the checkbox below",
+                 "Verify you are human",
+                 "I am human",
+                 "確認してください",
+                 "请验证您是人类"):
+        try:
+            if page.get_by_text(text, exact=False).first.is_visible(timeout=600):
+                return True
+        except Exception:  # noqa: BLE001 - 找不到就继续试下一个
+            continue
+
+    # hCaptcha / reCAPTCHA 的挑战元素；不要用 body 这种永远可见的选择器
+    challenge_selectors = (
+        "#checkbox",                         # hCaptcha 复选框
+        ".checkbox",                         # hCaptcha 复选框（旧版）
+        "div[role='checkbox']",
+        "#challenge-container",              # hCaptcha 挑战容器
+        "div.challenge-container",
+        ".recaptcha-checkbox-checked",
+        ".rc-anchor-normal",                 # reCAPTCHA 面板
+    )
     for frame in page.frames:
         url = (frame.url or "").lower()
         if "hcaptcha.com" not in url and "recaptcha" not in url:
             continue
-        for selector in ("#checkbox", 'div[role="checkbox"]',
-                         ".recaptcha-checkbox", "body"):
+        for selector in challenge_selectors:
             try:
-                if frame.locator(selector).first.is_visible(timeout=800):
+                if frame.locator(selector).first.is_visible(timeout=500):
                     return True
             except Exception:  # noqa: BLE001 - frame 可能随时被销毁
                 continue
-    # 兜底：Stripe 弹的提示文案
-    for text in ("One more step before you're done", "I am human",
-                 "確認してください"):
-        try:
-            if page.get_by_text(text, exact=False).first.is_visible(timeout=600):
-                return True
-        except Exception:  # noqa: BLE001
-            continue
     return False
 
 
@@ -673,11 +1329,15 @@ def _find_3ds_frame(page):
     return None, ""
 
 
-def _wait_settled(page, sess, timeout: float = 120.0) -> str:
+def _wait_settled(page, sess, timeout: float = 120.0,
+                  submit_sel: str = "") -> str:
     """提交后等页面落定。
 
     返回 'challenge'（3DS）/ 'captcha'（人机验证）/ 'left'（已离开表单）/
     'processing'（超时仍未落定）。
+
+    submit_sel 必须和当初点下去的那个按钮一致：两种结账页的按钮选择器不同，
+    传错会一直查不到元素，直接误判成 'left'（以为提交结束了）。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -691,9 +1351,10 @@ def _wait_settled(page, sess, timeout: float = 120.0) -> str:
             pass
         try:
             from core.vcc_checkout_pay import SEL_SUBMIT
-            if page.query_selector(SEL_SUBMIT) is None:
+            sel = submit_sel or SEL_SUBMIT
+            if page.query_selector(sel) is None:
                 return "left"
-            label = (page.inner_text(SEL_SUBMIT, timeout=1200) or "").strip().lower()
+            label = (page.inner_text(sel, timeout=1200) or "").strip().lower()
             if label and "processing" not in label and "処理" not in label:
                 # 按钮回到可点状态，说明这一轮提交已经结束（通常是被拒）
                 return "left"
@@ -718,12 +1379,18 @@ def _handle_3ds_interactive(page, sess, cfg, client, card_id) -> None:
         _shoot(page, sess)
 
         code = ""
-        try:
-            code = client.wait_3ds_code(
-                card_id, timeout=float(cfg.VCC_3DS_TIMEOUT),
-                interval=float(cfg.VCC_3DS_POLL_INTERVAL), since=started)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[pay-session] 轮询验证码失败：%s", exc)
+        # 自定义卡不在 VCC 名下，没有验证码接口可查，轮询只会白等到超时，
+        # 直接走人工输入（短信/App 推送在卡主手里）。
+        from core.custom_card_store import is_custom_id
+        if is_custom_id(card_id):
+            logger.info("[pay-session] %s 自定义卡，3DS 需人工输入", sess.sid)
+        else:
+            try:
+                code = client.wait_3ds_code(
+                    card_id, timeout=float(cfg.VCC_3DS_TIMEOUT),
+                    interval=float(cfg.VCC_3DS_POLL_INTERVAL), since=started)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[pay-session] 轮询验证码失败：%s", exc)
 
         if not code:
             # 兜底：让人看截图手输

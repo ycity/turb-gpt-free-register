@@ -80,26 +80,30 @@ class ManualDoneEndpointTest(unittest.TestCase):
     def test_route_exists(self):
         self.assertIn('@app.post("/api/pay/manual-done")', APP)
 
-    def test_records_promo(self):
+    @staticmethod
+    def _body() -> str:
+        """取整个 api_pay_manual_done 函数体。
+
+        不用固定长度截断：函数一加代码，被截掉的部分就会让断言假失败。
+        按下一个同级 @app 装饰器定边界。
+        """
         idx = APP.index("def api_pay_manual_done")
-        body = APP[idx:idx + 2600]
-        self.assertIn("record_used_promo_code", body)
+        end = APP.find("\n    @app.", idx)
+        return APP[idx:end if end > 0 else len(APP)]
+
+    def test_records_promo(self):
+        self.assertIn("record_used_promo_code", self._body())
 
     def test_links_card_and_address(self):
-        idx = APP.index("def api_pay_manual_done")
-        body = APP[idx:idx + 2600]
+        body = self._body()
         self.assertIn("link_card_address", body)
         self.assertIn("pay_last_card_id", body)
 
     def test_triggers_plan_check(self):
-        idx = APP.index("def api_pay_manual_done")
-        body = APP[idx:idx + 2600]
-        self.assertIn("enqueue_account_plan_check", body)
+        self.assertIn("enqueue_account_plan_check", self._body())
 
     def test_requires_account_id(self):
-        idx = APP.index("def api_pay_manual_done")
-        body = APP[idx:idx + 2600]
-        self.assertIn("缺少 account_id", body)
+        self.assertIn("缺少 account_id", self._body())
 
     def test_partial_failures_do_not_abort(self):
         """优惠码登记失败不该连累套餐查询。"""

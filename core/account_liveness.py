@@ -319,7 +319,15 @@ def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, re
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            follow_oauth_callback(session, continue_url, referer=referer)
+            landed = follow_oauth_callback(session, continue_url, referer=referer)
+            # Team 账号登录后会停在 workspace 选择页，不选就拿不到 accessToken，
+            # 表现为 "响应中没有 accessToken: {}"，看着像废号其实账号是好的。
+            try:
+                from core.openai_auth import resolve_workspace_landing
+                if landed:
+                    resolve_workspace_landing(session, None, str(landed))
+            except Exception:  # noqa: BLE001 - 处理失败就按原流程继续
+                logger.debug("[查活] workspace 选择处理失败", exc_info=True)
             break
         except Exception as exc:
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
@@ -593,6 +601,16 @@ def _login_via_full_web_flow(
         proxy,
         fingerprint_state=fingerprint_state,
     )
+    # Team 账号登录后会停在 workspace 选择页，要用 workspace_id 才能继续。
+    # 库里存的 paid_workspace_account_id 最可靠：cookie 可能还没下发，
+    # 页面 HTML 这条链路也拿不到（follow_oauth_callback 只返回 URL）。
+    try:
+        acc = db.get_account_by_email(email) or {}
+        ws = str(acc.get("paid_workspace_account_id") or "").strip()
+        if ws:
+            session._default_workspace_id = ws
+    except Exception:  # noqa: BLE001 - 取不到就靠后面的兜底途径
+        logger.debug("[查活] 预取 workspace_id 失败", exc_info=True)
     # 预检返回后本函数持有会话；只有成功返回才把释放责任移交给上层。
     try:
         otp_after_ts = time.time()

@@ -14,6 +14,7 @@ EMAIL_SOURCE 支持单个或多个来源：
     "remail"
     "mailcode"           # 域名邮箱 MailCode
     "xigua"
+    "akmoz"              # 闪取邮箱（整段素材导入）
     "outlook,generic_api,mailnest,cloudmail,remail"   # 按顺序兜底
     ["outlook", "generic_api", "mailnest", "cloudmail", "remail", "xigua"]  # 也兼容列表写法
 """
@@ -22,7 +23,7 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-_VALID_SOURCES = ("outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode")
+_VALID_SOURCES = ("outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode", "akmoz")
 
 
 def parse_email_sources(value=None) -> list[str]:
@@ -77,6 +78,9 @@ def _pick_from_source(source: str) -> str:
         return pick_account().email
     if source == "mailcode":
         from core.mailcode_client import pick_account
+        return pick_account().email
+    if source == "akmoz":
+        from core.akmoz_mail_client import pick_account
         return pick_account().email
     if source == "xigua":
         from core.xigua_client import pick_account
@@ -164,6 +168,8 @@ def resolve_email_source(email: str) -> str:
         return "xigua"
 
     from core import db
+    if db.get_akmoz_email_by_email(email):
+        return "akmoz"
     if db.get_imap_email_by_email(email):
         return "imap"
     if db.get_generic_api_email_by_email(email):
@@ -289,6 +295,9 @@ def wait_for_otp(
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     if source == "xigua":
         from core.xigua_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    if source == "akmoz":
+        from core.akmoz_mail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     from core.outlook_client import fetch_latest_otp
     return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)

@@ -139,11 +139,15 @@ class AutoRegisterTickTests(unittest.TestCase):
         record.assert_called_once()
 
     def test_note_twofa_finished_moves_anchor_forward(self):
-        with patch.object(sched.db, "set_meta") as set_meta:
+        # note_twofa_finished 现在还会清零连续失败计数和上一个 job 记录，
+        # 所以 set_meta 会被调多次；这里只验证锚点被推到了当前时刻。
+        with patch.object(sched.db, "set_meta") as set_meta, \
+             patch.object(sched.db, "get_meta", return_value="0"):
             sched.note_twofa_finished("a@b.com")
-        set_meta.assert_called_once()
-        key, value = set_meta.call_args[0]
-        self.assertEqual(key, sched._ANCHOR_KEY)
+        anchor_calls = [c for c in set_meta.call_args_list
+                        if c[0] and c[0][0] == sched._ANCHOR_KEY]
+        self.assertEqual(len(anchor_calls), 1)
+        value = anchor_calls[0][0][1]
         self.assertLess((datetime.now() - datetime.fromisoformat(value)).total_seconds(), 5)
 
 

@@ -30,6 +30,38 @@ PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL = False
 # 格式：最小秒,最大秒。设为 "0,0" 表示不额外停留。
 POST_REGISTER_DWELL_SECONDS_RANGE = "5,15"
 
+# 提链时尝试只买 1 个 Team 席位（省一半订阅费）。
+# 服务端对部分账号放开了 1 席（business_minimum_seats=1），实测约两成命中，
+# 按账号固定、不是随机。不支持的账号自动退回 2 席，不影响原流程。
+# 注意 1 席只能走 custom 模式，拿到的是 chatgpt.com/checkout/... 而不是
+# pay.openai.com 长链，VCC 自动支付的填表逻辑未必适配，必要时关掉它。
+TEAM_TRY_SINGLE_SEAT = True
+
+# 2FA 绑定成功后顺带探测该账号是否支持单席位 Team。
+# 只创建 checkout session 读限制，不支付、不消耗优惠码。
+TEAM_PROBE_SINGLE_SEAT_AFTER_2FA = True
+
+# 注册落库后就探测单席位，不等 2FA。
+#
+# 席位探测只用 access_token 直连 API，和 2FA 本来没有任何关系。但它以前
+# 只挂在 2FA 成功之后，于是 2FA 一关或一失败，席位信息就永远拿不到——
+# 2026-11-17 关掉自动 2FA 做对照实验时撞上过：账号注册正常、人也活着，
+# 席位却查不出来。
+#
+# 两条路径并存，按"是否已有结果"去重：2FA 那条用的是刚刷新的新 token，
+# 更准，所以保留；这条兜住"没有 2FA"的情况。
+PROBE_SINGLE_SEAT_AFTER_REGISTER = True
+
+# 注册后等多少秒再探测单席位。
+#
+# 不能一落库就探：账号刚建好，OpenAI 风控还在观察期，立刻去创建 checkout
+# session 会被判 "unusual activity"（HTTP 400）——2026-11-17 账号 #105
+# 实测，入库后 2 秒探测直接被拒。
+#
+# 以前走 2FA 那条路时天然隔了 TWOFA_REGISTRATION_DELAY（180 秒）才探，
+# 所以从没撞上。这里取同一个数量级，让两条路径的节奏一致。
+PROBE_SINGLE_SEAT_DELAY = 180.0
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'REGISTER_EMAIL': 'str',
@@ -37,4 +69,8 @@ apply_env_overrides(globals(), {
     'AUTO_PLAN_CHECK_AFTER_REGISTER': 'bool',
     'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL': 'bool',
     'POST_REGISTER_DWELL_SECONDS_RANGE': 'str',
+    'TEAM_TRY_SINGLE_SEAT': 'bool',
+    'TEAM_PROBE_SINGLE_SEAT_AFTER_2FA': 'bool',
+    'PROBE_SINGLE_SEAT_AFTER_REGISTER': 'bool',
+    'PROBE_SINGLE_SEAT_DELAY': 'float',
 })

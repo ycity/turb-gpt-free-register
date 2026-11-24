@@ -6,6 +6,7 @@ SQLite 持久化层（JSON/TXT 仅用于首次迁移）。
 """
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import uuid
@@ -13,6 +14,12 @@ from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# 模块级 logger。
+# 2026-11-18：line 1671 的 logger.exception 一直引用一个不存在的名字——
+# 只因为那个 except 分支从没触发过才没暴露。分配订阅编号真出错时，
+# 本该记日志的地方会抛 NameError，把原始异常盖掉。
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -44,11 +51,12 @@ _TABLES = {
     "outlook": "email_pool",
     "generic_api": "email_pool",
     "imap": "email_pool",
+    "akmoz": "email_pool",
     "jobs": "registration_jobs",
     "domain": "email_pool",
     "codex": "codex_accounts",
 }
-_EMAIL_SOURCES = {"outlook": "outlook", "generic_api": "generic_api", "imap": "imap", "domain": "cloudflare_domain"}
+_EMAIL_SOURCES = {"outlook": "outlook", "generic_api": "generic_api", "imap": "imap", "akmoz": "akmoz", "domain": "cloudflare_domain"}
 _LEGACY_TABLES = {"outlook": "outlook_pool", "generic_api": "generic_api_pool", "domain": "domain_email_pool"}
 
 _LEGACY_SQLITE = _LEGACY_DATA_DIR / "registrations.db"
@@ -453,8 +461,13 @@ def _query_collection_page(collection: str, *, status: str | None = None,
                            date_from: str | None = None, date_to: str | None = None,
                            extra_where: list[str] | None = None,
                            extra_params: list[Any] | None = None,
+                           order_by: str | None = None,
                            limit: int = 50, offset: int = 0) -> tuple[list[dict], int, str]:
-    """执行真正的 SQL COUNT/LIMIT/OFFSET 分页，并返回最新更新时间。"""
+    """执行真正的 SQL COUNT/LIMIT/OFFSET 分页，并返回最新更新时间。
+
+    order_by 只接受调用方写死的字符串，不能来自用户输入（会拼进 SQL）。
+    不传就按 id DESC，保持其它集合的原有行为。
+    """
     _ensure_sqlite()
     table = _TABLES[collection]
     where = ["1=1"]
@@ -477,22 +490,47 @@ def _query_collection_page(collection: str, *, status: str | None = None,
         where.extend(extra_where)
         params.extend(extra_params or [])
     clause = " AND ".join(where)
+    order_sql = order_by or "id DESC"
     with closing(_sqlite_conn()) as conn:
         total = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {clause}", params).fetchone()[0])
         latest = str(conn.execute(f"SELECT COALESCE(MAX(updated_at), '') FROM {table} WHERE {clause}", params).fetchone()[0] or "")
         rows = [json.loads(row["payload"]) for row in conn.execute(
-            f"SELECT payload FROM {table} WHERE {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+            f"SELECT payload FROM {table} WHERE {clause} ORDER BY {order_sql} LIMIT ? OFFSET ?",
             [*params, max(1, int(limit)), max(0, int(offset))],
         )]
     return rows, total, latest
+
+
+# 账号列表排序：没开通订阅的排前面（按 id 降序，新注册的先看到），
+# 已开通 team 的排后面（按下次账单时间降序，快到期的先看到）。
+# 写死在这里而不是接收参数：order_by 会拼进 SQL，不能来自用户输入。
+_ACCOUNTS_ORDER_BY = (
+    "CASE WHEN lower(COALESCE(json_extract(payload,'$.plan_type'),'')) = 'team' "
+    "THEN 1 ELSE 0 END ASC, "
+    "COALESCE(json_extract(payload,'$.plan_renews_at'), "
+    "json_extract(payload,'$.renews_at'), '') DESC, "
+    "id DESC"
+)
+
+
+# 算作"已订阅"的套餐关键字。
+#
+# 为什么不只看 plus：这套号实际开的是 Team，库里 current_plan_type 就是
+# 'team'。原先筛选写死 "plus" in plan，于是 36 个已订阅的 Team 号一个都
+# 筛不出来（2026-11-17 实测：plus 命中 0 条）。
+#
+# 与 webui/app.py 里决定是否展示 expires_at 的那组关键字保持一致。
+# free 不在此列，且带 free 的取值一律排除（"free(可Plus试用)"只是资格）。
+_SUBSCRIBED_PLAN_KEYWORDS = ("plus", "pro", "team", "go", "business")
 
 
 def _account_filter_sql(
     plan_filter: str | None = None,
     codex_filter: str | None = None,
     totp_filter: str | None = None,
+    seat_filter: str | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """把账号列表的套餐、Codex、2FA 过滤条件下推到 SQLite。
+    """把账号列表的套餐、Codex、2FA、席位过滤条件下推到 SQLite。
 
     套餐、Codex、2FA 状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
     直接过滤，而不是先把整张 accounts 表反序列化到 Python 再切页。
@@ -502,16 +540,35 @@ def _account_filter_sql(
     plan = str(plan_filter or "").strip().lower()
     codex = str(codex_filter or "").strip().lower()
     totp = str(totp_filter or "").strip().lower()
+    seat = str(seat_filter or "").strip().lower()
 
     plan_expr = (
         "lower(COALESCE(NULLIF(CAST(json_extract(payload, '$.current_plan_type') AS TEXT), ''), "
         "CAST(json_extract(payload, '$.plan_type') AS TEXT), ''))"
     )
     if plan and plan not in {"all", "any"}:
-        if plan == "plus":
-            # 与 _account_matches_plan_filter 保持一致：free(可试用)不算已开通 Plus。
-            where.extend([f"{plan_expr} LIKE ?", f"{plan_expr} NOT LIKE ?"])
-            params.extend(["%plus%", "%free%"])
+        if plan in {"subscribed", "plus"}:
+            # 已订阅：套餐是 plus/pro/team/go/business 任一，且不含 free。
+            # "plus" 仍然接受，是为了兼容老前端存下的筛选值。
+            ors = " OR ".join([f"{plan_expr} LIKE ?"] * len(_SUBSCRIBED_PLAN_KEYWORDS))
+            where.append(f"({ors})")
+            params.extend([f"%{k}%" for k in _SUBSCRIBED_PLAN_KEYWORDS])
+            where.append(f"{plan_expr} NOT LIKE ?")
+            params.append("%free%")
+        elif plan in {"unsubscribed", "not_subscribed", "no_plan"}:
+            # 未订阅：套餐查过了但不是任何付费套餐（通常是 free）。
+            #
+            # 含 free 的一律算未订阅，且这条优先于关键字匹配——
+            # "free(可Plus试用)" 里带着 plus 字样，只按关键字判会被当成
+            # 已订阅而两边都漏掉，和上面 subscribed 的 free 排除规则对称。
+            #
+            # 必须排除"还没查过套餐"的账号：那种 plan 字段是空的，归入
+            # 未订阅会把一堆状态未知的号混进来，看着像能订阅实际不知道。
+            ors = " AND ".join([f"{plan_expr} NOT LIKE ?"] * len(_SUBSCRIBED_PLAN_KEYWORDS))
+            where.append(f"({plan_expr} LIKE ? OR ({ors}))")
+            params.append("%free%")
+            params.extend([f"%{k}%" for k in _SUBSCRIBED_PLAN_KEYWORDS])
+            where.append(f"{plan_expr} != ''")
         elif plan in {"plus_trial", "plus_trial_eligible", "trial", "trial_eligible"}:
             # 只有当前套餐为 free 且套餐查询明确返回可试用资格时才命中。
             trial_expr = "lower(COALESCE(CAST(json_extract(payload, '$.plus_trial_eligible') AS TEXT), ''))"
@@ -611,6 +668,25 @@ def _account_filter_sql(
         else:
             where.append(f"{totp_setup_expr} = ?")
             params.append(totp)
+
+    # 席位筛选。single_seat_supported 是三态：
+    #   True  -> 确定支持 1 席
+    #   False -> 确定要 2 席（订阅要多花一倍钱）
+    #   缺失  -> 还没探测过，不知道
+    #
+    # "过滤2席位"要滤掉的只有确定为 False 的那批；没探过的必须留下，
+    # 它们里面还有一半左右是单席位（实测命中率约 55%）。
+    seat_expr = "json_extract(payload, '$.single_seat_supported')"
+    if seat and seat not in {"all", "*"}:
+        if seat in {"not_multi", "hide_multi", "exclude_multi"}:
+            # 排除确定 2 席的：JSON 里 false 存成 0
+            where.append(f"({seat_expr} IS NULL OR {seat_expr} != 0)")
+        elif seat in {"single", "single_only", "one"}:
+            where.append(f"{seat_expr} = 1")
+        elif seat in {"multi", "multi_only", "two"}:
+            where.append(f"{seat_expr} = 0")
+        elif seat in {"unknown", "unprobed", "not_checked"}:
+            where.append(f"{seat_expr} IS NULL")
     return where, params
 
 
@@ -873,6 +949,137 @@ def _load_imap_emails() -> list[dict]:
     return _load_collection("imap")
 
 
+# ============================================================
+# akmoz（闪取）邮箱池
+# ============================================================
+
+def _akmoz_email_line(row: dict) -> str:
+    """复制出去的素材行，和导入格式保持一致，能原样粘回来。"""
+    return "----".join([
+        str(row.get("email") or ""),
+        str(row.get("password") or ""),
+        str(row.get("code_url") or ""),
+    ])
+
+
+def _load_akmoz_emails() -> list[dict]:
+    return _load_collection("akmoz")
+
+
+def _save_akmoz_emails(rows: list[dict]) -> None:
+    for row in rows:
+        row["copy_line"] = _akmoz_email_line(row)
+    _save_collection("akmoz", rows)
+
+
+def import_akmoz_emails(records: list[dict]) -> tuple[int, int]:
+    """批量导入 akmoz 邮箱。records 元素：{email, password, code_url}。
+
+    返回 (新增数, 跳过数)。同邮箱已存在就跳过，不覆盖——
+    已经用过的邮箱重新导入会把 used 状态洗掉，那样会重复注册。
+    """
+    with _LOCK:
+        rows = _load_akmoz_emails()
+        inserted = skipped = 0
+        for raw in records or []:
+            email = str(raw.get("email") or "").strip()
+            if not email or "@" not in email:
+                skipped += 1
+                continue
+            if _find_by_email(rows, email):
+                skipped += 1
+                continue
+            row = {
+                "id": _next_id(rows),
+                "email": email,
+                "password": str(raw.get("password") or "").strip(),
+                "code_url": str(raw.get("code_url") or "").strip(),
+                "status": "available",
+                "used_at": None,
+                "note": None,
+                "imported_at": _now(),
+            }
+            row["copy_line"] = _akmoz_email_line(row)
+            rows.append(row)
+            inserted += 1
+        _save_akmoz_emails(rows)
+        return inserted, skipped
+
+
+def claim_next_akmoz_email() -> dict | None:
+    """原子领取一个可用 akmoz 邮箱并标记为 used。"""
+    with _LOCK:
+        rows = sorted(_load_akmoz_emails(), key=lambda x: int(x.get("id") or 0))
+        row = next((r for r in rows
+                    if str(r.get("status") or "") == "available"), None)
+        if row is None:
+            return None
+        row["status"] = "used"
+        row["used_at"] = _now()
+        _save_akmoz_emails(rows)
+        return dict(row)
+
+
+def release_akmoz_email(email: str, status: str = "available",
+                        note: str | None = None) -> None:
+    with _LOCK:
+        rows = _load_akmoz_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return
+        row["status"] = str(status or "available")
+        if status == "available":
+            row["used_at"] = None
+        if note is not None:
+            row["note"] = str(note)[:300]
+        _save_akmoz_emails(rows)
+
+
+def release_unconsumed_akmoz_email(email: str, note: str | None = None) -> bool:
+    """注册没用上就把邮箱退回池子，别白白消耗。"""
+    with _LOCK:
+        rows = _load_akmoz_emails()
+        row = _find_by_email(rows, email)
+        if row is None or str(row.get("status") or "") != "used":
+            return False
+        if get_account_by_email(email):
+            return False          # 已经注册出账号了，不能退
+        row["status"] = "available"
+        row["used_at"] = None
+        if note is not None:
+            row["note"] = str(note)[:300]
+        _save_akmoz_emails(rows)
+        return True
+
+
+def delete_akmoz_email(email: str) -> bool:
+    with _LOCK:
+        rows = _load_akmoz_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return False
+        rows.remove(row)
+        _save_akmoz_emails(rows)
+        return True
+
+
+def list_akmoz_email_pool(status: str | None = None,
+                          limit: int = 500) -> list[dict]:
+    return list_email_pool_page(
+        source="akmoz", status=status, limit=limit, offset=0)["items"]
+
+
+def akmoz_email_pool_summary() -> dict:
+    with _LOCK:
+        return _pool_summary_sql("akmoz")
+
+
+def get_akmoz_email_by_email(email: str) -> dict | None:
+    with _LOCK:
+        row = _find_by_email(_load_akmoz_emails(), email)
+        return dict(row) if row else None
+
+
 def _save_imap_emails(rows: list[dict]) -> None:
     for row in rows:
         row["copy_line"] = _imap_email_line(row)
@@ -963,15 +1170,26 @@ def _decorate_account(row: dict) -> dict:
 
 
 def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> bool:
-    """账号套餐过滤：支持已开通 Plus、任意套餐优惠及 free 资格过滤。"""
+    """账号套餐过滤：支持已订阅、未订阅、任意套餐优惠及 free 资格过滤。"""
     f = str(plan_filter or "").strip().lower()
     if not f or f in {"all", "any"}:
         return True
     plan = str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
-    if f == "plus":
-        # “free(可Plus试用)”/plus_trial_eligible 只是可试用，不算已开通 Plus。
-        # 只有套餐字段本身是 Plus/ChatGPT Plus/plus_* 且不含 free 时才命中。
-        return "plus" in plan and "free" not in plan
+    if f in {"subscribed", "plus"}:
+        # 已订阅：plus/pro/team/go/business 任一；"free(可Plus试用)"只是
+        # 资格，不算已订阅。"plus" 保留是为了兼容老前端存下的筛选值。
+        return (any(k in plan for k in _SUBSCRIBED_PLAN_KEYWORDS)
+                and "free" not in plan)
+    if f in {"unsubscribed", "not_subscribed", "no_plan"}:
+        # 未订阅：查过套餐（plan 非空）且不是任何付费套餐。
+        # 含 free 的一律算未订阅，且优先于关键字匹配——"free(可Plus试用)"
+        # 里带着 plus 字样，只按关键字判会两边都漏掉。
+        # plan 为空代表还没查过，状态未知，不归入未订阅。
+        if not plan:
+            return False
+        if "free" in plan:
+            return True
+        return not any(k in plan for k in _SUBSCRIBED_PLAN_KEYWORDS)
     if f in {"plus_trial", "plus_trial_eligible", "trial", "trial_eligible"}:
         trial = row.get("plus_trial_eligible")
         if isinstance(trial, str):
@@ -1098,7 +1316,10 @@ def list_email_pool_page(
     """
     _ensure_sqlite()
     source = str(source or "outlook").strip().lower()
-    if source not in {"all", "outlook", "generic_api", "imap", "cloudflare_domain"}:
+    # 新增邮箱来源时这里必须一起加，否则会静默回落成 outlook——
+    # 表现是"筛选 akmoz 却返回一堆 outlook 邮箱"，很难看出是筛选没生效。
+    if source not in {"all", "outlook", "generic_api", "imap", "akmoz",
+                      "cloudflare_domain"}:
         source = "outlook"
     collection = "domain" if source == "cloudflare_domain" else source
     db_source = None if source == "all" else _EMAIL_SOURCES[collection]
@@ -1197,6 +1418,7 @@ def insert_account(
     expires_at: str | None = None,
     device_id: str | None = None,
     proxy_used: str | None = None,
+    proxy_region: str | None = None,
     email_source: str | None = None,
     extra: dict | None = None,
     codex_status: str | None = None,   # success / failed / skipped / missing
@@ -1230,6 +1452,10 @@ def insert_account(
             "plan_type": plan_type if plan_type is not None else row.get("plan_type"),
             "expires_at": expires_at if expires_at is not None else row.get("expires_at"),
             "proxy_used": proxy_used if proxy_used is not None else row.get("proxy_used"),
+            # 出口地区标签（形如 1024·US）。1024proxy 的地址不在代理池里，
+            # 界面按地址查名称查不到，没这个字段「注册代理」列只能显示 "-"，
+            # 事后分不清账号是哪个地区注册的。
+            "proxy_region": proxy_region if proxy_region else row.get("proxy_region"),
             "email_source": email_source if email_source is not None else row.get("email_source"),
             "extra_json": extra_json if extra_json is not None else row.get("extra_json"),
             "codex_status": codex_status if codex_status is not None else row.get("codex_status"),
@@ -1779,6 +2005,40 @@ def _matches_totp_status_filter(row: dict, totp_filter: str | None) -> bool:
     return setup_status == totp_filter
 
 
+def _matches_seat_filter(row: dict, seat_filter: str | None) -> bool:
+    """按单席位探测结果筛选账号。
+
+    single_seat_supported 是三态：
+      True  -> 确定支持 1 席
+      False -> 确定要 2 席（订阅要多花一倍钱）
+      缺失  -> 还没探测过
+
+    "过滤2席位"（not_multi）只滤掉确定为 False 的那批；没探过的必须留下，
+    实测它们里约 55% 是单席位，一并滤掉会把大半可用号误伤。
+    """
+    seat_filter = str(seat_filter or "").strip().lower()
+    if not seat_filter or seat_filter in {"all", "*"}:
+        return True
+
+    sup = row.get("single_seat_supported")
+    # 用真值判断而不是 `is False`：SQLite 里布尔存成 0/1，JSON 回来可能是
+    # False 也可能是 0。`is False` 认不出 0，会和 SQL 侧的 `!= 0` 判定分歧，
+    # 导致分页接口和非分页接口返回不同的行（自己的测试抓到过这个）。
+    probed = sup is not None
+    is_multi = probed and not bool(sup)
+    is_single = probed and bool(sup)
+
+    if seat_filter in {"not_multi", "hide_multi", "exclude_multi"}:
+        return not is_multi
+    if seat_filter in {"single", "single_only", "one"}:
+        return is_single
+    if seat_filter in {"multi", "multi_only", "two"}:
+        return is_multi
+    if seat_filter in {"unknown", "unprobed", "not_checked"}:
+        return not probed
+    return True
+
+
 def _filtered_decorated_accounts(
     archived: str | bool | None = False,
     plan_filter: str | None = None,
@@ -1787,6 +2047,7 @@ def _filtered_decorated_accounts(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    seat_filter: str | None = None,
 ) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
@@ -1799,6 +2060,7 @@ def _filtered_decorated_accounts(
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
     decorated = [r for r in decorated if _matches_codex_status_filter(r, codex_filter)]
     decorated = [r for r in decorated if _matches_totp_status_filter(r, totp_filter)]
+    decorated = [r for r in decorated if _matches_seat_filter(r, seat_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
     if date_from or date_to:
@@ -1829,6 +2091,7 @@ def list_account_plan_check_statuses(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    seat_filter: str | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
@@ -1861,8 +2124,12 @@ def list_account_plan_check_statuses(
         "totp_setup_status", "totp_setup_ok", "totp_setup_error",
         "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
         "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
+        "password_backfill_status", "password_backfill_error", "password_backfill_message",
+        "card_rebind_status", "card_rebind_error", "card_rebind_message", "card_rebind_card_label",
         "original_email", "email_source", "email_change_status", "email_change_ok",
         "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
+        "single_seat_supported", "single_seat_minimum",
+        "single_seat_checked_at", "single_seat_error",
     )
     with _LOCK:
         limit = max(1, int(limit))
@@ -1871,6 +2138,7 @@ def list_account_plan_check_statuses(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            seat_filter=seat_filter,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -1880,6 +2148,7 @@ def list_account_plan_check_statuses(
             date_to=date_to,
             extra_where=extra_where,
             extra_params=extra_params,
+            order_by=_ACCOUNTS_ORDER_BY,
             limit=limit,
             offset=offset,
         )
@@ -1953,6 +2222,7 @@ def list_accounts(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    seat_filter: str | None = None,
 ) -> list[dict]:
     # 非分页兼容接口也走同一条 SQL 分页路径，避免 limit=500 时先读取整张表。
     result = list_accounts_page(
@@ -1965,6 +2235,7 @@ def list_accounts(
         date_from=date_from,
         date_to=date_to,
         totp_filter=totp_filter,
+        seat_filter=seat_filter,
     )
     return result["items"]
 
@@ -1979,6 +2250,7 @@ def list_accounts_page(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    seat_filter: str | None = None,
 ) -> dict:
     with _LOCK:
         limit = max(1, int(limit))
@@ -1987,6 +2259,7 @@ def list_accounts_page(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            seat_filter=seat_filter,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -1996,6 +2269,7 @@ def list_accounts_page(
             date_to=date_to,
             extra_where=extra_where,
             extra_params=extra_params,
+            order_by=_ACCOUNTS_ORDER_BY,
             limit=limit,
             offset=offset,
         )
@@ -2037,6 +2311,31 @@ def set_account_paid_at(acc_id: int, when: str | None = None) -> bool:
         return True
 
 
+def set_account_pay_card(acc_id: int, label: str, *, force: bool = False) -> bool:
+    """记录这个账号的订阅是哪张卡付的。
+
+    label 形如 VCC-1771（VCC 托管卡）或卡池备注名（自有卡）。
+    不存卡号、不存卡 ID：对账和排查只需要能认出是哪张，存更多只会
+    让账号表多一份敏感信息。
+
+    已有值时不覆盖：首次支付用哪张卡才是要查的，后续补登或重复调用
+    不该把它冲掉（和 set_account_paid_at 保持一致的语义）。
+    换绑卡成功后用 force=True 覆盖——换绑后的扣款卡才是对账要看的。
+    """
+    label = str(label or "").strip()
+    if not label:
+        return False
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or (str(row.get("pay_card_label") or "").strip() and not force):
+            return False
+        row["pay_card_label"] = label[:64]
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
 # 两种限额各自独立编号，起点由历史数据定：5h 从 49 开始（id 1~8 那批
 # 已删除的账号占了 41~48），周限额从 8 开始。
 _SUB_NO_START = {"5h": 49, "weekly": 8}
@@ -2055,6 +2354,16 @@ def assign_subscription_no(acc_id: int) -> int | None:
 
     已有编号直接返回，不重复分配。限额类型还没查出来时返回 None，
     等套餐查询回来再调一次。
+
+    取 max+1 而不是最小未用号：编号要能反映付款先后。手工调整编号留下的
+    空位如果被后来的账号填掉，就会出现"11-13 付款的账号编号排在 11-03
+    前面"这种错乱（线上发生过：#69 付款最晚却拿到了空出来的 67）。
+
+    编号按 paid_at 先后排定，不按调用顺序：本函数在套餐查询返回时被调用，
+    而套餐查询是并发的——先付款的账号可能后返回，于是拿到更大的编号
+    （2026-11-18 线上：#88 付款 04:32 拿到 85，#90 付款 05:41 拿到 84）。
+    所以这里要检查是否有「付款更晚但已拿到编号」的同类账号，有就和它换位，
+    保证编号顺序始终等于付款顺序。
     """
     with _LOCK:
         rows = _load_accounts()
@@ -2072,14 +2381,39 @@ def assign_subscription_no(acc_id: int) -> int | None:
             for r in rows
             if r.get("subscription_no") and _limit_kind(r) == kind
         }
-        nxt = _SUB_NO_START.get(kind, 1)
-        while nxt in used:
-            nxt += 1
+        start = _SUB_NO_START.get(kind, 1)
+        nxt = max(used) + 1 if used else start
+        if nxt < start:
+            nxt = start
         row["subscription_no"] = nxt
         row["subscription_kind"] = kind
         row["updated_at"] = _now()
+
+        # 和付款更晚却已编号的同类账号换位，让编号顺序对齐付款顺序。
+        mine_paid = str(row.get("paid_at") or "")
+        if mine_paid:
+            later = [
+                r for r in rows
+                if r is not row and r.get("subscription_no")
+                and _limit_kind(r) == kind
+                and str(r.get("paid_at") or "") > mine_paid
+            ]
+            # 从编号最小的那个开始换：它本该排在本账号后面
+            for other in sorted(later, key=lambda r: int(r["subscription_no"])):
+                o_no = int(other["subscription_no"])
+                if o_no < nxt:
+                    other["subscription_no"], row["subscription_no"] = nxt, o_no
+                    other["updated_at"] = _now()
+                    logger.info(
+                        "[DB] 订阅编号按付款时间换位：#%s(%s) 取 %s，"
+                        "#%s(%s) 改为 %s",
+                        acc_id, mine_paid[:19], o_no,
+                        other.get("id"), str(other.get("paid_at"))[:19], nxt)
+                    nxt = o_no
+                    break
+
         _save_accounts(rows)
-        return nxt
+        return int(row["subscription_no"])
 
 
 def update_account_access_token(acc_id: int, access_token: str) -> bool:
@@ -2339,6 +2673,243 @@ def update_account_totp_secret(acc_id: int, result: dict | None = None) -> bool:
         if result.get("message") is not None:
             row["totp_setup_message"] = result.get("message")
         row["copy_line"] = _account_line(row)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
+def claim_account_password_backfill(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号补密码任务；已有未超时任务时返回 False。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("password_backfill_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "password_backfill_queued_at" if current_status == "queued" else "password_backfill_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["password_backfill_status"] = "queued"
+        row["password_backfill_ok"] = False
+        row["password_backfill_trigger"] = str(trigger or "manual")
+        row["password_backfill_queued_at"] = now
+        row["password_backfill_started_at"] = None
+        row["password_backfill_completed_at"] = None
+        row["password_backfill_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_password_backfill_running(acc_id: int) -> bool:
+    """把补密码任务标记为运行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("password_backfill_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["password_backfill_status"] = "running"
+        row["password_backfill_started_at"] = now
+        row["password_backfill_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def update_account_password_backfill(acc_id: int, result: dict | None = None) -> bool:
+    """更新账号补密码结果；成功时把密码合并进 extra_json.registration_password。
+
+    result 可选携带 access_token / token_expires_at（验证登录成功后顺带刷新）。
+    """
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
+        ok = bool(result.get("ok")) and status == "success"
+        row["password_backfill_status"] = status
+        row["password_backfill_ok"] = ok
+        row["password_backfill_checked_at"] = result.get("checked_at") or _now()
+        if status in {"success", "failed", "stopped"}:
+            row["password_backfill_completed_at"] = _now()
+        row["password_backfill_error"] = None if ok or status == "running" else result.get("error")
+        password = str(result.get("password") or "").strip()
+        if ok and password:
+            # extra_json 是注册时写入的完整素材，合并写回而不是整体替换；
+            # 顶层 registration_password 同步一份，方便直接按字段搜索。
+            extra_raw = row.get("extra_json")
+            if isinstance(extra_raw, str) and extra_raw.strip():
+                try:
+                    extra = json.loads(extra_raw)
+                except Exception:
+                    extra = {}
+            elif isinstance(extra_raw, dict):
+                extra = extra_raw
+            else:
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            extra["registration_password"] = password
+            row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+            row["registration_password"] = password
+        new_token = str(result.get("access_token") or "").strip()
+        if ok and new_token:
+            row["access_token"] = new_token
+            if result.get("token_expires_at"):
+                row["token_expires_at"] = result.get("token_expires_at")
+        if result.get("message") is not None:
+            row["password_backfill_message"] = result.get("message")
+        row["copy_line"] = _account_line(row)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_password_backfills() -> list[dict]:
+    """服务启动时把中断的补密码任务标记为失败，返回被中断的账号列表。"""
+    with _LOCK:
+        rows = _load_accounts()
+        interrupted: list[dict] = []
+        now = _now()
+        for row in rows:
+            if row.get("password_backfill_status") not in {"queued", "running"}:
+                continue
+            row["password_backfill_status"] = "failed"
+            row["password_backfill_ok"] = False
+            row["password_backfill_error"] = "WebUI 重启导致补密码任务中断，请重新执行"
+            row["password_backfill_completed_at"] = now
+            row["updated_at"] = now
+            interrupted.append({"id": row.get("id"), "email": row.get("email")})
+        if interrupted:
+            _save_accounts(rows)
+        return interrupted
+
+
+def claim_account_card_rebind(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号换绑卡任务；已有未超时任务时返回 False。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("card_rebind_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "card_rebind_queued_at" if current_status == "queued" else "card_rebind_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["card_rebind_status"] = "queued"
+        row["card_rebind_ok"] = False
+        row["card_rebind_trigger"] = str(trigger or "manual")
+        row["card_rebind_queued_at"] = now
+        row["card_rebind_started_at"] = None
+        row["card_rebind_completed_at"] = None
+        row["card_rebind_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_card_rebind_running(acc_id: int) -> bool:
+    """把换绑卡任务标记为运行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("card_rebind_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["card_rebind_status"] = "running"
+        row["card_rebind_started_at"] = now
+        row["card_rebind_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def update_account_card_rebind(acc_id: int, result: dict | None = None) -> bool:
+    """更新账号换绑卡结果；成功时 force 覆盖 pay_card_label。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
+        ok = bool(result.get("ok")) and status == "success"
+        row["card_rebind_status"] = status
+        row["card_rebind_ok"] = ok
+        row["card_rebind_checked_at"] = result.get("checked_at") or _now()
+        if status in {"success", "failed", "stopped"}:
+            row["card_rebind_completed_at"] = _now()
+        row["card_rebind_error"] = None if ok or status == "running" else result.get("error")
+        label = str(result.get("card_label") or "").strip()
+        if ok and label:
+            row["card_rebind_card_label"] = label
+        if result.get("message") is not None:
+            row["card_rebind_message"] = result.get("message")
+        row["copy_line"] = _account_line(row)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+    if ok and label:
+        # 换绑后扣款卡就是新卡，对账字段必须跟上（force 覆盖首次支付记录）。
+        set_account_pay_card(int(acc_id), label, force=True)
+    return True
+
+
+def recover_interrupted_card_rebinds() -> list[dict]:
+    """服务启动时把中断的换绑卡任务标记为失败，返回被中断的账号列表。"""
+    with _LOCK:
+        rows = _load_accounts()
+        interrupted: list[dict] = []
+        now = _now()
+        for row in rows:
+            if row.get("card_rebind_status") not in {"queued", "running"}:
+                continue
+            row["card_rebind_status"] = "failed"
+            row["card_rebind_ok"] = False
+            row["card_rebind_error"] = "WebUI 重启导致换绑卡任务中断，请重新执行"
+            row["card_rebind_completed_at"] = now
+            row["updated_at"] = now
+            interrupted.append({"id": row.get("id"), "email": row.get("email")})
+        if interrupted:
+            _save_accounts(rows)
+        return interrupted
+
+
+def update_account_single_seat(acc_id: int, result: dict | None = None) -> bool:
+    """记录单席位 Team 探测结果。
+
+    supported=True 表示服务端允许这个账号只买 1 席，提链时能省一半钱。
+    探测失败只记时间和原因，不写 supported，避免把"没测出来"当成"不支持"。
+    """
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        row["single_seat_checked_at"] = result.get("checked_at") or _now()
+        if result.get("ok"):
+            row["single_seat_supported"] = bool(result.get("supported"))
+            row["single_seat_minimum"] = result.get("minimum_seats")
+            row["single_seat_error"] = None
+        else:
+            row["single_seat_error"] = str(result.get("error") or "")[:300]
         row["updated_at"] = _now()
         _save_accounts(rows)
         return True
@@ -2671,18 +3242,24 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
       - outlook: records 元素 {email,password,client_id,refresh_token[,access_token,totp_secret]}
       - generic_api: records 元素 {email,code_url[,access_token,totp_secret]}
       - imap: records 元素 {email,imap_password,imap_server,imap_port,imap_ssl}
+      - akmoz: records 元素 {email,password,code_url[,access_token,totp_secret]}
+
+    akmoz 与 generic_api 结构相近（都是靠取码链接拿 OTP），但它额外带邮箱密码，
+    而密码是后续 reauth/查活要用的，所以要落进账号记录，不能像 generic_api
+    那样丢掉。
 
     返回 (新增账号数, 跳过数)。已存在账号会跳过；邮箱池中已存在的素材会复用并标记 used。
     """
     source = (source or "").strip().lower()
-    if source not in ("outlook", "generic_api", "imap"):
-        raise ValueError("source 必须显式传入 outlook / generic_api / imap")
+    if source not in ("outlook", "generic_api", "imap", "akmoz"):
+        raise ValueError("source 必须显式传入 outlook / generic_api / imap / akmoz")
 
     with _LOCK:
         accounts = _load_accounts()
         outlook_rows = _load_outlook()
         generic_rows = _load_generic_api_emails()
         imap_rows = _load_imap_emails()
+        akmoz_rows = _load_akmoz_emails()
         inserted = skipped = 0
 
         for raw in records:
@@ -2729,6 +3306,37 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 pool_row["note"] = pool_row.get("note") or "导入为已注册账号，用于 Codex 授权"
                 pool_row["copy_line"] = _imap_email_line(pool_row)
                 original_line = _imap_email_line(pool_row)
+            elif source == "akmoz":
+                # akmoz 素材：email----password----code_url（可带中文说明前缀）。
+                # 与 generic_api 一样靠取码链接拿 OTP，但多带邮箱密码——
+                # 密码要落进账号记录，后面 reauth/查活会用到。
+                code_url = str(raw.get("code_url") or raw.get("url") or "").strip()
+                password = str(raw.get("password") or "").strip()
+                if not code_url:
+                    skipped += 1
+                    continue
+                pool_row = _find_by_email(akmoz_rows, email)
+                if pool_row is None:
+                    pool_row = {
+                        "id": _next_id(akmoz_rows),
+                        "email": email,
+                        "password": password,
+                        "code_url": code_url,
+                        "status": "used",
+                        "used_at": now,
+                        "note": "导入为已注册账号，用于 Codex 授权",
+                        "imported_at": now,
+                    }
+                    akmoz_rows.append(pool_row)
+                else:
+                    pool_row["code_url"] = code_url or pool_row.get("code_url")
+                    pool_row["password"] = password or pool_row.get("password")
+                pool_row["status"] = "used"
+                pool_row["used_at"] = pool_row.get("used_at") or now
+                pool_row["completed_at"] = pool_row.get("completed_at") or now
+                pool_row["note"] = pool_row.get("note") or "导入为已注册账号，用于 Codex 授权"
+                pool_row["copy_line"] = _akmoz_email_line(pool_row)
+                original_line = _akmoz_email_line(pool_row)
             elif source == "generic_api":
                 code_url = _normalize_generic_api_code_url(raw.get("code_url") or raw.get("url"))
                 if not code_url:
@@ -2812,6 +3420,9 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 account["password"] = pool_row.get("password")
                 account["client_id"] = pool_row.get("client_id")
                 account["refresh_token"] = pool_row.get("refresh_token")
+            elif source == "akmoz":
+                # 密码是后续 reauth / 查活的关键材料，必须随账号带上。
+                account["password"] = pool_row.get("password")
             account["copy_line"] = _account_line(account)
             accounts.append(account)
 
@@ -2824,6 +3435,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
         _save_outlook(outlook_rows)
         _save_generic_api_emails(generic_rows)
         _save_imap_emails(imap_rows)
+        _save_akmoz_emails(akmoz_rows)
         _save_accounts(accounts)
         return inserted, skipped
 
@@ -2920,7 +3532,8 @@ def delete_email_pool(email: str, source: str = "all") -> bool:
     source = str(source or "all").strip().lower()
     if not target:
         return False
-    if source not in {"all", "outlook", "generic_api", "imap", "cloudflare_domain"}:
+    if source not in {"all", "outlook", "generic_api", "imap", "akmoz",
+                      "cloudflare_domain"}:
         raise ValueError(f"非法邮箱来源: {source}")
 
     with _LOCK:
@@ -4179,14 +4792,26 @@ def recover_interrupted_account_inspections(error: str = "WebUI 重启，巡检�
         return len(rows)
 
 
-def update_account_team_checkout(acc_id: int, result: dict | None = None) -> bool:
-    """更新账号 Team 结账长链接。"""
+def update_account_team_checkout(acc_id: int, result: dict | None = None,
+                                 *, clear: bool = False) -> bool:
+    """更新账号 Team 结账长链接。
+
+    clear=True 用于支付完成后清掉长链：链一旦付过就作废，留着只会让下次
+    点支付时提示"可复用"，拿它再付一次必然失败。
+    """
     result = result or {}
     with _LOCK:
         accounts = _load_accounts()
         row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
         if row is None:
             return False
+        if clear:
+            for key in ("team_checkout_url", "team_checkout_created_at",
+                        "team_checkout_error"):
+                row.pop(key, None)
+            row["updated_at"] = _now()
+            _save_accounts(accounts)
+            return True
         if result.get("url"):
             row["team_checkout_url"] = result.get("url")
             row["team_checkout_created_at"] = _now()

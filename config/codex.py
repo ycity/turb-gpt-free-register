@@ -97,7 +97,11 @@ CPA_SAVE_CALLBACK_RECEIPT: bool = True
 #   "h"       = 本地 H 取号服务，接口说明见 H_API.md
 # ============================================================
 
-SMS_PROVIDER: str = "l"
+# 默认走 HeroSMS：实测泰国(52) dr 服务 $0.13、库存上万，
+# 美国(187) 要 $0.715，远超 SMS_MAX_PRICE 的 0.14 会直接拿不到号。
+# 换 provider 时记得一起核对 SMS_COUNTRY 和 SMS_MAX_PRICE，三者不配套
+# 的表现是「重试 N 次仍失败」而不是明确报价格超限。
+SMS_PROVIDER: str = "herosms"
 
 # 接码 API 基址（GET handler）
 SMS_API_BASE: str = "https://api.grizzlysms.com/stubs/handler_api.php"
@@ -125,8 +129,9 @@ HEROSMS_API_KEY: str = env_str("HEROSMS_API_KEY", "")
 # 服务代码：OpenAI (ChatGPT) = "dr"
 SMS_SERVICE: str = "dr"
 
-# 国家代码：葡萄牙 = "117" / 美国 = "187"
-SMS_COUNTRY: str = "10"
+# 国家代码：泰国 = "52" / 葡萄牙 = "117" / 美国 = "187"
+# 配 HeroSMS 用 52：dr 服务约 $0.13，库存充足；187 要 $0.715。
+SMS_COUNTRY: str = "52"
 
 # 单个号愿意支付的最高价格（留空=不限）。透传给 getNumber 的 maxPrice。
 SMS_MAX_PRICE: str = ""

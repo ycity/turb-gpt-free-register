@@ -190,6 +190,42 @@ def record_used_promo_code(code: str, account_id: int | None = None,
                 "stats": get_promo_stats()}
 
 
+def reclaim_stale_promo_codes(older_than_minutes: float = 30.0) -> dict:
+    """把卡在 using 的码退回 unused。
+
+    码在提链时标成 using，支付成功才升 used。支付失败、被金额闸门拦下、
+    或会话超时被回收的，码会一直挂在 using——但 OpenAI 侧并没有消耗它，
+    所以应该退回池子继续用。
+
+    只退回超过 older_than_minutes 的：刚领走的可能正在支付中，退回去会
+    被另一个流程重复分派。
+    """
+    import datetime
+
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(minutes=max(0.0, older_than_minutes)))
+    cutoff_s = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+
+    freed = []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, code, account_id, updated_at FROM promo_codes"
+            " WHERE status = 'using'").fetchall()
+        for r in rows:
+            if str(r["updated_at"] or "")[:19] >= cutoff_s:
+                continue           # 可能正在支付，先不动
+            conn.execute(
+                "UPDATE promo_codes SET status='unused', account_id=NULL,"
+                " account_email=NULL, last_error=?, updated_at=? WHERE id=?",
+                ("提链后未完成支付，码未被消耗，已自动退回池", _now(), r["id"]))
+            freed.append(str(r["code"]))
+
+    if freed:
+        logger.info("[优惠码] 退回 %d 个未完成支付的码：%s",
+                    len(freed), ",".join(freed))
+    return {"freed": freed, "count": len(freed), "stats": get_promo_stats()}
+
+
 def clear_promo_codes(status: str = "") -> int:
     with _connect() as conn:
         if status:
@@ -201,8 +237,15 @@ def clear_promo_codes(status: str = "") -> int:
 
 # ----------------- 1024proxy -----------------
 
-def fetch_1024proxy_ips(region: str = "EG", num: int = 4, api_url: str = "") -> list[str]:
-    """从 1024proxy 白名单 API 拉取多个与 region 匹配的 IP:Port，便于跳过粘滞的死出口。"""
+def fetch_1024proxy_ips(region: str = "EG", num: int = 4, api_url: str = "",
+                        minutes: int = 0) -> list[str]:
+    """从 1024proxy 白名单 API 拉取多个与 region 匹配的 IP:Port，便于跳过粘滞的死出口。
+
+    minutes 是代理的保留时长。默认 URL 里是 time=10，对提链够用，
+    但支付要先登录拿 cookie、填表、等人点验证码，10 分钟常常不够——
+    代理中途失效会让后面每一步都莫名其妙地失败。
+    传 minutes>0 覆盖它。
+    """
     from urllib.parse import urlsplit, parse_qsl, urlencode
     base = (api_url or os.getenv("PROXIES_1024_API_URL") or DEFAULT_1024PROXY_API).strip()
     parts = urlsplit(base)
@@ -210,6 +253,8 @@ def fetch_1024proxy_ips(region: str = "EG", num: int = 4, api_url: str = "") -> 
     if region:
         query["region"] = region.strip().upper()
     query["num"] = str(max(1, int(num)))
+    if minutes and int(minutes) > 0:
+        query["time"] = str(int(minutes))
     url = parts._replace(query=urlencode(query)).geturl()
     req = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA})
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -324,6 +369,67 @@ def _registration_exit_geo(proxy: str, account_proxy: str = "") -> dict:
     return {}
 
 
+def _single_seat_enabled() -> bool:
+    """是否尝试 1 席。默认开，出问题可在配置里关掉退回 2 席。"""
+    try:
+        from config import register as cfg
+        return bool(getattr(cfg, "TEAM_TRY_SINGLE_SEAT", True))
+    except Exception:  # noqa: BLE001 - 读不到配置就按开启处理
+        return True
+
+
+def _try_single_seat(env, headers: dict, workspace: str, country: str,
+                     currency: str, promo: str, timeout: int) -> tuple[str, dict] | None:
+    """尝试建一条 1 席的结账链接；不支持就返回 None。
+
+    1 席只能走 custom 模式再 update：hosted 模式对任何账号都直接回
+    400 must purchase a minimum of 2 seats，哪怕该账号的
+    business_minimum_seats 已经是 1（实测验证过）。
+
+    custom 模式不返回 pay.openai.com 长链，支付入口是
+    chatgpt.com/checkout/openai_llc/{id}，实测能正常打开并显示金额。
+    """
+    from core.single_seat import (build_create_payload, read_minimum_seats,
+                                  update_seat_quantity)
+
+    attempt_id = str(uuid.uuid4())
+    payload = build_create_payload(workspace, 2, country, currency,
+                                   promo=promo, attempt_id=attempt_id)
+    try:
+        resp = env.post(CHECKOUT_API, headers=headers,
+                        data=json.dumps(payload), timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - 探测失败就退回 2 席
+        logger.debug("[单席位] 创建失败：%s", exc)
+        return None
+    if resp.status_code != 200:
+        logger.debug("[单席位] 创建 HTTP %s", resp.status_code)
+        return None
+    try:
+        created = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    sid = str(created.get("checkout_session_id") or "")
+    if not sid:
+        return None
+
+    minimum = read_minimum_seats(env, headers, sid, timeout=timeout)
+    if minimum is None or minimum > 1:
+        logger.info("[单席位] 该账号最少 %s 席，按 2 席走", minimum if minimum else "未知")
+        return None
+
+    ok, err = update_seat_quantity(env, headers, created, 1,
+                                   promo=promo, timeout=timeout)
+    if not ok:
+        logger.warning("[单席位] min=1 但改席位失败，退回 2 席：%s", err[:160])
+        return None
+
+    url = f"https://chatgpt.com/checkout/openai_llc/{sid}"
+    created["single_seat"] = True
+    created["checkout_url"] = url
+    logger.warning("[单席位] 已生成 1 席结账链接（省一半订阅费）：%s", sid)
+    return url, created
+
+
 def _native_checkout(token: str, proxy: str, workspace: str, seats: int, country: str,
                      currency: str, promo: str, timeout: int,
                      account_proxy: str = "") -> tuple[str | None, dict | None, str]:
@@ -370,6 +476,23 @@ def _native_checkout(token: str, proxy: str, workspace: str, seats: int, country
         headers["authorization"] = f"Bearer {token}"
         if claims.get("account_id"):
             headers["chatgpt-account-id"] = str(claims["account_id"])
+
+        # 服务端对部分账号放开了 1 席，能用就省一半订阅费。
+        # 探测要带齐 Codex 那套头，否则 business_minimum_seats 字段根本不返回。
+        if _single_seat_enabled() and seats <= 2:
+            from core.single_seat import CODEX_HEADERS
+            probe_headers = dict(headers)
+            probe_headers.update(CODEX_HEADERS)
+            probe_headers["content-type"] = "application/json"
+            try:
+                hit = _try_single_seat(env, probe_headers, workspace, country,
+                                       currency, promo, timeout)
+            except Exception:  # noqa: BLE001 - 单席位是增值路径，失败就走原路
+                logger.exception("[单席位] 探测异常，按 2 席继续")
+                hit = None
+            if hit:
+                return hit[0], hit[1], ""
+
         resp = env.post(CHECKOUT_API, headers=headers, data=json.dumps(payload), timeout=timeout)
         status = int(resp.status_code)
         body = resp.text or ""
@@ -395,6 +518,12 @@ def _maybe_auto_pay(url: str, account_email: str, proxy: str) -> dict | None:
     """生成长链后按配置尝试 VCC 自动支付。
 
     支付失败绝不影响提链结果：长链本身已经拿到，这里只附带一个 auto_pay 字段。
+
+    注意：单席位（elements）结账页必须有登录态才打得开，而这条路径用的是
+    裸 pay_checkout、不带登录 cookie，打开只会落到 /auth/login。需要支付的
+    调用方（如自动订阅）应当传 auto_pay=False，改由 vcc_pay_session 那条
+    会先登录注入 session-token 的路径来付——否则同一个长链会被匿名会话
+    先打开一次，白烧一张链。
     """
     try:
         from config import vcc as vcc_cfg
@@ -428,7 +557,13 @@ def generate_team_checkout_link(
     account_email: str | None = None,
     account_proxy: str = "",
     timeout: int = 45,
+    auto_pay: bool = True,
 ) -> dict:
+    """生成长链。auto_pay=False 时只管提链，不做任何支付尝试。
+
+    自动订阅必须传 False：它随后会用 vcc_pay_session 支付，那条路会先登录
+    并注入 session-token。两个都付等于同一张链被匿名会话先打开一次，白烧。
+    """
     token = (token or "").strip()
     if not token:
         return {"ok": False, "error": "accessToken 不能为空"}
@@ -448,7 +583,15 @@ def generate_team_checkout_link(
         proxy_candidates = [proxy]
     elif use_1024proxy:
         try:
-            proxy_candidates = fetch_1024proxy_ips(region=country, num=4)
+            # 提链本身很快，但同一条链接着就要拿去支付（登录、填表、
+            # 等人点验证码），默认 10 分钟常常不够，统一按配置拉长。
+            try:
+                from config import vcc as _vcc
+                _mins = int(getattr(_vcc, "VCC_1024PROXY_MINUTES", 0) or 0)
+            except Exception:  # noqa: BLE001 - 配置缺失不该挡住提链
+                _mins = 0
+            proxy_candidates = fetch_1024proxy_ips(region=country, num=4,
+                                                   minutes=_mins)
         except Exception as e:
             return {"ok": False, "error": f"1024proxy 取 IP 失败: {e}"}
     elif provider == "jinmotech":
@@ -494,20 +637,61 @@ def generate_team_checkout_link(
         "proxy_used": used_proxy or "项目代理池",
         "country": country,
         "currency": currency,
+        # 命中单席位时席位数是 1，调用方据此判断该备多少钱
+        "seats": 1 if (isinstance(data, dict) and data.get("single_seat")) else seats,
+        "single_seat": bool(isinstance(data, dict) and data.get("single_seat")),
     }
 
     if url:
         if assigned:
-            mark_promo_code(assigned["id"], "used", account_id, account_email)
+            # 留在 using，不直接升 used。
+            #
+            # 2026-11-18 发现：拿到长链 != 码被消耗。支付是后续独立步骤，
+            # 失败时 OpenAI 侧并没有扣掉这个码，但池里已经记成 used，
+            # 于是一个还能用的码被永久埋掉。那天调试自动订阅就白埋了 3 个
+            #（等待确认超时 1 个、金额闸门拦下 2 个）。
+            #
+            # 现在由 vcc_pay_session._record_promo 在支付真正提交成功后
+            # 才升成 used；没付成的留在 using，可由 reclaim_stale_promo_codes
+            # 退回 unused。
+            mark_promo_code(assigned["id"], "using", account_id, account_email)
+        elif promo:
+            # 显式传码也要登记。
+            #
+            # 2026-11-17 线上事故（账号 #83）：指定 TXSFY6YAAG8YMS4J 提链，
+            # 码被 OpenAI 真实消耗、账单实打实打了八折（EGP 920 = 1150×0.8），
+            # 但池里那条始终挂着 unused——因为显式传码走的是 `if promo` 分支，
+            # assigned 恒为 None，上面那句 mark_promo_code 根本不会执行。
+            # 后果是下次提链会把这个废码再分派一次，白白失败一轮。
+            #
+            # 用 record_used_promo_code 而不是 mark_promo_code：前者按 code
+            # 查找，池里没有就插入、已存在就补归属，且对已是 used 的记录保留
+            # 首次归属，不会把真实使用者改掉。
+            try:
+                record_used_promo_code(promo, account_id=account_id,
+                                       account_email=account_email)
+            except Exception:  # noqa: BLE001 - 登记失败不能吃掉已拿到的长链
+                logger.exception("显式优惠码登记失败：%s", promo)
         result = {"ok": True, "url": url, "data": data, **meta}
-        pay = _maybe_auto_pay(url, account_email or "", used_proxy)
-        if pay is not None:
-            result["auto_pay"] = pay
+        if auto_pay:
+            pay = _maybe_auto_pay(url, account_email or "", used_proxy)
+            if pay is not None:
+                result["auto_pay"] = pay
         return result
 
     logger.warning("Team 提链失败 provider=%s account=%s promo=%s proxy=%s: %s",
                    provider, account_id, promo, meta["proxy_used"], err_msg)
+    promo_issue = any(k in err_msg.lower() for k in PROMO_ERROR_KEYWORDS)
     if assigned:
-        promo_issue = any(k in err_msg.lower() for k in PROMO_ERROR_KEYWORDS)
         mark_promo_code(assigned["id"], "expired" if promo_issue else "unused", error=err_msg)
+    elif promo and promo_issue:
+        # 显式传的码被判不可用（not eligible / 已过期），同样要落进池子，
+        # 否则它要么不在池里、要么还挂着 unused，下次还会被挑出来再废一轮。
+        # 只在确认是"码的问题"时标记：代理超时之类的失败与码无关，标了会冤枉好码。
+        try:
+            record_used_promo_code(promo, account_id=account_id,
+                                   account_email=account_email,
+                                   status="expired")
+        except Exception:  # noqa: BLE001
+            logger.exception("显式优惠码标记失效失败：%s", promo)
     return {"ok": False, "error": err_msg, **meta}

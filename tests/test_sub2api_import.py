@@ -134,6 +134,51 @@ class CredentialsTest(unittest.TestCase):
             build_credentials(self._payload(id_token=""))
 
 
+class PriorityTest(unittest.TestCase):
+    def test_priority_by_kind(self):
+        from core.sub2api_import import PRIORITY_BY_KIND
+        self.assertEqual(PRIORITY_BY_KIND["weekly"], 8)
+        self.assertEqual(PRIORITY_BY_KIND["5h"], 3)
+
+    def test_unknown_kind_falls_back_to_5h(self):
+        idx = SRC.index('"priority": PRIORITY_BY_KIND.get(')
+        self.assertIn(", 3)", SRC[idx:idx + 80])
+
+
+class PrivacyTest(unittest.TestCase):
+    def test_endpoint_is_set_privacy(self):
+        idx = SRC.index("def set_privacy")
+        body = SRC[idx:idx + 1200]
+        self.assertIn("/set-privacy", body)
+        self.assertIn('"POST"', body)
+
+    def test_only_training_off_counts_as_success(self):
+        """training_set_cf_blocked 说明训练可能还开着，不能算成功。"""
+        idx = SRC.index("def set_privacy")
+        body = SRC[idx:idx + 1200]
+        self.assertIn('mode == "training_off"', body)
+        self.assertIn("training_set_cf_blocked", body)
+
+    def test_failure_does_not_raise(self):
+        """隐私没关掉不该让整个导入失败。"""
+        idx = SRC.index("def set_privacy")
+        body = SRC[idx:idx + 1200]
+        self.assertIn("except Exception", body)
+        self.assertNotIn("raise", body)
+
+    def test_import_calls_it_by_default(self):
+        from core.sub2api_import import import_account
+        import inspect
+        sig = inspect.signature(import_account)
+        self.assertIs(sig.parameters["disable_training"].default, True)
+        idx = SRC.index("def import_account")
+        self.assertIn("set_privacy(acc_id", SRC[idx:])
+
+    def test_ui_surfaces_result(self):
+        self.assertIn("r.privacy", HTML)
+        self.assertIn("训练共享已关", HTML)
+
+
 class ImportLogicTest(unittest.TestCase):
     def test_uses_oauth_not_agent_identity(self):
         """sub2api 实测拒绝 agent_identity，只能走 oauth。"""

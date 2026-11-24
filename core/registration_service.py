@@ -164,7 +164,14 @@ def _is_final_session_access_token_timeout(error: object) -> bool:
 
 
 def _should_disable_failed_registration_email(error: object) -> bool:
-    """需要直接停用邮箱的注册失败类型。"""
+    """需要直接停用邮箱的注册失败类型。
+
+    这些错误都指向"这个邮箱在 OpenAI 侧已经不能用了"，再放回池里也是白费：
+    - 进入登录密码页 / log-in：邮箱已注册过
+    - 换 token 超时：会话建到一半被拒
+    注意"找不到 OTP 输入框"不列进来：它既可能是废邮箱（提交后进错误页），
+    也可能是 Cloudflare 慢、页面抖动，交给连续失败计数去判，别一次就停用。
+    """
     text = str(error or "")
     if not text:
         return False

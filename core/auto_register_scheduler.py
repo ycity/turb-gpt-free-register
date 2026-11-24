@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 _ANCHOR_KEY = "auto_register_last_2fa_at"
 _ENABLED_KEY = "auto_register_enabled"
+# 连续失败次数。失败后用短间隔快速换出口+换邮箱重试，
+# 但连续失败太多次说明是系统性故障（出口全废、邮箱池全坏），
+# 这时回落到正常间隔，免得以 2 分钟一次的频率持续烧号。
+_FAIL_STREAK_KEY = "auto_register_fail_streak"
+# 上一个由自动注册发起的任务 id。下一轮据它结算成功/失败，从而决定
+# 本轮用正常间隔还是失败快速重试。
+_LAST_JOB_KEY = "auto_register_last_job"
 
 _THREAD: threading.Thread | None = None
 _WAKE = threading.Event()
@@ -59,6 +66,45 @@ def interval_seconds() -> float:
         return max(60.0, float(getattr(_cfg, "AUTO_REGISTER_INTERVAL", 1800.0)))
     except (TypeError, ValueError):
         return 1800.0
+
+
+def _retry_interval() -> float:
+    """注册失败后的短重试间隔。不低于 30s，免得失败时疯狂空转。"""
+    try:
+        return max(30.0, float(getattr(_cfg, "AUTO_REGISTER_RETRY_INTERVAL", 120.0)))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def _max_fast_retries() -> int:
+    try:
+        return max(0, int(getattr(_cfg, "AUTO_REGISTER_MAX_FAST_RETRIES", 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _fail_streak() -> int:
+    try:
+        return max(0, int(str(db.get_meta(_FAIL_STREAK_KEY) or "0")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_fail_streak(n: int) -> None:
+    db.set_meta(_FAIL_STREAK_KEY, str(max(0, int(n))))
+
+
+def _effective_interval() -> tuple[float, bool]:
+    """返回 (本轮该用的间隔, 是否处于快速重试).
+
+    上一轮失败、且连续失败还没到上限时用短间隔——失败多半是出口被挡、
+    邮箱已废这类换一组就能解决的问题，没必要等满正常间隔。
+    连续失败到上限说明是系统性故障，回落到正常间隔等人介入。
+    """
+    streak = _fail_streak()
+    if 0 < streak <= _max_fast_retries():
+        return _retry_interval(), True
+    return interval_seconds(), False
 
 
 def _twofa_timeout() -> float:
@@ -145,20 +191,62 @@ def evaluate() -> dict:
                 "state": "ready", "available": remaining}
 
     elapsed = (now - anchor).total_seconds()
-    interval = interval_seconds()
+    interval, fast = _effective_interval()
     if elapsed < interval:
-        return {"blocked": True, "reason": f"距上次 2FA 结束 {int(elapsed)}s，未满 {int(interval)}s",
+        mode = "失败快速重试" if fast else "正常间隔"
+        return {"blocked": True,
+                "reason": f"距上轮 {int(elapsed)}s，未满 {int(interval)}s（{mode}）",
                 "state": "waiting", "available": remaining,
                 "wait_seconds": int(interval - elapsed),
+                "fast_retry": fast, "fail_streak": _fail_streak(),
                 "anchor": anchor.isoformat(timespec="seconds")}
 
-    return {"blocked": False, "reason": f"距上次 2FA 结束已 {int(elapsed)}s，发起下一个",
+    tail = "，失败后快速重试" if fast else ""
+    return {"blocked": False, "reason": f"距上轮已 {int(elapsed)}s，发起下一个{tail}",
             "state": "ready", "available": remaining,
+            "fast_retry": fast, "fail_streak": _fail_streak(),
             "anchor": anchor.isoformat(timespec="seconds")}
+
+
+def _settle_last_job() -> None:
+    """结算上一个自动发起的任务，更新连续失败计数。
+
+    成功 -> 清零；失败 -> +1（触发下一轮快速重试）。
+    任务还没结束就先不动，等它跑完下一轮再结算。
+    成功路径其实在 note_twofa_finished 已经清零了，这里主要兜失败那条：
+    注册失败时 2FA 不会入队，没有别的地方会把 streak 推上去。
+    """
+    raw = str(db.get_meta(_LAST_JOB_KEY) or "").strip()
+    if not raw:
+        return
+    try:
+        job = db.get_job(int(raw))
+    except Exception:  # noqa: BLE001 - 查不到就当它已消失，别卡住调度
+        job = None
+    if not job:
+        db.set_meta(_LAST_JOB_KEY, "")
+        return
+    st = str(job.get("status") or "").strip().lower()
+    if st in ("success", "succeeded", "done", "completed"):
+        if _fail_streak():
+            logger.info("[自动注册] 上一个任务 #%s 成功，清零连续失败计数", raw)
+        _set_fail_streak(0)
+        db.set_meta(_LAST_JOB_KEY, "")
+    elif st in ("failed", "error", "cancelled", "canceled"):
+        streak = _fail_streak() + 1
+        _set_fail_streak(streak)
+        db.set_meta(_LAST_JOB_KEY, "")
+        logger.warning("[自动注册] 上一个任务 #%s 失败（%s），连续失败 %s 次，"
+                       "将换出口+换邮箱按 %ss 间隔快速重试",
+                       raw, st, streak, int(_retry_interval()))
+    # 其它状态（queued/running）：还没结束，保留 job_id 下轮再看
 
 
 def _tick() -> dict:
     """执行一次判定；满足条件就发起一个注册任务。"""
+    # 先结算上一个任务，连续失败计数要在判定间隔之前更新
+    _settle_last_job()
+
     decision = evaluate()
     if decision.get("blocked"):
         return decision
@@ -175,6 +263,8 @@ def _tick() -> dict:
                 "reason": f"发起注册失败：{type(exc).__name__}: {exc}"}
 
     job_id = int(jobs[0]["id"]) if jobs else None
+    # 记下这个任务，下一轮据它成功/失败决定走正常间隔还是快速重试
+    db.set_meta(_LAST_JOB_KEY, str(job_id or ""))
     logger.info("[自动注册] 已发起注册任务 #%s", job_id)
     return {"blocked": False, "state": "submitted", "job_id": job_id,
             "reason": f"已发起注册任务 #{job_id}",
@@ -185,6 +275,11 @@ def note_twofa_finished(email: str | None = None) -> None:
     """2FA 收尾时把锚点推到当前时刻，作为下一轮间隔的起点。"""
     moment = _now()
     _record_anchor(moment)
+    # 走到 2FA 说明注册这步成功了，清零连续失败计数，回到正常间隔
+    if _fail_streak():
+        logger.info("[自动注册] 2FA 完成，清零连续失败计数")
+    _set_fail_streak(0)
+    db.set_meta(_LAST_JOB_KEY, "")
     logger.info("[自动注册] 2FA 已结束（%s），下一轮从 %s 开始计时",
                 email or "未知邮箱", moment.strftime("%H:%M:%S"))
     _WAKE.set()
@@ -210,6 +305,8 @@ def status() -> dict:
         "state": decision.get("state"),
         "reason": decision.get("reason"),
         "blocked": bool(decision.get("blocked")),
+        "fast_retry": bool(decision.get("fast_retry")),
+        "fail_streak": _fail_streak(),
         "running": _THREAD is not None and _THREAD.is_alive(),
         "last_action": last,
     }

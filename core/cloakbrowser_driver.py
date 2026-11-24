@@ -480,6 +480,47 @@ def _close_quietly(target) -> None:
         logger.debug("[Cloak] 关闭浏览器上下文失败", exc_info=True)
 
 
+def _acquire_registration_exit() -> tuple[str, str]:
+    """挑一个注册出口，返回 (代理地址, 地区标签)。
+
+    默认走 1024proxy 现取：随机国家、按配置申请保留时长，取到就验一下
+    能不能真访问 chatgpt.com，不通就换下一个 IP（换 IP，不是对同一个 IP
+    重连——实测坏的是单个 IP，重连没用）。
+
+    地区标签形如 "1024·US"，会一路带到账号记录里，供界面「注册代理」列
+    展示。1024proxy 的地址不在代理池里，查不到名称，不带标签的话那一列
+    永远是 "-"，事后就分不清这个号是哪个地区注册的。
+
+    任何一步出问题都回落到原来的 PROXY_POOL 随机抽取，保证注册不会因为
+    1024proxy 抽风而完全停摆。配置里把 REGISTER_PROXY_USE_1024 置 False
+    也会走这条回落路径（地区标签留空，由代理池名称顶上）。
+    """
+    from config.proxy import pick_proxy
+
+    try:
+        from config import register_proxy as rp_cfg
+        use_1024 = bool(getattr(rp_cfg, "REGISTER_PROXY_USE_1024", False))
+    except Exception:  # noqa: BLE001
+        use_1024 = False
+
+    if use_1024:
+        try:
+            from core.register_proxy import acquire_register_proxy
+            res = acquire_register_proxy()
+            if res.get("ok") and res.get("proxy"):
+                # 用实际探到的出口国家，不是请求的地区：
+                # 1024proxy 偶尔会给到别的国家，记录要如实。
+                cc = str(res.get("country") or res.get("region") or "").upper()
+                return str(res["proxy"]), ("1024·%s" % cc if cc else "1024proxy")
+            logger.warning("[Cloak] 1024proxy 没拿到可用出口（%s），回落代理池",
+                           res.get("detail"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Cloak] 1024proxy 取出口异常，回落代理池：%s: %s",
+                           type(exc).__name__, exc)
+
+    return str(pick_proxy() or "").strip(), ""
+
+
 def build_cloak_driver(proxy: str | None = None,
                        identity: str = "") -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser 并返回 Selenium 风格 driver。
@@ -493,6 +534,7 @@ def build_cloak_driver(proxy: str | None = None,
     """
     proxy_relay = None
     proxy_pool_target = ""
+    proxy_region = ""
     if proxy is None and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
         try:
             from config.proxy import pick_proxy
@@ -500,7 +542,7 @@ def build_cloak_driver(proxy: str | None = None,
             proxy = None
         else:
             from core.proxy_chain import open_proxy_pool_proxy
-            proxy_pool_target = str(pick_proxy() or "").strip()
+            proxy_pool_target, proxy_region = _acquire_registration_exit()
             proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target, measure_transport=True)
     elif proxy and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
         from core.proxy_chain import ProxyChainRelay, browser_blocked_proxy_hosts
@@ -613,6 +655,9 @@ def build_cloak_driver(proxy: str | None = None,
         "driver": "cloakbrowser",
         "proxy": proxy_url,
         "proxy_pool_target": proxy_pool_target or proxy_url,
+        # 出口地区标签（形如 1024·US）。1024proxy 的地址不在代理池里，
+        # 界面靠名称映射查不到，没有这个标签「注册代理」列就只能显示 "-"。
+        "proxy_region": proxy_region,
         "locale": locale_opts,
         "options": {k: v for k, v in opts.items() if k != "license_key"},
     })

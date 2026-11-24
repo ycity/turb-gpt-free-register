@@ -672,7 +672,8 @@ _EXPIRED_MARKERS = (
 
 
 def probe_checkout_link(checkout_url: str, *, proxy: str = "",
-                        timeout: float = 30.0) -> dict[str, Any]:
+                        timeout: float = 30.0,
+                        account: dict | None = None) -> dict[str, Any]:
     """只读地检查长链还能不能用来支付，不填表也不提交。
 
     结果分三种，处置完全不同：
@@ -680,12 +681,21 @@ def probe_checkout_link(checkout_url: str, *, proxy: str = "",
       - 会话过期：长链作废，只能重新生成（会再消耗优惠码）
       - 页面空白：长链多半还有效，是这个出口加载不出 Stripe 资源。
         实测 softbank 出口对同一条链始终空白，换出口后表单秒出。
+
+    单席位长链（chatgpt.com/checkout/openai_llc/...）走另一条路：
+    它要登录态才打得开，无痕浏览器一律被 302 到 /auth/login，
+    按页面判断会把好链接误判成废链。改查服务端 session 状态，
+    既准确又不用开浏览器。
     """
     from playwright.sync_api import sync_playwright
 
     url = (checkout_url or "").strip()
     if not url:
         return {"usable": False, "reason": "长链为空", "kind": "empty"}
+
+    from core.elements_checkout import is_elements_checkout
+    if is_elements_checkout(url):
+        return _probe_elements_link(url, account=account, timeout=timeout)
 
     launch: dict[str, Any] = {"headless": True}
     option = build_proxy_option(proxy)
@@ -729,23 +739,124 @@ def probe_checkout_link(checkout_url: str, *, proxy: str = "",
                 pass
 
 
+def _probe_elements_link(url: str, *, account: dict | None = None,
+                         timeout: float = 30.0) -> dict[str, Any]:
+    """查单席位长链的服务端状态。
+
+    不开浏览器：这个页面要登录态，无痕访问一律跳登录页，
+    拿页面内容判断会把好链接误判成废的。直接问 checkout API：
+        status=open + payment_status=unpaid  -> 还能付
+        其它                                  -> 付过了或已作废
+    """
+    import re as _re
+    import uuid as _uuid
+
+    m = _re.search(r"(oaics_[0-9a-f]+)", url)
+    if not m:
+        return {"usable": False, "kind": "unknown",
+                "reason": "链接里没有 checkout session id"}
+    sid = m.group(1)
+
+    if not account:
+        return {"usable": False, "kind": "unknown",
+                "reason": "缺少账号信息，无法查询单席位长链状态"}
+
+    from config.proxy import normalize_proxy_url
+    from core.chatgpt_plan import normalize_token, token_claims
+    from core.session import BrowserSession
+    from core.single_seat import CHECKOUT_DETAIL, CODEX_HEADERS
+
+    token = normalize_token(str(account.get("access_token") or ""))
+    if not token:
+        return {"usable": False, "kind": "unknown", "reason": "账号没有 token"}
+    claims = token_claims(token)
+    if claims.get("token_expired") is True:
+        return {"usable": False, "kind": "unknown",
+                "reason": "账号 token 已过期，请先查活"}
+
+    proxy = str(account.get("proxy_used") or "")
+    env = BrowserSession(
+        proxy=normalize_proxy_url(proxy) if proxy else None,
+        detect_exit_geo=False, fingerprint_seed=f"probe:{_uuid.uuid4()}")
+    try:
+        for _ in range(3):
+            try:
+                env.get("https://chatgpt.com/auth/login",
+                        headers=env.get_chatgpt_navigate_headers(
+                            referer="https://chatgpt.com/",
+                            user_initiated=True),
+                        allow_redirects=True, timeout=15)
+                break
+            except Exception:  # noqa: BLE001
+                time.sleep(2)
+        env.blocked_until = 0.0
+        env.blocked_reason = ""
+
+        h = env.get_chatgpt_headers(referer="https://chatgpt.com/")
+        h["authorization"] = f"Bearer {token}"
+        if claims.get("account_id"):
+            h["chatgpt-account-id"] = str(claims["account_id"])
+        h.update(CODEX_HEADERS)
+        resp = env.get(
+            CHECKOUT_DETAIL.format(sid=sid) + "?supports_business_seat_offer=true",
+            headers=h, timeout=int(timeout))
+        if resp.status_code != 200:
+            return {"usable": False, "kind": "network",
+                    "reason": f"查询长链状态 HTTP {resp.status_code}"}
+        data = resp.json()
+        status = str(data.get("status") or "")
+        paid = str(data.get("payment_status") or "")
+        state = data.get("checkout_state") or {}
+        items = state.get("lineItems") or []
+        seats = sum(int(i.get("quantity") or 0) for i in items)
+        total = ((state.get("total") or {}).get("total") or {}).get("amount")
+        if status == "open" and paid == "unpaid":
+            return {"usable": True, "kind": "ready",
+                    "reason": f"可支付（{seats} 席，应付 {total}）",
+                    "seats": seats, "total": total}
+        if paid == "paid":
+            return {"usable": False, "kind": "expired",
+                    "reason": "这条长链已经支付过了"}
+        return {"usable": False, "kind": "expired",
+                "reason": f"长链不可用（status={status} payment={paid}）"}
+    except Exception as exc:  # noqa: BLE001
+        return {"usable": False, "kind": "network",
+                "reason": f"查询失败：{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            env.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def probe_with_fallback(checkout_url: str, *, proxy: str = "",
                         candidates: list[str] | None = None,
-                        timeout: float = 30.0) -> dict[str, Any]:
+                        timeout: float = 30.0,
+                        account: dict | None = None) -> dict[str, Any]:
     """先用本单代理探，空白就换候选出口再试。
 
     空白意味着长链很可能没问题，只是这个出口连不上 Stripe 的静态资源。
     会话过期则换谁都一样，不浪费时间继续探。
+
+    单席位长链查的是服务端状态，和出口无关，所以探一次就够，
+    不用再换出口重试。
     """
-    first = probe_checkout_link(checkout_url, proxy=proxy, timeout=timeout)
+    from core.elements_checkout import is_elements_checkout
+
+    first = probe_checkout_link(checkout_url, proxy=proxy, timeout=timeout,
+                                account=account)
     if first.get("usable") or first.get("kind") == "expired":
+        return {**first, "proxy": proxy}
+    if is_elements_checkout(checkout_url):
+        # 换出口对它没意义：结论来自服务端，不是页面渲染
         return {**first, "proxy": proxy}
 
     for alt in candidates or []:
         alt = (alt or "").strip()
         if not alt or alt == proxy:
             continue
-        res = probe_checkout_link(checkout_url, proxy=alt, timeout=timeout)
+        res = probe_checkout_link(checkout_url, proxy=alt, timeout=timeout,
+                                  account=account)
         if res.get("usable"):
             logger.warning("[pay] 本单代理打不开结账页，改用备用出口 %s",
                            alt.split("@")[-1])
@@ -1053,7 +1164,34 @@ def _handle_3ds(page: Any, client: Any, card_id: str, cfg: Any,
         logger.debug("[vcc-pay] 3DS 处理异常：%s", exc)
 
 
+#: 提交后页面明确表示"付款没成功"的文案。
+#:
+#: 2026-11-18 事故：#110 用 9636 付款，提交后页面跳回 "Configure your plan"
+#: 并显示红框 "Payment was not approved"，但 _page_error 只认 Stripe 的 4 个
+#: CSS 选择器，没命中 OpenAI 侧这个红框，于是被判成成功——paid_at 落下、
+#: 账号移出候选队列，实际一分钱没扣、订阅也没建立（卡余额 20.96 前后不变、
+#: subscriptions 接口 404）。假的成功比明确的失败危害大得多。
+_FAILURE_TEXTS = (
+    "payment was not approved",
+    "payment was declined",
+    "your card was declined",
+    "card was declined",
+    "payment failed",
+    "we could not process your payment",
+    "there was a problem with your payment",
+    "付款未获批准",
+    "支付未成功",
+    "カードが拒否されました",
+    "お支払いを処理できませんでした",
+)
+
+
 def _page_error(page: Any) -> str:
+    """页面上是否显示了明确的失败信息；返回文案，没有则空串。
+
+    先查 Stripe 的结账页错误元素，再查 OpenAI 自己渲染的失败文案
+    （拒付后面会跳回套餐配置页并给出红框提示，那种情况没有 Stripe 元素）。
+    """
     for selector in (".FormFieldGroup-Error", '[data-testid="error-message"]',
                      ".ConfirmPayment-PostSubmit .Text-color--red",
                      ".CheckoutPaymentForm .Text-color--red"):
@@ -1063,4 +1201,13 @@ def _page_error(page: Any) -> str:
             continue
         if text:
             return text[:300]
+
+    # OpenAI 侧的失败提示：整页文本里找关键短语
+    try:
+        body = (page.inner_text("body", timeout=2000) or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+    for phrase in _FAILURE_TEXTS:
+        if phrase in body:
+            return phrase
     return ""

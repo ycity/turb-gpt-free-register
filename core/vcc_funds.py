@@ -19,6 +19,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 配置缺失或配成 0 时的兜底充值额（USD）。与 config/vcc.py 的
+# VCC_RECHARGE_AMOUNT 保持一致，免得两处对不上、排查时说不清充了多少。
+_DEFAULT_TOP_UP = 20.0
+
 
 class InsufficientFunds(RuntimeError):
     """账户余额不足以完成这次支付。"""
@@ -63,10 +67,24 @@ def _request_no(card_id: str, amount: float, *, attempt_key: str = "") -> str:
 def required_usd(cfg: Any) -> float:
     """这次支付大约需要多少 USD。
 
-    账单是 EGP，卡是 USD，按配置的汇率折算并留出余量。汇率写在配置里而
-    不是实时查：实时汇率会让"够不够"的判断每次都不一样，排查时说不清。
+    优先用 VCC_FUNDING_USD：卡就是 USD 卡，账单也走 US 区时根本不需要折算，
+    配置里写 18 就是 18，所见即所得。#83 实扣 17.17，备 18 刚好覆盖。
+
+    置 0 时回落到 EGP 折算（VCC_FUNDING_AMOUNT / 汇率 + 余量），给 EG 区那条
+    路用。汇率写在配置里而不是实时查：实时汇率会让"够不够"的判断每次都不
+    一样，排查时说不清。
+
+    折算分支用 VCC_FUNDING_AMOUNT 而不是 VCC_EXPECTED_AMOUNT：后者是金额校验
+    闸门，默认已关（置 0），拿它算充值会得出"只需 buffer"，卡不充值、支付必失败。
     """
-    amount = float(getattr(cfg, "VCC_EXPECTED_AMOUNT", 0.0) or 0.0)
+    direct = float(getattr(cfg, "VCC_FUNDING_USD", 0.0) or 0.0)
+    if direct > 0:
+        return round(direct, 2)
+
+    amount = float(getattr(cfg, "VCC_FUNDING_AMOUNT", 0.0) or 0.0)
+    if amount <= 0:
+        # 老配置没有 VCC_FUNDING_AMOUNT 时回退到闸门值，保持向后兼容
+        amount = float(getattr(cfg, "VCC_EXPECTED_AMOUNT", 0.0) or 0.0)
     rate = float(getattr(cfg, "VCC_USD_RATE", 56.0) or 56.0)
     buffer = float(getattr(cfg, "VCC_BALANCE_BUFFER", 1.0) or 0.0)
     if rate <= 0:
@@ -77,11 +95,11 @@ def required_usd(cfg: Any) -> float:
 def _recharge_amount(card_balance: float, need: float, top_up: float) -> float:
     """算这次该充多少。
 
-    按配置的整额充（例如 21 USD），不够就充整数倍。不用"刚好补差额"是因为
-    那会得到 21.22 这种零碎数字，配置里写的 21 就白写了，对账也难看。
+    按配置的整额充（例如 35 USD），不够就充整数倍。不用"刚好补差额"是因为
+    那会得到 35.22 这种零碎数字，配置里写的 35 就白写了，对账也难看。
     """
     if top_up <= 0:
-        top_up = 21.0
+        top_up = _DEFAULT_TOP_UP
     shortfall = need - card_balance
     if shortfall <= 0:
         return 0.0
@@ -102,7 +120,8 @@ def ensure_funds(client: Any, card_id: str, cfg: Any, *,
     need = required_usd(cfg)
     if auto_recharge is None:
         auto_recharge = bool(getattr(cfg, "VCC_AUTO_RECHARGE", True))
-    top_up = float(getattr(cfg, "VCC_RECHARGE_AMOUNT", 21.0) or 21.0)
+    top_up = float(getattr(cfg, "VCC_RECHARGE_AMOUNT", _DEFAULT_TOP_UP)
+                   or _DEFAULT_TOP_UP)
 
     try:
         card_bal = client._available(client.card_balance(card_id))
@@ -176,7 +195,8 @@ def preflight(client: Any, card_id: str, cfg: Any) -> dict[str, Any]:
     except VccError as exc:
         return {"ok": False, "error": f"查询余额失败：{exc}"}
 
-    top_up = float(getattr(cfg, "VCC_RECHARGE_AMOUNT", 21.0) or 21.0)
+    top_up = float(getattr(cfg, "VCC_RECHARGE_AMOUNT", _DEFAULT_TOP_UP)
+                   or _DEFAULT_TOP_UP)
     if card_bal >= need:
         return {"ok": True, "need_recharge": False, "card_balance": card_bal,
                 "account_balance": acct_bal, "needed": need}

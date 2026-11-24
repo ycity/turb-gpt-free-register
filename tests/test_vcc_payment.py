@@ -208,11 +208,179 @@ class AmountGateTest(unittest.TestCase):
 class ConfigDefaultsTest(unittest.TestCase):
     def test_gate_defaults_are_consistent(self):
         from config import vcc
-        self.assertEqual(vcc.VCC_EXPECTED_AMOUNT, 1150.0)
-        # 上限必须高于期望值，否则闸门自相矛盾、永远不过
-        self.assertGreater(vcc.VCC_MAX_CHARGE, vcc.VCC_EXPECTED_AMOUNT)
+        # 三道金额闸门当前全部关闭，这是明确的选择：
+        # EG（EGP，千量级）和 US（USD，十量级）两条路都在用，
+        # 任何一个写死的数或币种都会把另一边的正常单拦死。
+        self.assertEqual(vcc.VCC_EXPECTED_AMOUNT, 0.0)
+        self.assertEqual(vcc.VCC_MAX_CHARGE, 0.0)
+        self.assertEqual(vcc.VCC_EXPECTED_CURRENCY, "")
         # 默认不启用，避免误扣
         self.assertFalse(vcc.VCC_AUTO_PAY_ENABLED)
+
+    def test_tradeoff_documented(self):
+        """闸门全关是有代价的取舍，必须在配置里写清楚，
+        否则后来的人会以为是忘了配。"""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "config" / "vcc.py"
+               ).read_text(encoding="utf-8")
+        self.assertIn("全部关闭", src)
+        self.assertIn("席位数", src)   # 说明还剩哪些保护
+
+    def test_funding_amount_is_independent_of_gate(self):
+        """备款金额必须单独配，不能跟着闸门一起被置 0，否则卡不充值。"""
+        from config import vcc
+        from core.vcc_funds import required_usd
+        # 两条路（USD 直配 / EGP 折算）随便走哪条，算出来都不能是 0
+        self.assertGreater(required_usd(vcc), 0.0)
+
+    def test_gate_consistent_when_equality_enabled(self):
+        """有人把等值校验打开时，上限仍须高于期望值，否则闸门自相矛盾。"""
+        from config import vcc
+        if vcc.VCC_EXPECTED_AMOUNT > 0 and vcc.VCC_MAX_CHARGE > 0:
+            self.assertGreater(vcc.VCC_MAX_CHARGE, vcc.VCC_EXPECTED_AMOUNT)
+
+
+class RealWorldAmountTest(unittest.TestCase):
+    """按真实计价校验闸门：席位固定 2 个，单价 EGP 1150。
+
+    2026-11-13 的实际账单（截图核对过）：
+        ChatGPT Business  Qty 2 × 1150 = 2300
+        八折券                        -460
+        Tax                             0
+        Total                        1840
+    """
+
+    SEAT_PRICE = 1150.0
+    SEATS = 2
+    LIST_PRICE = SEAT_PRICE * SEATS      # 2300
+    EIGHTY_OFF = LIST_PRICE * 0.8        # 1840
+    # US 区单席位实测扣款（账号 #83，2026-11-17 核对）。
+    # 备款额就是照这个定的：17.17 + 零头余量 = 18。
+    US_SINGLE_SEAT = 17.17
+
+    def _gate(self, amount, currency="EGP"):
+        from config import vcc
+        check_amount_gate(
+            amount, currency,
+            expected=float(vcc.VCC_EXPECTED_AMOUNT or 0.0),
+            expected_currency=(vcc.VCC_EXPECTED_CURRENCY or "").strip(),
+            tolerance=float(vcc.VCC_AMOUNT_TOLERANCE or 0.0),
+            max_charge=float(vcc.VCC_MAX_CHARGE or 0.0))
+
+    def test_eighty_percent_coupon_passes(self):
+        """八折券 1840 必须放行，这是 EG 区的常态价。"""
+        self.assertEqual(self.EIGHTY_OFF, 1840.0)
+        self._gate(self.EIGHTY_OFF)
+
+    def test_list_price_passes_by_explicit_choice(self):
+        """无券原价也放行——闸门已明确关闭，金额由人核对。"""
+        self._gate(self.LIST_PRICE)
+
+    def test_us_amounts_pass(self):
+        """US 区单席位 $20 / 两席 $50 都要放行。
+
+        之前 VCC_EXPECTED_CURRENCY=EGP 时这里会被拦
+        （「页面币种 USD 与期望 EGP 不一致」），这正是关掉它的原因。
+        """
+        self._gate(20.0, currency="USD")
+        self._gate(50.0, currency="USD")
+
+    def test_amount_gates_are_off(self):
+        """上限关掉后，离谱金额也会放行——这是已知代价。
+
+        真正的保护换成了：单席位路径核对页面席位数 + 人工确认。
+        如果哪天想把上限加回来，这条测试会提醒你它当前是关的。
+        """
+        from config import vcc
+        self.assertEqual(vcc.VCC_MAX_CHARGE, 0.0)
+        self._gate(self.SEAT_PRICE * 10)   # 不抛异常
+
+    def test_seat_guard_is_the_real_protection(self):
+        """金额闸门关了，席位数核对就是最后一道自动防线。"""
+        import inspect
+        from core.vcc_pay_session import _fill_elements_checkout
+        src = inspect.getsource(_fill_elements_checkout)
+        self.assertIn("seats > 1", src)
+        self.assertIn("raise VccPayError", src)
+
+    def test_unreadable_amount_still_blocked(self):
+        """读不到金额仍然拦住：这道不受上限开关影响，不能丢。"""
+        with self.assertRaises(AmountGateError):
+            self._gate(None)
+
+    def test_currency_not_checked(self):
+        """币种校验已关，EGP/USD 都放行。"""
+        self._gate(self.EIGHTY_OFF, currency="USD")
+        self._gate(self.EIGHTY_OFF, currency="EGP")
+        self._gate(self.EIGHTY_OFF, currency="")
+
+    def test_funding_covers_common_case(self):
+        """备款至少要够付常态单，否则每单都扣款失败。
+
+        现在主力是 US 区单席位（#83 实扣 17.17 USD），备款按 USD 直配；
+        EG 区两席位那条路才看 EGP 八折价。按当前生效的那条路校验。
+        """
+        from config import vcc
+        if getattr(vcc, "VCC_FUNDING_USD", 0.0) > 0:
+            # US 区：备款（USD）要盖住实测的单席位账单
+            self.assertGreaterEqual(vcc.VCC_FUNDING_USD, self.US_SINGLE_SEAT)
+        else:
+            self.assertGreaterEqual(vcc.VCC_FUNDING_AMOUNT, self.EIGHTY_OFF)
+
+    def test_funding_shortfall_is_documented(self):
+        """备款低于原价是明确选定的取舍，必须在配置里写明后果。
+
+        券失效时页面是 EGP 2300，备款不够会扣款失败。这不是疏忽，
+        但下一个看代码的人有权知道，所以要求注释里讲清楚。
+        """
+        from pathlib import Path
+
+        from config import vcc
+        if getattr(vcc, "VCC_FUNDING_USD", 0.0) > 0:
+            self.skipTest("当前走 USD 直配备款，EGP 原价那条路未生效")
+        if vcc.VCC_FUNDING_AMOUNT >= self.LIST_PRICE:
+            self.skipTest("备款已覆盖原价，无需说明")
+        src = (Path(__file__).resolve().parents[1] / "config" / "vcc.py"
+               ).read_text(encoding="utf-8")
+        # 定位赋值行本身，不是文件开头 docstring 里的同名提及
+        i = src.index("VCC_FUNDING_AMOUNT =")
+        note = src[max(0, i - 600):i]
+        self.assertIn("原价", note, "备款低于原价却没写明后果")
+        self.assertIn("失败", note, "没说明不够时会发生什么")
+
+    def test_recharge_covers_one_payment(self):
+        """单次充值额要够一单，否则空卡时要充两笔、白压一倍的钱。"""
+        from config import vcc
+        from core.vcc_funds import required_usd
+        self.assertGreaterEqual(vcc.VCC_RECHARGE_AMOUNT, required_usd(vcc))
+
+    def test_funding_usd_is_the_active_path(self):
+        """备款口径只能有一个在生效，且与实测账单对得上。
+
+        2026-11-17 线上事故：备款还是按 EG 两席位折算的 35 USD，一张余额
+        34.81 的卡（付 18 绰绰有余）被判成"不足"，账户里 12.62 又不够充
+        那虚高的 35，支付直接卡死。
+        """
+        from config import vcc
+        from core.vcc_funds import required_usd
+        need = required_usd(vcc)
+        self.assertGreaterEqual(need, self.US_SINGLE_SEAT,
+                                "备款低于实测扣款，会扣款失败")
+        self.assertLess(need, self.US_SINGLE_SEAT * 1.5,
+                        "备款远高于实测扣款，会把够付的卡误判为不足")
+
+    def test_funding_within_gate(self):
+        """上限开着时，备款不该超过它——否则备了钱也会被闸门拦下。
+
+        上限关掉（0）时这条不适用：备款多少只取决于实际要付多少。
+        """
+        from config import vcc
+        if vcc.VCC_MAX_CHARGE <= 0:
+            self.skipTest("金额上限已关闭，备款与闸门无关")
+        if getattr(vcc, "VCC_FUNDING_USD", 0.0) > 0:
+            # USD 直配时备款与上限同为账单币种量级才有可比性
+            self.skipTest("USD 直配备款，与 EGP 上限不同量级，不作比较")
+        self.assertLessEqual(vcc.VCC_FUNDING_AMOUNT, vcc.VCC_MAX_CHARGE)
 
     def test_billing_address_is_complete(self):
         """账单地址随卡变化，这里只校验必填项齐全、州与国家匹配。"""

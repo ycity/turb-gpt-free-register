@@ -85,10 +85,16 @@ class ManualPanelProxyTipTest(unittest.TestCase):
         self.assertIn("服务端出口", body)
         self.assertIn("不生效", body)
 
-    def test_names_the_billing_country(self):
+    def test_names_the_settlement_country(self):
+        """提示要说清这条链按哪个国家结算。
+
+        原来写的是账单地址国家（卡的归属地），但决定手动付能不能成的
+        是结算国家——本机出口不在那里会被 Stripe 拒。
+        """
         start = HTML.index("async function _manualPayOpen")
         body = HTML[start:HTML.index("async function _manualPayDone")]
-        self.assertIn("账单地址在", body)
+        self.assertIn("_autoPayWantCc()", body)
+        self.assertIn("结算", body)
 
 
 if __name__ == "__main__":

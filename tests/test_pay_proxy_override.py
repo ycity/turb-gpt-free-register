@@ -63,13 +63,17 @@ class BackendAcceptsProxyNameTest(unittest.TestCase):
         self.assertIn('data.get("pay_proxy_name")', APP)
 
     def test_resolves_through_pool(self):
+        """按名字选池里的节点这条路要保留。
+
+        窗口要够大：中间还夹着"按结算国家现取 1024proxy"那个分支。
+        """
         idx = APP.index('data.get("pay_proxy_name")')
-        self.assertIn("resolve_by_name", APP[idx:idx + 400])
+        self.assertIn("resolve_by_name", APP[idx:idx + 2200])
 
     def test_unknown_name_is_rejected_not_silently_ignored(self):
         """名字打错就该报错，不能悄悄退回注册代理让人以为换成功了。"""
         idx = APP.index('data.get("pay_proxy_name")')
-        window = APP[idx:idx + 500]
+        window = APP[idx:idx + 2200]
         self.assertIn("找不到出口", window)
         self.assertIn("400", window)
 

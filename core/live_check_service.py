@@ -129,11 +129,34 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         saved_proxy = str(account.get("proxy_used") or "").strip()
         if not saved_proxy.lower().startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
             saved_proxy = ""
+
+        # 1024proxy 注册的号：注册出口是临时 IP，保留 120 分钟就失效。
+        # 继续拿它查活必然连不通，而 LIVE_CHECK_SWITCH_PROXY_ON_FAILURE
+        # 默认关着（换出口会掩盖真实状态），结果是拿到"网络失败"而不是
+        # 账号真实死活。改从代理池挑一个同地区的长期出口（没有则回落 US）。
+        region_note = ""
+        if saved_proxy and proxy is None:
+            try:
+                from core.region_proxy import adopt_pool_exit
+                region = str(account.get("proxy_region") or "")
+                picked, why = adopt_pool_exit(
+                    account_id, saved_proxy, region, label="查活")
+                if picked and picked != saved_proxy:
+                    saved_proxy = picked
+                    region_note = why
+                elif why:
+                    region_note = "临时出口已失效，但%s" % why
+            except Exception:  # noqa: BLE001 - 选路失败不能让查活起不来
+                logger.warning("[查活] 按地区选出口失败，沿用原出口", exc_info=True)
+
         candidates = _configured_live_check_proxies(proxy_cfg)
         effective_explicit_proxy = proxy if proxy is not None else (saved_proxy or None)
         route = resolve_plan_check_route(explicit_proxy=effective_explicit_proxy)
         if saved_proxy and proxy is None:
-            route["proxy_mode"] = "saved_registration_proxy"
+            route["proxy_mode"] = ("region_pool_exit" if region_note
+                                   else "saved_registration_proxy")
+        if region_note:
+            _safe_append_log(email, "[查活] 注册用的是临时出口，改用代理池：%s" % region_note)
         # 查活规则独立于套餐查询的 direct/auto 选择：只要任一代理池有数据，
         # 就禁止直连，并从池中随机选择一个出口。
         if candidates and not str(route.get("proxy") or "").strip():

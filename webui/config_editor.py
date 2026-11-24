@@ -360,6 +360,30 @@ EDITABLE_FIELDS = [
         "label": "2FA队列容量", "help": "允许排队和执行中的2FA任务总数，默认200；保存后立即生效",
     },
     {
+        "key": "PASSWORD_BACKFILL_PROXY_MODE", "file": "password.py", "type": "str", "group": "功能开关",
+        "label": "补密码代理模式", "help": "给无密码账号补设 ChatGPT 登录密码时：saved=优先用账号保存的代理；pool=每次从代理池随机取",
+        "choices": [
+            {"value": "saved", "label": "使用账号保存的代理"},
+            {"value": "pool", "label": "每次从代理池随机获取"},
+        ],
+    },
+    {
+        "key": "PASSWORD_BACKFILL_EMAIL_TIMEOUT", "file": "password.py", "type": "int", "group": "功能开关",
+        "label": "补密码等码超时(秒)", "help": "等待重置验证码邮件的最长秒数，默认120",
+    },
+    {
+        "key": "PASSWORD_BACKFILL_VERIFY_LOGIN", "file": "password.py", "type": "bool", "group": "功能开关",
+        "label": "补密码后验证登录", "help": "设置密码成功后立即用密码+TOTP登录验证一次，顺带刷新 accessToken",
+    },
+    {
+        "key": "PASSWORD_BACKFILL_WORKERS", "file": "password.py", "type": "int", "group": "功能开关",
+        "label": "补密码并发数", "help": "同时执行的补密码任务数，默认2，范围1-8；修改后需重启服务",
+    },
+    {
+        "key": "PASSWORD_BACKFILL_QUEUE_LIMIT", "file": "password.py", "type": "int", "group": "功能开关",
+        "label": "补密码队列容量", "help": "允许排队和执行中的补密码任务总数，默认100；保存后立即生效",
+    },
+    {
         "key": "AUTO_REGISTER_ENABLED", "file": "auto_register.py", "type": "bool", "group": "功能开关",
         "label": "启用自动注册", "help": "邮箱池还有号时按固定间隔自动发起注册，每次只跑一个；池子空了自动停。也可在任务页直接开关",
     },
@@ -385,11 +409,19 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "VCC_AUTO_SUBMIT", "file": "vcc.py", "type": "bool", "group": "自动支付",
-        "label": "自动点击提交(真实扣款)", "help": "开启=金额校验通过后真实提交并扣款，不可逆；关闭=填好后停在提交按钮前并截图，便于人工核对。两道金额闸门任一不通过都不会提交",
+        "label": "自动点击提交(真实扣款)", "help": "开启=金额校验通过后真实提交并扣款，不可逆；关闭=填好后停在提交按钮前并截图，便于人工核对。金额闸门任一不通过都不会提交",
     },
     {
         "key": "VCC_EXPECTED_AMOUNT", "file": "vcc.py", "type": "float", "group": "自动支付",
-        "label": "期望应付金额", "help": "页面总额必须等于该值才允许提交，默认1150。注意账单地址决定税费：账单国家为 EG 时会加收14% VAT 变成1311，闸门会拦住。0=不做等值校验",
+        "label": "期望应付金额", "help": "页面总额必须等于该值才允许提交。默认 0=不做等值校验（不同优惠码折扣不同，写死一个数会拦掉正常折扣单；兜底靠下面的单笔扣款上限）。填非 0 时注意账单地址决定税费：账单国家为 EG 会加收14% VAT",
+    },
+    {
+        "key": "VCC_FUNDING_USD", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "备款金额(USD)", "help": "按这个金额给卡充钱，只管充值不参与校验，默认18。单位就是卡的币种USD，不折算汇率。US区单席位实扣约17.17，备18够用。填0则改用下面的EGP备款额按汇率折算（EG区两席位那条路）",
+    },
+    {
+        "key": "VCC_FUNDING_AMOUNT", "file": "vcc.py", "type": "float", "group": "自动支付",
+        "label": "备款金额(EGP)", "help": "仅在上面的USD备款额填0时才生效。按汇率折成USD给卡充钱，只管充值不参与校验。要按未打折原价填：优惠码失效时页面是原价，卡里也得有钱，否则闸门放行了却因余额不足支付失败",
     },
     {
         "key": "VCC_EXPECTED_CURRENCY", "file": "vcc.py", "type": "str", "group": "自动支付",
@@ -397,7 +429,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "VCC_MAX_CHARGE", "file": "vcc.py", "type": "float", "group": "自动支付",
-        "label": "单笔扣款上限", "help": "硬上限，无论等值校验是否开启，总额超过该值一律不提交，默认1200。必须大于期望金额，否则闸门永远不通过",
+        "label": "单笔扣款上限", "help": "硬上限，无论等值校验是否开启，总额超过该值一律不提交，默认1200。等值校验关闭时这是唯一的金额闸门，防的是没套上优惠码导致的金额暴涨",
     },
     {
         "key": "VCC_AMOUNT_TOLERANCE", "file": "vcc.py", "type": "float", "group": "自动支付",
@@ -498,7 +530,7 @@ EDITABLE_FIELDS = [
     {
         "key": "VCC_RECHARGE_AMOUNT", "file": "vcc.py", "type": "float", "group": "自动支付",
         "label": "每次充值金额(USD)",
-        "help": "按该额度整额充值，一次不够则充整数倍，默认21美元",
+        "help": "按该额度整额充值，一次不够则充整数倍，默认20美元。要略高于备款额，否则空卡时得充两笔",
     },
     {
         "key": "VCC_RECHARGE_TIMEOUT", "file": "vcc.py", "type": "float", "group": "自动支付",

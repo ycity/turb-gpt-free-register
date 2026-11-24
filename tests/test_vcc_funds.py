@@ -59,11 +59,15 @@ class FakeClient:
 
 def _cfg(**over):
     class Cfg:
-        VCC_EXPECTED_AMOUNT = 1150.0
+        # 闸门默认关，充值走备款额
+        VCC_EXPECTED_AMOUNT = 0.0
+        # EGP 折算那条路的参数；默认用它，想测 USD 直配就传 VCC_FUNDING_USD
+        VCC_FUNDING_USD = 0.0
+        VCC_FUNDING_AMOUNT = 1150.0
         VCC_USD_RATE = 56.0
         VCC_BALANCE_BUFFER = 1.0
         VCC_AUTO_RECHARGE = True
-        VCC_RECHARGE_AMOUNT = 21.0
+        VCC_RECHARGE_AMOUNT = 35.0
         VCC_RECHARGE_TIMEOUT = 5.0
     for k, v in over.items():
         setattr(Cfg, k, v)
@@ -75,9 +79,93 @@ class RequiredUsdTest(unittest.TestCase):
         # 1150 / 56 = 20.54，加 1.0 余量
         self.assertAlmostEqual(required_usd(_cfg()), 21.54, places=2)
 
+    def test_direct_usd_wins_over_egp_conversion(self):
+        """配了 USD 备款额就直接用它，不再按汇率折算。
+
+        US 区单席位账单本来就是美元，折算只会算出个不相干的数
+        （线上 1932/56+0.5=35，而实际只需 18）。
+        """
+        cfg = _cfg(VCC_FUNDING_USD=18.0, VCC_FUNDING_AMOUNT=1932.0)
+        self.assertEqual(required_usd(cfg), 18.0)
+
+    def test_direct_usd_ignores_rate_and_buffer(self):
+        """USD 直配不该再叠汇率或余量，否则配 18 实际要 18+buffer。"""
+        cfg = _cfg(VCC_FUNDING_USD=18.0, VCC_USD_RATE=3.0,
+                   VCC_BALANCE_BUFFER=9.0)
+        self.assertEqual(required_usd(cfg), 18.0)
+
+    def test_zero_direct_usd_falls_back_to_egp(self):
+        """USD 备款额置 0 要退回 EGP 折算，这是 EG 区那条路的开关。"""
+        cfg = _cfg(VCC_FUNDING_USD=0.0, VCC_FUNDING_AMOUNT=1150.0)
+        self.assertAlmostEqual(required_usd(cfg), 21.54, places=2)
+
+    def test_legacy_config_without_direct_usd(self):
+        """老配置没有 VCC_FUNDING_USD 字段时不能报错，按 EGP 折算走。"""
+        class Legacy:
+            VCC_EXPECTED_AMOUNT = 0.0
+            VCC_FUNDING_AMOUNT = 1150.0
+            VCC_USD_RATE = 56.0
+            VCC_BALANCE_BUFFER = 1.0
+        self.assertAlmostEqual(required_usd(Legacy()), 21.54, places=2)
+
     def test_bad_rate_falls_back(self):
         """汇率配成 0 不能导致除零或判定所有卡都够。"""
         self.assertGreater(required_usd(_cfg(VCC_USD_RATE=0)), 0)
+
+    def test_gate_amount_does_not_drive_funding(self):
+        """关掉等值校验（置 0）不能让充值金额也变 0，否则卡不充值、支付必失败。"""
+        cfg = _cfg(VCC_EXPECTED_AMOUNT=0.0, VCC_FUNDING_AMOUNT=1150.0)
+        self.assertAlmostEqual(required_usd(cfg), 21.54, places=2)
+
+    def test_falls_back_to_gate_for_legacy_config(self):
+        """老配置没有 VCC_FUNDING_AMOUNT 时回退到闸门值，不能算成 0。"""
+        class Legacy:
+            VCC_EXPECTED_AMOUNT = 1150.0
+            VCC_USD_RATE = 56.0
+            VCC_BALANCE_BUFFER = 1.0
+        self.assertAlmostEqual(required_usd(Legacy()), 21.54, places=2)
+
+
+class RechargeAmountConfigTest(unittest.TestCase):
+    def test_configured_amount(self):
+        from config import vcc
+        self.assertEqual(vcc.VCC_RECHARGE_AMOUNT, 20.0)
+
+    def test_fallback_matches_config(self):
+        """配置缺失时的兜底值必须和配置一致，否则实际充的钱和配置写的不一样。"""
+        from config import vcc
+        from core.vcc_funds import _DEFAULT_TOP_UP
+        self.assertEqual(_DEFAULT_TOP_UP, vcc.VCC_RECHARGE_AMOUNT)
+
+    def test_zero_config_uses_fallback_not_zero(self):
+        """充值额配成 0 不能导致充 0 块钱、死循环或永远不足。
+
+        不写死具体数字：兜底额按整数倍凑够需求，倍数随备款额变。
+        要盯的是"不是 0、够付、且是兜底额的整数倍"。
+        """
+        from core.vcc_funds import _DEFAULT_TOP_UP
+        client = FakeClient(card=0.0, account=300.0)
+        cfg = _cfg(VCC_RECHARGE_AMOUNT=0)
+        ensure_funds(client, "CARD", cfg)
+        amount = client.recharges[0][1]
+        self.assertGreater(amount, 0.0, "不能充 0 块钱")
+        self.assertGreaterEqual(amount, required_usd(cfg), "充完还是不够")
+        self.assertAlmostEqual(amount % _DEFAULT_TOP_UP, 0.0, places=2,
+                               msg="应按兜底额的整数倍充值")
+
+    def test_one_top_up_covers_a_normal_bill(self):
+        """一次充值要够付一张常规账单，否则每次都要充两笔。"""
+        cfg = _cfg()
+        self.assertGreaterEqual(cfg.VCC_RECHARGE_AMOUNT, required_usd(cfg))
+
+    def test_live_config_top_up_covers_live_need(self):
+        """线上配置自身也要自洽：一次充值够付一单。
+
+        这条盯的是真实配置而不是测试替身——备款额改了却忘了改充值额时，
+        空卡会按整数倍充两笔，白白多锁一倍的钱。
+        """
+        from config import vcc
+        self.assertGreaterEqual(vcc.VCC_RECHARGE_AMOUNT, required_usd(vcc))
 
 
 class RequestNoTest(unittest.TestCase):
@@ -110,12 +198,12 @@ class EnsureFundsTest(unittest.TestCase):
         r = ensure_funds(client, "CARD", _cfg())
         self.assertTrue(r.ok)
         self.assertEqual(len(client.recharges), 1)
-        self.assertEqual(client.recharges[0][1], 21.0)
+        self.assertEqual(client.recharges[0][1], 35.0)
 
     def test_recharge_covers_shortfall_when_default_too_small(self):
         """默认充值额不够时按整数倍充，不能充完还是不足。"""
         client = FakeClient(card=0.0, account=500.0)
-        cfg = _cfg(VCC_EXPECTED_AMOUNT=5600.0, VCC_RECHARGE_AMOUNT=21.0)
+        cfg = _cfg(VCC_FUNDING_AMOUNT=5600.0, VCC_RECHARGE_AMOUNT=21.0)
         ensure_funds(client, "CARD", cfg)
         need = required_usd(cfg)          # 5600/56 + 1 = 101.0
         amount = client.recharges[0][1]
@@ -124,10 +212,10 @@ class EnsureFundsTest(unittest.TestCase):
                                msg="应按配置额度的整数倍充值")
 
     def test_recharge_uses_configured_amount_not_odd_number(self):
-        """卡里有零头时也要充整额，不能算出 21.22 这种数字。"""
+        """卡里有零头时也要充整额，不能算出 34.22 这种数字。"""
         client = FakeClient(card=1.32, account=300.0)
         ensure_funds(client, "CARD", _cfg())
-        self.assertEqual(client.recharges[0][1], 21.0)
+        self.assertEqual(client.recharges[0][1], 35.0)
 
     def test_account_too_low_raises_before_anything(self):
         client = FakeClient(card=1.0, account=5.0)
@@ -163,10 +251,12 @@ class EnsureFundsTest(unittest.TestCase):
         两者处置完全不同：前者要去后台核对请求号，后者只能干等。
         """
         client = FakeClient(card=1.0, account=300.0)
-        req = _request_no("CARD", 21.0, attempt_key="1.00")
+        cfg = _cfg()
+        # 请求号必须按实际会充的金额算，否则构造不出"同一单"的场景
+        req = _request_no("CARD", cfg.VCC_RECHARGE_AMOUNT, attempt_key="1.00")
         client._idempotent_hits = {req}
         with self.assertRaises(InsufficientFunds) as ctx:
-            ensure_funds(client, "CARD", _cfg())
+            ensure_funds(client, "CARD", cfg)
         msg = str(ctx.exception)
         self.assertIn("充值未生效", msg)
         self.assertIn("重复单", msg)
@@ -205,13 +295,15 @@ class RequestNoIdempotencyTest(unittest.TestCase):
 
     def test_two_sequential_topups_use_distinct_request_nos(self):
         """端到端：连充两次（中间花掉）必须产生两个不同请求号且都真的到账。"""
+        cfg = _cfg()
+        top = cfg.VCC_RECHARGE_AMOUNT
         client = FakeClient(card=2.32, account=300.0)
-        ensure_funds(client, "CARD", _cfg())
-        self.assertAlmostEqual(client._card, 23.32, places=2)
+        ensure_funds(client, "CARD", cfg)
+        self.assertAlmostEqual(client._card, 2.32 + top, places=2)
 
-        client._card = 2.76  # 模拟支付花掉 20.56
-        ensure_funds(client, "CARD", _cfg())
-        self.assertAlmostEqual(client._card, 23.76, places=2)
+        client._card = 2.76  # 模拟支付花掉大部分
+        ensure_funds(client, "CARD", cfg)
+        self.assertAlmostEqual(client._card, 2.76 + top, places=2)
 
         self.assertEqual(len(client.seen_request_nos), 2)
         self.assertNotEqual(client.seen_request_nos[0], client.seen_request_nos[1])
@@ -232,7 +324,7 @@ class PreflightTest(unittest.TestCase):
         r = preflight(FakeClient(card=1.0, account=300.0), "C", _cfg())
         self.assertTrue(r["ok"])
         self.assertTrue(r["need_recharge"])
-        self.assertEqual(r["recharge"], 21.0)
+        self.assertEqual(r["recharge"], 35.0)
 
     def test_both_low_blocks(self):
         r = preflight(FakeClient(card=1.0, account=5.0), "C", _cfg())

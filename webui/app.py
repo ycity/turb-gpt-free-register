@@ -29,7 +29,7 @@ from webui import config_editor, proxy_pool
 
 logger = logging.getLogger(__name__)
 
-_POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "cloudflare_domain"))
+_POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "akmoz", "cloudflare_domain"))
 
 # 云浏览器注册把 `skyvern:jp` 这类环境标签存进 proxy_used，这种值不含凭据，可直接展示。
 _ENV_PROXY_TAG_RE = re.compile(r"[a-z][a-z0-9_]*:[a-z0-9_-]{1,32}", re.IGNORECASE)
@@ -126,13 +126,26 @@ def _registration_proxy_name(row: dict, proxy_names: dict[str, str]) -> str:
     只返回名称，不返回代理地址：proxy_used 可能是带账号密码的代理地址，
     也可能是 `1.2.3.4:1080:user:pass` 这类简写。代理已从代理池删除或未命名
     时返回空，只有 `skyvern:jp` 这类云浏览器环境标签才按原文展示。
+
+    优先级：
+    1. proxy_used 命中代理池里的命名条目 -> 显示该代理的真名。查活 / 2FA /
+       席位探测会把 1024 临时出口固化成代理池出口（adopt_pool_exit），此时
+       proxy_used 已是池内带名代理，应当显示它的备注名（如 Zoro-SG），而不是
+       泛化的「池·SG」。
+    2. 否则用注册时记录的出口地区 proxy_region（形如 1024·US）。1024proxy 的
+       出口是现取的临时 IP、不在代理池里、按地址查不到名称，只能靠它。
+    3. 都没有时，仅 `skyvern:jp` 这类云浏览器环境标签按原文展示。
     """
     raw = str(row.get("proxy_used") or "").strip()
+    if raw:
+        name = proxy_names.get(_proxy_identity(raw))
+        if name:
+            return name
+    region = str(row.get("proxy_region") or "").strip()
+    if region:
+        return region
     if not raw:
         return ""
-    name = proxy_names.get(_proxy_identity(raw))
-    if name:
-        return name
     if _is_proxy_address(raw) or not _ENV_PROXY_TAG_RE.fullmatch(raw):
         return ""
     return raw
@@ -185,6 +198,8 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "codex_status", "codex_agent_status",
         "totp_setup_status",
+        "password_backfill_status",
+        "card_rebind_status",
     ):
         if key in row:
             out[key] = row.get(key)
@@ -203,6 +218,11 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         "plan_limit_checked_at",
         # 订阅编号与支付时间
         "subscription_no", "subscription_kind", "paid_at", "paid_at_estimated",
+        # 这一单用的是哪张卡（VCC-后四位 或 卡池备注名），对账和排查用
+        "pay_card_label",
+        # 单席位 Team 探测结果：能用 1 席就省一半订阅费
+        "single_seat_supported", "single_seat_minimum",
+        "single_seat_checked_at", "single_seat_error",
         # 套餐展示补充：付费到期/折扣/失败原因。
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
@@ -220,6 +240,10 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
+        "password_backfill_error", "password_backfill_message",
+        "password_backfill_started_at", "password_backfill_completed_at",
+        "card_rebind_error", "card_rebind_message",
+        "card_rebind_started_at", "card_rebind_completed_at",
         "email_change_status", "email_change_error", "email_change_new_email",
         "email_change_started_at", "email_change_completed_at",
     )
@@ -233,6 +257,120 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         if expire:
             out["expires_at"] = expire
     return out
+
+
+# 前端"支付出口"下拉里，让后端按结算国家现取 1024proxy 出口的特殊值。
+# 形如 __1024__:US。代理池里未必常备每个国家的节点，而结算货币和出口
+# 国家必须同区，所以这条路不能只依赖池子。
+_PAY_1024_PREFIX = "__1024__:"
+
+
+def _first_proxy_in_country(candidates, want_cc: str) -> str:
+    """挑第一个真正落在 want_cc 的出口。
+
+    1024proxy 按 region 取，但偶尔会给到别的国家；出口国家和结算货币
+    不一致会被 Stripe 直接拒，所以必须逐个验一下真实出口再用。
+    """
+    import uuid as _uuid
+
+    from config.proxy import normalize_proxy_url
+    from core.session import BrowserSession
+
+    want = str(want_cc or "").strip().upper()
+    for raw in candidates or []:
+        url = normalize_proxy_url(str(raw or "").strip())
+        if not url:
+            continue
+        env = None
+        try:
+            env = BrowserSession(proxy=url, detect_exit_geo=True,
+                                 fingerprint_seed=f"pay:{_uuid.uuid4()}")
+            geo = env.exit_geo or {}
+            got = str(geo.get("country") or "").strip().upper()
+            if got and (not want or got == want):
+                logger.info("[pay] 1024proxy 出口 %s 实测在 %s",
+                            geo.get("ip"), got)
+                return url
+            logger.warning("[pay] 1024proxy 出口 %s 在 %s，要的是 %s，换一个",
+                           geo.get("ip") or raw, got or "?", want)
+        except Exception as exc:  # noqa: BLE001 - 换下一个候选
+            logger.debug("[pay] 验 1024proxy 出口失败 %s: %s", raw, exc)
+        finally:
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    return ""
+
+
+def _exit_country_of(proxy: str, *, timeout: float = 20.0) -> str:
+    """实测一个出口的真实国家码；测不出来返回空串。
+
+    只看 geo 探测结果，不猜、不按名称推断——出口国家决定 Stripe 收不收这单。
+    """
+    import uuid as _uuid
+
+    from config.proxy import normalize_proxy_url
+    from core.session import BrowserSession
+
+    url = normalize_proxy_url(str(proxy or "").strip())
+    if not url:
+        return ""
+    env = None
+    try:
+        env = BrowserSession(proxy=url, detect_exit_geo=True,
+                             fingerprint_seed=f"exitcheck:{_uuid.uuid4()}")
+        geo = env.exit_geo or {}
+        return str(geo.get("country") or "").strip().upper()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[pay] 探测出口国家失败 %s: %s", proxy, exc)
+        return ""
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _settlement_country() -> str:
+    """本单结算国家（决定币种）。自动订阅用它取同区出口。"""
+    try:
+        from config import auto_subscribe as _asc
+        cc = str(getattr(_asc, "AUTO_SUBSCRIBE_COUNTRY", "") or "").strip().upper()
+        if cc:
+            return cc
+    except Exception:  # noqa: BLE001
+        pass
+    return "EG"
+
+
+def _exit_country_mismatch(proxy: str, want_cc: str) -> str:
+    """出口国家与结算国家不一致时返回错误文案，一致/测不出时返回空串。
+
+    为什么要有这道闸：2026-11-18 #110 手动起支付时没指定出口，用了账号
+    记录的 proxy_used，实测出口在加拿大；而结账页按 EGP（埃及）结算，卡
+    账单地址在美国。三国错配 → Stripe 直接 "Payment was not approved"，
+    **不扣款也不报明确错误**，还被误记成已付款。宁可提前拦住，也不要拿
+    真钱去撞风控。
+    """
+    want = str(want_cc or "").strip().upper()
+    if not want:
+        return ""
+    got = _exit_country_of(proxy)
+    if not got:
+        # 测不出来不拦：探测失败（出口抖动）不该把正常单挡死，
+        # 真正的拒付仍由提交后核验兜住。
+        logger.warning("[pay] 出口国家探测失败，跳过一致性校验：%s",
+                       str(proxy).split("@")[-1])
+        return ""
+    got = got.strip().upper()
+    if got != want:
+        return (f"当前出口在 {got}，而本单按 {want} 结算。出口国家与结算区不一致"
+                f"会被 Stripe 拒付（Payment was not approved），已阻止提交。"
+                f"请换一个 {want} 出口，或改用自动订阅（它会自动取 {want} 出口）")
+    return ""
 
 
 def _account_secret_value(row: dict, field: str) -> str:
@@ -372,8 +510,12 @@ def _build_pay_cfg(base, data: dict):
     class RunCfg:
         pass
 
+    # 复制 VCC_ 开关；CAPTCHA_ 也要带上——打码开关和 key 放在同一份支付配置
+    # 里（见 config/vcc.py），只认 VCC_ 前缀会把它们漏掉，导致打码永远被当成
+    # 未开启（实测 2026-11-18：#110 提交后直接落回人工验证码，日志里连一条
+    # 打码记录都没有）。
     for name in dir(base):
-        if name.startswith("VCC_"):
+        if name.startswith("VCC_") or name.startswith("CAPTCHA_"):
             setattr(RunCfg, name, getattr(base, name))
 
     card_id = str(data.get("card_id") or "").strip()
@@ -501,6 +643,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             recovered_email_changes = db.recover_interrupted_email_changes()
             if recovered_email_changes:
                 logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
+            recovered_password_backfills = db.recover_interrupted_password_backfills()
+            if recovered_password_backfills:
+                logger.warning("已恢复 %s 个因 WebUI 重启中断的补密码状态",
+                               len(recovered_password_backfills))
+            recovered_card_rebinds = db.recover_interrupted_card_rebinds()
+            if recovered_card_rebinds:
+                logger.warning("已恢复 %s 个因 WebUI 重启中断的换绑卡状态",
+                               len(recovered_card_rebinds))
             try:
                 from core import cloak_profile
                 cloak_profile.cleanup_idle_profiles()
@@ -512,6 +662,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         auto_register_scheduler.start()
     except Exception:
         logger.exception("启动自动注册调度失败")
+
+    try:
+        from core import auto_subscribe_scheduler
+        auto_subscribe_scheduler.start()
+    except Exception:
+        logger.exception("启动自动订阅调度失败")
 
     # ----------------------------------------------------------
     # 页面
@@ -583,6 +739,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         q = str(request.args.get("q", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
+        # 席位筛选：not_multi 滤掉确定要 2 席的号（没探过的保留）
+        seat_filter = str(request.args.get("seat", default="") or "").strip().lower()
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
@@ -591,12 +749,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, seat_filter=seat_filter)
             proxy_names = _proxy_name_map()
             result["items"] = [_compact_account_for_list(r, proxy_names) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter))
+        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, seat_filter=seat_filter))
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -614,16 +772,18 @@ def create_app(auth_code: str | None = None) -> Flask:
         q = str(request.args.get("q", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
+        # 和 /api/accounts 保持同一套筛选，否则列表和状态快照会对不上行
+        seat_filter = str(request.args.get("seat", default="") or "").strip().lower()
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
         if page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, seat_filter=seat_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, seat_filter=seat_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -809,12 +969,384 @@ def create_app(auth_code: str | None = None) -> Flask:
             **queued_payload,
         }), 202
 
+    @app.post("/api/accounts/<int:acc_id>/password-backfill")
+    def api_account_password_backfill(acc_id: int):
+        """给无密码账号补设 ChatGPT 登录密码（忘记密码邮件流）。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        email = str(acc.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "该账号没有邮箱"}), 400
+        source = str(acc.get("email_source") or "").strip().lower()
+        if source and source not in {"outlook"}:
+            return jsonify({"ok": False, "error": "补密码暂只支持 outlook/hotmail 邮箱"}), 400
+        from core.db import _extract_registration_password
+        if _extract_registration_password(acc):
+            return jsonify({"ok": False, "error": "该账号已有登录密码"}), 400
+
+        try:
+            from core import password_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"补密码服务加载失败：{type(exc).__name__}: {exc}"}), 503
+
+        body = request.get_json(silent=True) or {}
+        override_proxy = password_service._normalize_proxy(body.get("proxy")) if body.get("proxy") else None
+        queued = password_service.enqueue_account_password_backfill(
+            account_id=acc_id,
+            email=email,
+            trigger="manual",
+            proxy=override_proxy or str(acc.get("proxy_used") or "") or None,
+            email_source=source or None,
+        )
+        queued_payload = {k: v for k, v in queued.items() if k != "future"}
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued_payload}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued_payload}), 503
+        return jsonify({
+            "ok": True,
+            "started": True,
+            "queue": password_service.queue_settings(),
+            **queued_payload,
+        }), 202
+
+    @app.post("/api/accounts/password-backfill-bulk")
+    def api_accounts_password_backfill_bulk():
+        """批量补密码。Body {account_ids:[...]}。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多 500 个账号"}), 400
+        try:
+            from core import password_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"补密码服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        from core.db import _extract_registration_password
+
+        started, busy, failed = [], [], []
+        seen = set()
+        for raw_id in ids:
+            try:
+                acc_id = int(raw_id)
+            except (TypeError, ValueError):
+                failed.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                failed.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(acc.get("email") or "").strip()
+            source = str(acc.get("email_source") or "").strip().lower()
+            if not email:
+                failed.append({"id": acc_id, "reason": "邮箱为空"})
+                continue
+            if source and source not in {"outlook"}:
+                failed.append({"id": acc_id, "reason": "暂只支持 outlook/hotmail"})
+                continue
+            if _extract_registration_password(acc):
+                failed.append({"id": acc_id, "reason": "已有密码"})
+                continue
+            queued = password_service.enqueue_account_password_backfill(
+                account_id=acc_id,
+                email=email,
+                trigger="manual_bulk",
+                proxy=str(acc.get("proxy_used") or "") or None,
+                email_source=source or None,
+            )
+            public = {k: v for k, v in queued.items() if k != "future"}
+            if queued.get("accepted"):
+                started.append({"id": acc_id, "email": email, **public})
+            elif queued.get("busy"):
+                busy.append({"id": acc_id, "email": email, **public})
+            else:
+                failed.append({"id": acc_id, "email": email, "reason": queued.get("error") or "入队失败"})
+        return jsonify({
+            "ok": True,
+            "started": started,
+            "busy": busy,
+            "failed": failed,
+            "started_count": len(started),
+            "busy_count": len(busy),
+            "failed_count": len(failed),
+            "queue": password_service.queue_settings(),
+        }), 202
+
+    @app.get("/api/accounts/password-backfill-log")
+    def api_account_password_backfill_log():
+        email = str(request.args.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "email 必填"}), 400
+        acc = db.get_account_by_email(email)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            from core import password_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"补密码服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        p = password_service.log_path(email)
+        running = str(acc.get("password_backfill_status") or "") in {"queued", "running"} \
+            or password_service.is_running(int(acc.get("id") or 0))
+        data = _read_log_tail(p, max_bytes=80_000, default_running=running)
+        data["running"] = bool(data.get("running") or running)
+        return jsonify(data)
+
+    @app.get("/api/accounts/card-rebind-cards")
+    def api_card_rebind_cards():
+        """换绑目标卡列表：黑名单 VCC 卡（默认）+ 自有卡池。"""
+        try:
+            from core import card_rebind_service as svc
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换绑服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        items = []
+        bl = svc._blacklist_last4s()
+        default_id = ""
+        try:
+            from core.vcc_client import build_client_from_config
+            client = build_client_from_config()
+            for c in client.list_cards() or []:
+                if not client._is_active(c):
+                    continue
+                last4 = str(c.get("last4") or "")
+                if last4 not in bl:
+                    continue
+                cid = str(c.get("cardId") or "")
+                items.append({"card_id": cid, "label": f"VCC-{last4}（黑名单牺牲卡）",
+                              "source": "vcc_blacklist"})
+                if not default_id:
+                    default_id = cid
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取黑名单 VCC 卡失败：%s", str(exc)[:120])
+        try:
+            from core.custom_card_store import list_cards as pool_cards
+            for c in pool_cards(only_enabled=True) or []:
+                items.append({"card_id": c.get("card_id"),
+                              "label": f"{c.get('label') or c.get('mask')}（自有卡）",
+                              "source": "custom"})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取自有卡池失败：%s", str(exc)[:120])
+        return jsonify({"ok": True, "cards": items, "default_card_id": default_id,
+                        "blacklist": sorted(bl)})
+
+    @app.post("/api/accounts/<int:acc_id>/card-rebind")
+    def api_account_card_rebind(acc_id: int):
+        """给已订阅账号换绑付款卡（加黑名单卡设默认+删旧卡）。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        email = str(acc.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "该账号没有邮箱"}), 400
+        if not str(acc.get("access_token") or "").strip():
+            return jsonify({"ok": False, "error": "该账号没有 access_token，无法定位工作区"}), 400
+        from core.db import _extract_registration_password
+        if not _extract_registration_password(acc):
+            return jsonify({"ok": False, "error": "该账号没有登录密码，请先执行「补密码」"}), 400
+
+        body = request.get_json(silent=True) or {}
+        card_id = str(body.get("card_id") or "").strip()
+        try:
+            from core import card_rebind_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换绑服务加载失败：{type(exc).__name__}: {exc}"}), 503
+
+        queued = card_rebind_service.enqueue_account_card_rebind(
+            account_id=acc_id, email=email, card_id=card_id, trigger="manual",
+            proxy=card_rebind_service._normalize_proxy(body.get("proxy"))
+            or str(acc.get("proxy_used") or "") or None,
+        )
+        queued_payload = {k: v for k, v in queued.items() if k != "future"}
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued_payload}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued_payload}), 503
+        return jsonify({
+            "ok": True, "started": True,
+            "queue": card_rebind_service.queue_settings(),
+            **queued_payload,
+        }), 202
+
+    @app.post("/api/accounts/card-rebind-bulk")
+    def api_accounts_card_rebind_bulk():
+        """批量换绑。Body {account_ids:[...], card_id?}。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        card_id = str(data.get("card_id") or "").strip()
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多 500 个账号"}), 400
+        try:
+            from core import card_rebind_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换绑服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        from core.db import _extract_registration_password
+
+        started, busy, failed = [], [], []
+        seen = set()
+        for raw_id in ids:
+            try:
+                acc_id = int(raw_id)
+            except (TypeError, ValueError):
+                failed.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                failed.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = str(acc.get("email") or "").strip()
+            if not email or not str(acc.get("access_token") or "").strip():
+                failed.append({"id": acc_id, "reason": "缺邮箱或 access_token"})
+                continue
+            if not _extract_registration_password(acc):
+                failed.append({"id": acc_id, "reason": "没有密码，先补密码"})
+                continue
+            queued = card_rebind_service.enqueue_account_card_rebind(
+                account_id=acc_id, email=email, card_id=card_id, trigger="manual_bulk",
+                proxy=str(acc.get("proxy_used") or "") or None,
+            )
+            public = {k: v for k, v in queued.items() if k != "future"}
+            if queued.get("accepted"):
+                started.append({"id": acc_id, "email": email, **public})
+            elif queued.get("busy"):
+                busy.append({"id": acc_id, "email": email, **public})
+            else:
+                failed.append({"id": acc_id, "email": email, "reason": queued.get("error") or "入队失败"})
+        return jsonify({
+            "ok": True, "started": started, "busy": busy, "failed": failed,
+            "started_count": len(started), "busy_count": len(busy), "failed_count": len(failed),
+            "queue": card_rebind_service.queue_settings(),
+        }), 202
+
+    @app.get("/api/accounts/card-rebind-log")
+    def api_account_card_rebind_log():
+        email = str(request.args.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "email 必填"}), 400
+        acc = db.get_account_by_email(email)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            from core import card_rebind_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换绑服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        p = card_rebind_service.log_path(email)
+        running = str(acc.get("card_rebind_status") or "") in {"queued", "running"} \
+            or card_rebind_service.is_running(int(acc.get("id") or 0))
+        data = _read_log_tail(p, max_bytes=80_000, default_running=running)
+        data["running"] = bool(data.get("running") or running)
+        return jsonify(data)
+
+    @app.post("/api/accounts/<int:acc_id>/totp-rotate")
+    def api_account_totp_rotate(acc_id: int):
+        """更换已开启的 2FA/TOTP 密钥（登录后立即 enroll 新密钥并激活）。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if not str(acc.get("totp_secret") or "").strip():
+            return jsonify({"ok": False, "error": "该账号未开启 2FA，没有可更换的密钥"}), 400
+
+        try:
+            from core import totp_rotate_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换密钥服务加载失败：{type(exc).__name__}: {exc}"}), 503
+        if totp_rotate_service.is_running(acc_id):
+            return jsonify({"ok": False, "error": "该账号正在更换密钥，请勿重复触发"}), 409
+
+        # 跑在后台线程：登录+enroll 全程可能要 1-5 分钟（含出口轮换），同步等待会卡住前端
+        import threading
+
+        def _run():
+            try:
+                totp_rotate_service.rotate_totp_secret(acc_id, trigger="manual")
+            except Exception:  # noqa: BLE001 - 结果已由服务内部写日志/返回
+                import logging
+                logging.getLogger(__name__).exception("[换密钥] 后台线程异常: #%s", acc_id)
+
+        threading.Thread(target=_run, name=f"totp-rotate-{acc_id}", daemon=True).start()
+        return jsonify({"ok": True, "started": True, "id": acc_id,
+                        "email": acc.get("email"),
+                        "message": "已开始更换密钥：完成后 2FA 列的密钥会更新，可在「2FA日志」查看进度"}), 202
+
+    @app.post("/api/accounts/totp-rotate-bulk")
+    def api_accounts_totp_rotate_bulk():
+        """批量更换 2FA 密钥。Body {account_ids:[...]}。逐个串行执行。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 100:
+            return jsonify({"ok": False, "error": "单次最多提交 100 个账号"}), 400
+
+        try:
+            from core import totp_rotate_service
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"换密钥服务加载失败：{type(exc).__name__}: {exc}"}), 503
+
+        targets, skipped = [], []
+        seen: set[int] = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            if not str(acc.get("totp_secret") or "").strip():
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "未开启 2FA"})
+                continue
+            if totp_rotate_service.is_running(acc_id):
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "正在更换中"})
+                continue
+            targets.append(acc_id)
+
+        if not targets:
+            return jsonify({"ok": False, "error": "没有可更换的账号", "skipped": skipped}), 400
+
+        import threading
+
+        def _run():
+            import logging
+            log = logging.getLogger(__name__)
+            log.info("[换密钥] 批量开始：%s", targets)
+            # 串行：换密钥要登录 OpenAI，并发多路同时登会互相把出口打限流
+            for acc_id in targets:
+                try:
+                    res = totp_rotate_service.rotate_totp_secret(acc_id, trigger="manual_bulk")
+                    log.info("[换密钥] 批量项 #%s -> %s", acc_id,
+                             "成功" if res.get("ok") else f"失败：{res.get('error')}")
+                except Exception:  # noqa: BLE001
+                    log.exception("[换密钥] 批量项 #%s 异常", acc_id)
+                # 账号间隔：连续登录容易触发风控
+                import time as _t
+                _t.sleep(30)
+            log.info("[换密钥] 批量结束：%s", targets)
+
+        threading.Thread(target=_run, name="totp-rotate-bulk", daemon=True).start()
+        return jsonify({"ok": True, "started": True,
+                        "started_count": len(targets), "targets": targets,
+                        "skipped": skipped}), 202
+
     @app.post("/api/accounts/<int:acc_id>/change-email")
     def api_account_change_email(acc_id: int):
         """给单个账号排队换绑邮箱。Body {source}."""
         data = request.get_json(silent=True) or {}
         source = str(data.get("source") or "").strip().lower()
-        allowed = {"outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode"}
+        allowed = {"outlook", "generic_api", "imap", "akmoz", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode"}
         if source not in allowed:
             return jsonify({"ok": False, "error": "请选择有效的邮箱来源"}), 400
         acc = db.get_account(acc_id)
@@ -833,7 +1365,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
         source = str(data.get("source") or "").strip().lower()
-        allowed = {"outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode"}
+        allowed = {"outlook", "generic_api", "imap", "akmoz", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail", "xigua", "mailcode"}
         if source not in allowed:
             return jsonify({"ok": False, "error": "请选择有效的邮箱来源"}), 400
         if not isinstance(ids, list) or not ids:
@@ -1280,14 +1812,22 @@ def create_app(auth_code: str | None = None) -> Flask:
         # 弹窗可以按次指定卡和账单地址，不改全局配置
         run_cfg = _build_pay_cfg(vcc_cfg, data)
 
-        # 余额不够就在生成长链之前停下，免得白白消耗一个优惠码
+        # 余额不够就在生成长链之前停下，免得白白消耗一个优惠码。
+        # 自定义卡不走这套：它不在 VCC 名下，查余额会报"卡片不存在"，
+        # 更没法从 VCC 账户划钱进去，钱够不够只有卡主自己知道。
         funds_info = None
-        if bool(data.get("check_funds", True)):
+        from core.custom_card_store import is_custom_id
+        _card_id_req = (run_cfg.VCC_CARD_ID or "").strip()
+        if is_custom_id(_card_id_req):
+            funds_info = {"ok": True, "skipped": True, "source": "custom",
+                          "message": "自定义卡不由 VCC 托管，跳过余额检查与自动充值"}
+            logger.info("[pay] 使用自定义卡 %s，跳过余额检查", _card_id_req)
+        elif bool(data.get("check_funds", True)):
             try:
                 from core.vcc_client import build_client_from_config
                 from core.vcc_funds import InsufficientFunds, ensure_funds
 
-                card_id = (run_cfg.VCC_CARD_ID or "").strip()
+                card_id = _card_id_req
                 client = build_client_from_config()
                 if not card_id:
                     picked = client.pick_card(min_balance=0.0)
@@ -1324,6 +1864,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                     account_id=int(acc["id"]),
                     account_email=acc.get("email"),
                     account_proxy=str(acc.get("proxy_used") or ""),
+                    # 下面紧接着会起 pay-session 支付（会先登录注入 cookie）。
+                    # 提链内置的裸 pay_checkout 没有登录态，打开只会落到
+                    # /auth/login，白烧一张链，所以这里不付。
+                    auto_pay=False,
                 )
                 if not res.get("ok"):
                     return jsonify({"ok": False,
@@ -1353,7 +1897,33 @@ def create_app(auth_code: str | None = None) -> Flask:
             # 出口对能否过 Stripe 风控有实际影响：同为美国，Aaitr-ATT 付不通
             # 而 Aaitr-Frontier 能通，所以要能逐单手动指定，停用的也允许。
             by_name = str(data.get("pay_proxy_name") or "").strip()
-            if not override and by_name:
+            if not override and by_name.startswith(_PAY_1024_PREFIX):
+                # 结算货币和出口国家必须同区：EGP 单从美国出口打开会被拒，
+                # 反之亦然。代理池里未必常备对应国家的节点，所以直接按
+                # 本单的结算国家现取一个 1024proxy 出口。
+                want_cc = (by_name[len(_PAY_1024_PREFIX):].strip().upper()
+                           or str(data.get("country") or "").strip().upper()
+                           or "EG")
+                try:
+                    from core.team_checkout_service import fetch_1024proxy_ips
+                    mins = int(getattr(vcc_cfg, "VCC_1024PROXY_MINUTES", 0) or 0)
+                    ips = fetch_1024proxy_ips(region=want_cc, num=4,
+                                              minutes=mins)
+                except Exception as exc:  # noqa: BLE001
+                    return jsonify({
+                        "ok": False,
+                        "error": f"按 {want_cc} 取 1024proxy 出口失败：{exc}",
+                    }), 400
+                override = _first_proxy_in_country(ips, want_cc)
+                if not override:
+                    return jsonify({
+                        "ok": False,
+                        "error": f"1024proxy 没给出可用的 {want_cc} 出口，"
+                                 f"请改选代理池里的节点或稍后重试",
+                    }), 400
+                logger.info("[pay] 账号 %s 按结算国家 %s 取 1024proxy 出口 %s",
+                            acc.get("email"), want_cc, override)
+            elif not override and by_name:
                 override = proxy_pool.resolve_by_name(by_name)
                 if not override:
                     return jsonify({
@@ -1364,6 +1934,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 logger.warning("[pay] 账号 %s 改用备用出口支付：%s",
                                acc.get("email"), override.split("@")[-1])
                 proxy = override
+
+        # 出口国家必须和结算国家一致，否则 Stripe 会以
+        # "Payment was not approved" 拒付，且不扣款、不报明确错误。
+        # 2026-11-18 #110 就栽在这：手动起支付没指定出口，用了账号记录里
+        # 一个在加拿大的出口，而结算货币是 EGP（埃及）。
+        mismatch = _exit_country_mismatch(proxy, _settlement_country())
+        if mismatch:
+            return jsonify({"ok": False, "error": mismatch}), 400
 
         try:
             # 复用已有长链时走不到生成分支，meta 为空；那种情况下用请求里手填的
@@ -1533,11 +2111,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 return jsonify({"ok": False,
                                 "error": f"{type(exc).__name__}: {exc}"}), 500
             no = sec["card_number"]
+            # VCC 分支返回两位年，这里也统一成两位：同一个接口两种格式的话，
+            # 前端照着填会被 Stripe 的 MM / YY 框截断。
+            exp_year = "".join(ch for ch in str(sec["exp_year"]) if ch.isdigit())[-2:]
             return jsonify({
                 "ok": True,
                 "number": no,
                 "exp_month": sec["exp_month"],
-                "exp_year": sec["exp_year"],
+                "exp_year": exp_year,
                 "cvc": sec["cvv"],
                 "holder_name": sec["holder_name"],
                 "mask": f"{no[:6]}****{no[-4:]}" if len(no) > 10 else no,
@@ -1694,17 +2275,53 @@ def create_app(auth_code: str | None = None) -> Flask:
             except Exception:
                 logger.debug("记录手动支付卡片失败", exc_info=True)
 
+        # 记支付时间。和自动支付走同一个函数：编号不在这里分配，
+        # 因为此刻还不知道买到的是 5h 还是周限额，要等套餐查询回来。
+        try:
+            # 已有值时不覆盖，返回 False；这时说"已记录"是假话
+            if db.set_account_paid_at(account_id):
+                done.append("已记录支付时间")
+            else:
+                done.append("支付时间此前已记录")
+        except Exception:
+            logger.warning("记录手动支付时间失败", exc_info=True)
+            done.append("记录支付时间失败")
+
+        # 长链付过就作废，留着下次会提示"可复用"，拿它再付必然失败
+        if str(acc.get("team_checkout_url") or "").strip():
+            try:
+                db.update_account_team_checkout(account_id, clear=True)
+                done.append("已清掉用过的长链")
+            except Exception:
+                logger.warning("清长链失败", exc_info=True)
+                done.append("清长链失败")
+
         token = str(acc.get("access_token") or "").strip()
         if token:
+            # 和自动支付一样延迟再查：提交成功只代表扣款发出，OpenAI 侧
+            # 写套餐有延迟，立刻查多半还是旧的 free，编号也就分不出来。
             try:
-                queued = plan_check_service.enqueue_account_plan_check(
-                    account_id=account_id, email=email, access_token=token,
-                    trigger="manual_pay")
-                done.append("套餐查询已入队" if queued.get("accepted")
-                            else "套餐查询未接受，请稍后手动查")
-            except Exception as exc:
-                logger.warning("手动支付后入队套餐查询失败：%s", exc)
-                done.append("套餐查询入队失败")
+                from config import vcc as _vcc
+                delay = max(0.0, float(
+                    getattr(_vcc, "VCC_AUTO_PLAN_CHECK_DELAY", 30.0) or 0.0))
+            except Exception:
+                delay = 30.0
+
+            def _delayed_plan_check(aid=account_id, mail=email, tok=token,
+                                    wait=delay):
+                if wait:
+                    time.sleep(wait)
+                try:
+                    plan_check_service.enqueue_account_plan_check(
+                        account_id=aid, email=mail, access_token=tok,
+                        trigger="manual_pay")
+                except Exception:
+                    logger.warning("手动支付后入队套餐查询失败", exc_info=True)
+
+            threading.Thread(target=_delayed_plan_check,
+                             name=f"manual-pay-plan-{account_id}",
+                             daemon=True).start()
+            done.append(f"{int(delay)} 秒后自动查套餐" if delay else "套餐查询已入队")
         else:
             done.append("该账号无 access_token，无法自动查套餐")
 
@@ -1714,6 +2331,16 @@ def create_app(auth_code: str | None = None) -> Flask:
     def api_pay_funds_check():
         """只查不充：选完卡就告诉人够不够付、要不要充。"""
         card_id = (request.args.get("card_id") or "").strip()
+
+        # 自定义卡不在 VCC 名下，查余额会报"卡片不存在"。它既没法查也没法
+        # 自动充值，余额由卡主自己保证，这里直接放行而不是报错挡住支付。
+        from core.custom_card_store import is_custom_id
+        if is_custom_id(card_id):
+            return jsonify({"ok": True, "need_recharge": False,
+                            "skipped": True, "source": "custom",
+                            "message": "自定义卡不由 VCC 托管，"
+                                       "余额请自行确认"})
+
         try:
             from config import vcc as cfg
             from core.vcc_client import build_client_from_config
@@ -1758,6 +2385,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         选卡优先用上次真正支付过的那张，没有记录再回落到配置的 VCC_CARD_ID。
         """
         from config import vcc as cfg
+        from core.vcc_funds import required_usd
         last_card = ""
         try:
             last_card = str(db.get_meta("pay_last_card_id") or "").strip()
@@ -1780,7 +2408,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             "holder_id": cfg.VCC_HOLDER_ID or 0,
             "expected_amount": cfg.VCC_EXPECTED_AMOUNT,
             "expected_currency": cfg.VCC_EXPECTED_CURRENCY,
-            # 前端据此估算这次大概要多少 USD，好挑一张余额够的卡
+            # 这次大概要多少 USD，直接由后端算好，前端照用即可。
+            # 以前是前端自己拿 funding_amount/usd_rate 折算的，那套算法只认
+            # EGP 那条路；改成 US 区直接配 USD 后，前端会算出个过时的数，
+            # 于是选卡和余额预检两处对不上。口径只留一个。
+            "needed_usd": required_usd(cfg),
+            # 下面两个仅为兼容老前端保留，新代码一律用 needed_usd。
+            "funding_amount": (getattr(cfg, "VCC_FUNDING_AMOUNT", 0) or 0
+                               or cfg.VCC_EXPECTED_AMOUNT or 0),
             "usd_rate": getattr(cfg, "VCC_USD_RATE", 0) or 0,
         })
 
@@ -1800,6 +2435,151 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": True, "active": False, "finished": True,
                             **recent.public()})
         return jsonify({"ok": True, "active": False})
+
+    @app.get("/api/pay/checkout-link")
+    def api_pay_checkout_link():
+        """读账号当前的 Team 长链。
+
+        手动支付面板原本从前端的 ACCOUNTS 缓存里取，但长链常常是本次会话
+        刚生成的，缓存还是打开页面时的旧数据，于是显示"还没有长链"。
+        这里直接查库，不依赖任何缓存。
+        """
+        try:
+            acc_id = int(request.args.get("account_id") or 0)
+        except (TypeError, ValueError):
+            acc_id = 0
+        if not acc_id:
+            return jsonify({"ok": False, "error": "缺少 account_id"}), 400
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        return jsonify({
+            "ok": True,
+            "account_id": acc_id,
+            "url": str(acc.get("team_checkout_url") or "").strip(),
+            "created_at": acc.get("team_checkout_created_at") or "",
+            "error": str(acc.get("team_checkout_error") or ""),
+        })
+
+    @app.post("/api/accounts/<int:acc_id>/probe-single-seat")
+    def api_account_probe_single_seat(acc_id: int):
+        """探测账号能不能只买 1 席 Team。
+
+        只创建 checkout session 读限制，不改席位、不支付、不消耗优惠码。
+        2FA 完成后会自动跑一次，这个接口用于老账号补测或重测。
+        """
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            from core.single_seat import probe_single_seat
+            res = probe_single_seat(acc)
+            db.update_account_single_seat(acc_id, res)
+            return jsonify(res) if res.get("ok") else (jsonify(res), 400)
+        except Exception as exc:
+            logger.exception("探测单席位失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.get("/api/team/members")
+    def api_team_members():
+        """Team 成员总览：成员、待处理邀请、席位占用。"""
+        try:
+            acc_id = int(request.args.get("account_id") or 0)
+        except (TypeError, ValueError):
+            acc_id = 0
+        if not acc_id:
+            return jsonify({"ok": False, "error": "缺少 account_id"}), 400
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if str(acc.get("plan_type") or "").lower() != "team":
+            return jsonify({"ok": False,
+                            "error": f"该账号不是 Team（当前 {acc.get('plan_type') or '未知'}），"
+                                     "请先完成支付并查套餐"}), 400
+        try:
+            from core.team_members import TeamMemberError, fetch_overview
+            return jsonify(fetch_overview(acc))
+        except TeamMemberError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("查询 Team 成员失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.post("/api/team/invite")
+    def api_team_invite():
+        """邀请成员。席位不够时默认拦住，除非显式 allow_overflow。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            acc_id = int(data.get("account_id") or 0)
+        except (TypeError, ValueError):
+            acc_id = 0
+        if not acc_id:
+            return jsonify({"ok": False, "error": "缺少 account_id"}), 400
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+
+        raw = data.get("emails") or data.get("email") or []
+        emails = [raw] if isinstance(raw, str) else list(raw)
+        try:
+            from core.team_members import (SEAT_DEFAULT, TeamMemberError,
+                                           invite_members)
+            out = invite_members(
+                acc, emails,
+                role=str(data.get("role") or "standard-user"),
+                seat_type=str(data.get("seat_type") or SEAT_DEFAULT),
+                allow_overflow=bool(data.get("allow_overflow")))
+            return jsonify(out)
+        except TeamMemberError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("邀请 Team 成员失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.post("/api/team/revoke-invite")
+    def api_team_revoke_invite():
+        """撤销待处理邀请，把席位放回去。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            acc_id = int(data.get("account_id") or 0)
+        except (TypeError, ValueError):
+            acc_id = 0
+        acc = db.get_account(acc_id) if acc_id else None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            from core.team_members import TeamMemberError, revoke_invite
+            return jsonify(revoke_invite(acc, str(data.get("email") or "")))
+        except TeamMemberError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("撤销邀请失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
+
+    @app.post("/api/team/remove-member")
+    def api_team_remove_member():
+        """移除成员，把席位放回去。"""
+        data = request.get_json(silent=True) or {}
+        try:
+            acc_id = int(data.get("account_id") or 0)
+        except (TypeError, ValueError):
+            acc_id = 0
+        acc = db.get_account(acc_id) if acc_id else None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            from core.team_members import TeamMemberError, remove_member
+            return jsonify(remove_member(acc, str(data.get("user_id") or "")))
+        except TeamMemberError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("移除成员失败")
+            return jsonify({"ok": False,
+                            "error": f"{type(exc).__name__}: {exc}"}), 500
 
     @app.get("/api/pay/probe-link")
     def api_pay_probe_link():
@@ -1832,7 +2612,8 @@ def create_app(auth_code: str | None = None) -> Flask:
                 candidates.append(alt)
         try:
             res = probe_with_fallback(url, proxy=proxy,
-                                      candidates=candidates[:4])
+                                      candidates=candidates[:4],
+                                      account=acc)
         except Exception as exc:
             logger.exception("探测长链失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
@@ -2202,7 +2983,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
         命名 AG<编号>-Team1（周限额编号前加 Z），代理按注册时用的出口
         同名匹配，不可达时退到备用代理，分组默认 Composite。
-        同名账号存在时更新而不是重复建。
+        同名账号存在时更新而不是重复建。导入后顺带关掉训练数据共享。
         """
         data = request.get_json(silent=True) or {}
         acc = db.get_account(acc_id)
@@ -2606,14 +3387,45 @@ def create_app(auth_code: str | None = None) -> Flask:
         Outlook：email----password----clientId----refreshToken
         通用 API：email----code_url
         通用 IMAP：email----password 或 email:password；服务器/端口/SSL 单独传入
+        akmoz：整段素材行，支持带中文说明前缀
+               邮箱---邮箱密码---接码链接（...）：a@x.com----pwd----https://...
         分隔符兼容 ---- 与 ====。
         """
         data = request.get_json(silent=True) or {}
         source = (data.get("source") or data.get("type") or "").strip()
-        if source not in ("outlook", "generic_api", "imap"):
-            return jsonify({"ok": False, "error": "导入时请选择具体类型：Outlook、通用 API 或通用 IMAP"}), 400
+        if source not in ("outlook", "generic_api", "imap", "akmoz"):
+            return jsonify({"ok": False, "error": "导入时请选择具体类型：Outlook、通用 API、通用 IMAP 或 akmoz"}), 400
         text = data.get("text") or ""
         as_registered = bool(data.get("as_registered", False))
+
+        # akmoz 的素材行带中文说明前缀，解析规则比较特殊，
+        # 交给客户端自己的 parse_material，避免这里再写一份容易走样的解析。
+        #
+        # 注意 as_registered=True（导入为账号）时也要走同一个解析器：
+        # akmoz 是 3 段（邮箱-密码-取码链接），下面通用分支按 outlook 的
+        # 4 段规则解析会全部丢掉，结果报"未解析到有效邮箱行"。
+        if source == "akmoz":
+            from core.akmoz_mail_client import parse_material
+            records = parse_material(text)
+            if not records:
+                return jsonify({
+                    "ok": False,
+                    "error": "未解析到有效邮箱行（需形如 邮箱----密码----取码链接，"
+                             "可带中文说明前缀）",
+                }), 400
+            if as_registered:
+                inserted, skipped = db.import_registered_email_accounts(
+                    records, source="akmoz")
+                return jsonify({
+                    "ok": True, "inserted": inserted, "skipped": skipped,
+                    "parsed": len(records), "as_registered": True,
+                })
+            inserted, skipped = db.import_akmoz_emails(records)
+            return jsonify({
+                "ok": True, "inserted": inserted, "skipped": skipped,
+                "parsed": len(records), "as_registered": False,
+            })
+
         imap_server = str(data.get("imap_server") or "").strip()
         try:
             imap_port = int(data.get("imap_port") or 993)
@@ -3798,6 +4610,20 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception:
             detail["pay_sessions"] = "查询失败"
 
+        try:
+            # 支付后延迟查套餐跑在 daemon 线程里，重启会直接丢掉——
+            # 丢了的后果是账号付了款却没套餐信息、没订阅编号
+            # （2026-11-18：#94 付款 7 秒后重启，这步就没了）。
+            from core.vcc_pay_session import pending_plan_checks
+            pend = pending_plan_checks()
+            detail["pay_plan_checks"] = len(pend)
+            if pend:
+                detail["pay_plan_checks_due_in"] = max(
+                    float(p.get("due_in") or 0) for p in pend)
+            busy = busy or bool(pend)
+        except Exception:
+            detail["pay_plan_checks"] = "查询失败"
+
         for label, expr in (("live_checks", "live_check_status"),
                             ("plan_checks", "plan_check_status")):
             try:
@@ -3854,6 +4680,38 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "邮箱池已空，无法开启自动注册"}), 400
         auto_register_scheduler.set_enabled(enabled)
         return jsonify({"ok": True, **auto_register_scheduler.status()})
+
+    @app.get("/api/auto-subscribe/status")
+    def api_auto_subscribe_status():
+        """自动订阅状态：开关、计划时刻、待订阅账号数、下次触发时间。"""
+        from core import auto_subscribe_scheduler
+        return jsonify({"ok": True, **auto_subscribe_scheduler.status()})
+
+    @app.get("/api/auto-subscribe/candidates")
+    def api_auto_subscribe_candidates():
+        """列出当前符合自动订阅条件的账号，便于开之前先看清会订哪些。"""
+        from core import auto_subscribe_scheduler
+        rows = auto_subscribe_scheduler.find_candidates()
+        return jsonify({"ok": True, "count": len(rows), "items": [
+            {"id": r.get("id"), "email": r.get("email"),
+             "single_seat_minimum": r.get("single_seat_minimum"),
+             "proxy_region": r.get("proxy_region") or "",
+             "created_at": r.get("created_at")}
+            for r in rows]})
+
+    @app.post("/api/auto-subscribe/run-now")
+    def api_auto_subscribe_run_now():
+        """立刻跑一次自动订阅（忽略整点判断），用于联调和手动补订。
+
+        会真实扣款，所以必须显式带 confirm=true。
+        """
+        data = request.get_json(silent=True) or {}
+        if not data.get("confirm"):
+            return jsonify({"ok": False,
+                            "error": "该操作会真实扣款，请带 confirm=true"}), 400
+        from core import auto_subscribe_scheduler
+        res = auto_subscribe_scheduler.run_once(force=True)
+        return jsonify({"ok": bool(res.get("ok")), **res})
 
     @app.post("/api/jobs/cancel-pending")
     def api_jobs_cancel_pending():

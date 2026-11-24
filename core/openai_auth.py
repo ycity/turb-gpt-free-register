@@ -31,6 +31,103 @@ class EmailOtpInvalidError(RuntimeError):
     """邮箱验证码无效/过期，可重新发送后重试。"""
 
 
+def resolve_workspace_landing(session, callback_resp, final_url: str,
+                              workspace_id: str = "") -> str:
+    """Team 账号登录后会停在 workspace 选择页，自动选中并继续回调。
+
+    个人账号登录后直接落到 chatgpt.com，token 当场就能拿到。Team 账号多一步：
+    auth.openai.com/workspace 让你选工作区，不选就拿不到 accessToken，
+    表现为 "[Session] 响应中没有 accessToken: {}"——看着像账号废了，其实没有。
+
+    workspace_id 优先用调用方传进来的（账号库里的 paid_workspace_account_id
+    最可靠）；没传才依次尝试 cookie、页面 HTML、session 缓存。
+
+    返回新的最终落点；不是 workspace 页则原样返回 final_url。
+    任何一步失败都返回原值，由调用方按原有逻辑继续（可能失败，但不会更糟）。
+    """
+    import json as _json
+    import re as _re
+
+    if not final_url or "chatgpt.com" in final_url or "auth.openai.com" not in final_url:
+        return final_url
+
+    html = ""
+    try:
+        html = callback_resp.text or ""
+    except Exception:  # noqa: BLE001
+        pass
+
+    ws_id = str(workspace_id or "").strip() or None
+    if not ws_id:
+        try:
+            from core.codex_oauth import _get_workspace_id
+            ws_id = _get_workspace_id(session)
+        except Exception:  # noqa: BLE001 - 取不到就换下一种方式
+            pass
+    if not ws_id and html:
+        m = _re.search(
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+            r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})", html)
+        if m:
+            ws_id = m.group(1)
+    if not ws_id:
+        ws_id = getattr(session, "_default_workspace_id", None)
+    if not ws_id:
+        logger.warning("[Workspace] 停在选择页但取不到 workspace_id：%s",
+                       final_url[:120])
+        return final_url
+
+    logger.info("[Workspace] 检测到选择页，自动选 workspace_id=%s", ws_id)
+    headers = session.get_auth_headers(referer=final_url)
+    try:
+        sentinel_resp = request_sentinel_token(session, "authorize_continue")
+        sh, soh = build_sentinel_header(session, sentinel_resp,
+                                        "authorize_continue")
+        if sh:
+            headers["openai-sentinel-token"] = sh
+        if soh:
+            headers["openai-sentinel-so-token"] = soh
+    except Exception:  # noqa: BLE001 - sentinel 失败也先试一把
+        pass
+
+    try:
+        resp = session.post(
+            "https://auth.openai.com/api/accounts/workspace/select",
+            headers=headers,
+            data=_json.dumps({"workspace_id": ws_id}),
+            allow_redirects=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Workspace] 选择请求失败：%s", exc)
+        return final_url
+
+    next_u = resp.headers.get("location") or resp.headers.get("Location")
+    if not next_u:
+        try:
+            data = resp.json()
+            next_u = (data.get("continue_url") or data.get("redirect_url")
+                      or data.get("url") or data.get("location"))
+        except Exception:  # noqa: BLE001
+            next_u = None
+    if not next_u:
+        logger.warning("[Workspace] 选择后没拿到下一跳地址")
+        return final_url
+
+    if next_u.startswith("/"):
+        next_u = "https://auth.openai.com" + next_u
+    try:
+        cb = session.get(next_u,
+                         headers=session.get_auth_navigate_headers(
+                             referer=final_url),
+                         allow_redirects=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[Workspace] 跟随回调失败：%s", exc)
+        return final_url
+    new_url = str(getattr(cb, "url", "") or "")
+    logger.info("[Workspace] 选择完成，最终落点: %s", new_url[:140])
+    return new_url or final_url
+
+
 class AccountUnusableError(Exception):
     """
     邮箱对应的 OpenAI 账号已废（删除/停用/封禁），再试也是同样结果。

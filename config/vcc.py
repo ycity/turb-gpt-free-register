@@ -4,11 +4,20 @@ AiLink VCC 自动支付配置
 
 生成 Team 长链后，用 VCC 虚拟卡自动填写 Stripe 结账页并提交。
 
-资金安全上有两道闸门，都默认开着：
-    1. VCC_EXPECTED_AMOUNT —— 页面总额必须等于该值才提交
-    2. VCC_MAX_CHARGE      —— 总额超过该值一律不提交
+资金安全上的闸门（三道，当前全部关闭）：
+    1. VCC_MAX_CHARGE      —— 总额超过该值一律不提交
+    2. VCC_EXPECTED_AMOUNT —— 总额必须等于该值才提交
+    3. VCC_EXPECTED_CURRENCY —— 页面币种必须等于该值才提交
 
-两道闸门任何一道不通过都会停在提交按钮前并截图，不会扣款。
+为什么全关：EG（EGP，千量级）和 US（USD，十量级）两条路都在用，
+任何一个写死的数或币种都会把另一边的正常单拦死。这是明确选定的取舍，
+代价是自动支付不再对金额做拦截——靠人在"等待确认"那步核对。
+
+还在生效的保护：
+    - 单席位路径会核对页面席位数，大于 1 直接停
+    - 卡里余额有限，备的钱不够时扣款自然失败
+充值金额由 VCC_FUNDING_USD 决定（置 0 时回落到 VCC_FUNDING_AMOUNT 按汇率
+折算），与校验无关。
 """
 from config.env_loader import apply_env_overrides
 
@@ -28,6 +37,27 @@ VCC_API_TIMEOUT = 30.0
 
 # VCC 开放接口会校验来源 IP 白名单；不在白名单内一律 403。
 # 本机调试时若未加白名单，请在已加白的服务器上跑。
+
+# 支付前按卡号查该卡登记的账单地址（GET https://ssr.im/address?id={卡号}）。
+#
+# 为什么要查：VCC 每张卡绑定的账单地址不同，而下面 VCC_BILLING_* 只能写死
+# 一份。地址和卡对不上时 Stripe 直接拒付，还白耗一个长链和一个优惠码。
+# 姓名也用接口返回的 full_name——它和地址同源；VCC 后台的 holderName
+# 可能是另一个名字（实测 0363 卡：接口 Clay Foy，VCC Sam Phoenix）。
+#
+# 关掉则退回用下面写死的 VCC_BILLING_*，适合接口挂掉时应急。
+# 只影响 VCC 托管卡；自有卡池的卡仍用卡池里填的信息。
+VCC_FETCH_CARD_ADDRESS = True
+
+# 金额闸门通过后自动提交，不等人点确认。
+#
+# 给自动订阅用：闸门已经校验过页面总额和币种（见 VCC_MAX_CHARGE /
+# VCC_EXPECTED_CURRENCY），再让人点一次并没有增加任何判断，只会让流程
+# 卡在"等待确认"——实测等 10 分钟后会话被回收，整单白跑。
+#
+# 闸门没通过时绝不自动提交，仍然停下等人处理。
+# 手动订阅不受影响：那条路会传入自己的配置，默认 False。
+VCC_AUTO_CONFIRM = False
 
 # ---- 账单信息 ----
 # 必须是卡实际登记的账单地址。这些值会原样提交给 Stripe。
@@ -56,8 +86,11 @@ VCC_MIN_CARD_BALANCE = 0.0
 # ---- 余额检查与自动充值 ----
 # 卡内余额不足时自动从 VCC 账户划钱到卡上。
 VCC_AUTO_RECHARGE = True
-# 每次充值金额（USD）。实际会取它和"刚好够付+1"中的较大值。
-VCC_RECHARGE_AMOUNT = 21.0
+# 每次充值金额（USD）。实际会取它和"刚好够付"中的较大值。
+# 跟着备款需求（下面的 VCC_FUNDING_USD = 18）走，略高一点留出零头：
+# 低于它的话空卡要按整数倍充两笔，白白在卡里积压一倍的钱；
+# 高太多则是把账户的钱提前锁进卡里，账户余额本来就不宽裕。
+VCC_RECHARGE_AMOUNT = 20.0
 # 等充值到账的上限（秒）。同步响应只表示受理，钱要几秒后才到卡上。
 VCC_RECHARGE_TIMEOUT = 90.0
 # EGP 兑 USD 的折算汇率，用于判断"卡里的钱够不够付这张 EGP 账单"。
@@ -69,13 +102,51 @@ VCC_BALANCE_BUFFER = 0.5
 # ---- 金额闸门 ----
 # 页面"本次应付总额"必须精确等于该值才允许提交。单位与页面币种一致。
 # 设为 0 表示不做等值校验（此时仅 VCC_MAX_CHARGE 生效）。
-VCC_EXPECTED_AMOUNT = 1150.0
+# 默认关闭：不同优惠码折扣力度不同，写死一个数会把正常的折扣单也拦掉。
+VCC_EXPECTED_AMOUNT = 0.0
 # 期望币种；留空表示不校验币种。
-VCC_EXPECTED_CURRENCY = "EGP"
+#
+# 留空是明确的选择：现在 EG（EGP，千量级）和 US（USD，十量级）两条路
+# 都在用，写死任一个都会把另一个的正常单拦死。单席位走美区更容易付通
+# （卡是美国卡，账单国家和卡一致），但埃及区定价更便宜，两边都要能跑。
+VCC_EXPECTED_CURRENCY = ""
 # 允许的绝对误差，用于容忍页面四舍五入。
 VCC_AMOUNT_TOLERANCE = 0.01
 # 硬上限：无论等值校验是否开启，总额超过该值都不提交。
-VCC_MAX_CHARGE = 1200.0
+#
+# 设为 0（关闭）同样是明确的选择。这一个值没法同时管住两种币种：
+# 按 EGP 定（2350）对 USD 单形同虚设，按 USD 定（60）又会拦死所有
+# EGP 单（最便宜的也要 920）。
+#
+# 代价说清楚：三道金额闸门现在全关，自动支付不再对金额做任何拦截，
+# 多少钱都会提交。防线只剩两条——
+#   1. 单席位路径会核对页面席位数，大于 1 直接停（见 _fill_elements_checkout）
+#   2. 人工在"等待确认"那一步看金额再点提交
+# 卡里余额本身也是兜底：备的钱不够时扣款会失败。
+VCC_MAX_CHARGE = 0.0
+# 按这个金额准备卡里的钱（USD）。只管充值，不参与金额校验。
+# 填 >0 时直接用它，不走下面 VCC_FUNDING_AMOUNT 的 EGP 折算。
+#
+# 为什么加这个：原本只有 EGP 的备款额，要按汇率折成 USD（1932/56+0.5=35）。
+# 那个数是给 EG 区两席位账单备的，而现在主力是 US 区单席位——#83 实际只
+# 扣了 17.17 USD，备 35 等于把一倍的钱白锁在卡里，还会把一张余额 34.81、
+# 明明够付的卡判成"不足"（线上就这么卡住过）。
+#
+# 定 18 的依据：#83 实扣 17.17，留 0.83 覆盖税费和汇率零头。
+# 单位就是卡的币种 USD，不折算、不乘汇率，所见即所得。
+#
+# 要回到 EG 两席位那条路，把这里置 0，就会退回用 VCC_FUNDING_AMOUNT 折算。
+VCC_FUNDING_USD = 18.0
+
+# 按这个金额准备卡里的钱（EGP）。只管充值，不参与金额校验。
+# 仅在上面的 VCC_FUNDING_USD 置 0 时才生效（EG 区两席位那条路）。
+# 1932 EGP ÷ 56 + 0.5 = 35.00 USD，即每单备 35 刀。
+#
+# 注意这个数低于未打折原价 2300：常态的八折单 1840 EGP（32.86 USD）够付，
+# 但优惠码失效时页面是原价 2300 EGP（41.07 USD），卡里会不够、扣款失败。
+# 这是明确选定的取舍——不想为小概率的原价单常备更多钱，那种情况人工处理。
+# 要改回"任何情况都够付"，把这里设成 2300。
+VCC_FUNDING_AMOUNT = 1932.0
 
 # ---- 提交行为 ----
 # True  = 两道闸门都通过后真实点击提交并扣款
@@ -157,10 +228,37 @@ VCC_CLOAK_SEED = ""
 # 注意：取卡号走 VCC 接口，始终直连以满足 IP 白名单，不受此开关影响。
 VCC_USE_ACCOUNT_PROXY = True
 
+# 支付走 1024proxy 出口时，代理的保留时长（分钟）。
+#
+# 为什么要调长：1024proxy 默认 time=10。提链只是几个 HTTP 请求，10 分钟
+# 绰绰有余；但支付要先登录拿 cookie、填卡、填地址、再等人点人机验证，
+# 一单下来常常超过 10 分钟。代理中途失效后，后面每一步都会以各种
+# 莫名其妙的方式失败（卡在等表单、读不到金额），很难看出根因是代理过期。
+#
+# 实测接口接受到 1440（24 小时）。设 60 分钟是留足余量又不长期占用额度。
+VCC_1024PROXY_MINUTES = 60
+
 # 支付成功后自动查一次套餐，确认 Team 是否真的生效。
 # 支付提交成功不等于套餐立刻落库，OpenAI 侧有处理延迟，所以要等一会儿再查。
 VCC_AUTO_PLAN_CHECK = True
 VCC_AUTO_PLAN_CHECK_DELAY = 30.0
+
+# ---- 打码：Stripe 的 hCaptcha Enterprise ----
+#
+# 单席位结账页和「加卡」页在提交时都会弹 hCaptcha Enterprise，并带 rqdata
+# （Stripe 把验证码和当次 SetupIntent/PaymentIntent 绑在一起的签名）。自动
+# 流程过不了这关就只能停在 awaiting_human 等人点。
+#
+# 用 2Captcha：in.php 提交任务、res.php 轮询取 token。token 约 2 分钟有效，
+# 必须立刻注入同一个浏览器——rqdata 每次会话现生成，不能预先批量解。
+#
+# 关掉（默认）时行为完全不变：仍停在验证码界面等人手动点。
+CAPTCHA_SOLVER_ENABLED = False
+CAPTCHA_2CAPTCHA_KEY = ""
+# 单次解题最长等待秒数。Stripe 这类 Enterprise 任务偶尔要 1-2 分钟。
+CAPTCHA_SOLVE_TIMEOUT = 180.0
+# 轮询间隔；2Captcha 建议 5 秒，别打太密。
+CAPTCHA_POLL_INTERVAL = 5.0
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
@@ -171,6 +269,8 @@ apply_env_overrides(globals(), {
     'VCC_CRED_FILE': 'str',
     'VCC_API_BASE': 'str',
     'VCC_API_TIMEOUT': 'float',
+    'VCC_FETCH_CARD_ADDRESS': 'bool',
+    'VCC_AUTO_CONFIRM': 'bool',
     'VCC_BILLING_COUNTRY': 'str',
     'VCC_BILLING_STATE': 'str',
     'VCC_BILLING_CITY': 'str',
@@ -189,8 +289,14 @@ apply_env_overrides(globals(), {
     'VCC_BALANCE_BUFFER': 'float',
     'VCC_EXPECTED_AMOUNT': 'float',
     'VCC_EXPECTED_CURRENCY': 'str',
+    'CAPTCHA_SOLVER_ENABLED': 'bool',
+    'CAPTCHA_2CAPTCHA_KEY': 'str',
+    'CAPTCHA_SOLVE_TIMEOUT': 'float',
+    'CAPTCHA_POLL_INTERVAL': 'float',
     'VCC_AMOUNT_TOLERANCE': 'float',
     'VCC_MAX_CHARGE': 'float',
+    'VCC_FUNDING_USD': 'float',
+    'VCC_FUNDING_AMOUNT': 'float',
     'VCC_AUTO_SUBMIT': 'bool',
     'VCC_ACCEPT_TERMS': 'bool',
     'VCC_SAVE_PAYMENT_METHOD': 'bool',
@@ -217,6 +323,7 @@ apply_env_overrides(globals(), {
     'VCC_CLOAK_GEOIP': 'bool',
     'VCC_CLOAK_SEED': 'str',
     'VCC_USE_ACCOUNT_PROXY': 'bool',
+    'VCC_1024PROXY_MINUTES': 'int',
     'VCC_AUTO_PLAN_CHECK': 'bool',
     'VCC_AUTO_PLAN_CHECK_DELAY': 'float',
 })

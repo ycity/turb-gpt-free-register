@@ -371,6 +371,15 @@ def _page_warmup(driver, *, reason: str = "") -> None:
 
 
 _MISSING_PAGE_ELEMENT_REFRESH_RETRIES = 3
+
+# _refresh_after_missing_page_element 的第三种返回值：
+# "等过了人机验证，这一轮不该计入重试次数"。
+# 用独立对象而不是 True/False，调用方可以 `is` 判断，不会和布尔混淆。
+CHALLENGE_WAITED = object()
+
+# 同一步里最多容忍几次人机验证。挑战不计入刷新重试，但也不能无限等——
+# 一次 wait_out_challenge 最长 90s，给 3 次就是 4.5 分钟上限。
+_CHALLENGE_WAIT_BUDGET = 3
 # 人机验证等待时间的兜底默认值；实际取 config.cloakbrowser.CHALLENGE_MAX_WAIT_SECONDS。
 _CHALLENGE_MAX_WAIT_SECONDS = 90.0
 _CHALLENGE_POLL_SECONDS = 1.5
@@ -503,13 +512,17 @@ def _refresh_after_missing_page_element(driver, step: str, retry_index: int) -> 
     """元素缺失时刷新当前页面，避免把页面迟渲染误判成流程失败。
 
     刷新前先确认不是卡在人机验证上：那种情况刷新只会让挑战重来，必须安静等。
+
+    返回 (继续, 是否消耗了一次重试)。等人机验证不该算重试次数——
+    实测 #176 三次预算里有两次花在等挑战（90s 超时 + 42.8s 通过），
+    真正用来找元素的只剩一次，挑战刚过就因为"已重试 3 次"失败了。
     """
     max_retries = _MISSING_PAGE_ELEMENT_REFRESH_RETRIES
     if retry_index >= max_retries:
         return False
-    # 正在过挑战：等它跑完就让调用方重新找元素，这一轮不刷新。
+    # 正在过挑战：等它跑完就让调用方重新找元素，这一轮不刷新也不算重试。
     if wait_out_challenge(driver, step=step):
-        return True
+        return CHALLENGE_WAITED
     try:
         current_url = str(getattr(driver, "current_url", "") or "")
         logger.warning(
@@ -711,7 +724,10 @@ def _wait_for_email_input(driver, timeout: int | None = None):
     """进入邮箱登录/注册方式并返回已找到的可见邮箱输入框。"""
     wait_timeout = timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT)
     last_state = None
-    for refresh_retry in range(_MISSING_PAGE_ELEMENT_REFRESH_RETRIES + 1):
+    # 同 _type_otp：用 while，等人机验证那一轮不递增计数
+    refresh_retry = 0
+    challenge_waits = 0
+    while refresh_retry <= _MISSING_PAGE_ELEMENT_REFRESH_RETRIES:
         end = time.time() + wait_timeout
         clicked_email_option = False
         while time.time() < end:
@@ -728,8 +744,18 @@ def _wait_for_email_input(driver, timeout: int | None = None):
                 _assert_not_external_idp(driver, "点击邮箱入口后")
                 continue
             time.sleep(0.4)
-        if not _refresh_after_missing_page_element(driver, "邮箱输入框/邮箱入口", refresh_retry):
+        outcome = _refresh_after_missing_page_element(
+            driver, "邮箱输入框/邮箱入口", refresh_retry)
+        if outcome is CHALLENGE_WAITED:
+            challenge_waits += 1
+            if challenge_waits > _CHALLENGE_WAIT_BUDGET:
+                logger.warning("%s 邮箱输入框：人机验证反复出现 %s 次，不再等",
+                               _log_prefix(driver), challenge_waits)
+                break
+            continue
+        if not outcome:
             break
+        refresh_retry += 1
     raise RuntimeError(
         f"找不到邮箱输入框/邮箱入口，已刷新重试{_MISSING_PAGE_ELEMENT_REFRESH_RETRIES}次"
         f"（未使用文字识别），state={last_state}"
@@ -1317,7 +1343,11 @@ def _submit_email_and_wait_next(
 def _type_otp(driver, code: str) -> None:
     from selenium.webdriver.common.by import By
 
-    for refresh_retry in range(_MISSING_PAGE_ELEMENT_REFRESH_RETRIES + 1):
+    # 用 while 而不是 for：等人机验证那一轮不能递增计数，
+    # 否则挑战一出现就把三次预算吃光（#176 就是这么失败的）。
+    refresh_retry = 0
+    challenge_waits = 0
+    while refresh_retry <= _MISSING_PAGE_ELEMENT_REFRESH_RETRIES:
         # 单输入框
         for selector in [
             "input[autocomplete='one-time-code']",
@@ -1347,8 +1377,21 @@ def _type_otp(driver, code: str) -> None:
                     human_delay("keystroke")
             return
 
-        if not _refresh_after_missing_page_element(driver, "OTP输入框", refresh_retry):
+        outcome = _refresh_after_missing_page_element(
+            driver, "OTP输入框", refresh_retry)
+        if outcome is CHALLENGE_WAITED:
+            # 挑战刚过，页面还会重渲染一次，直接再找一轮，不计次数。
+            # 但要防死循环：同一步最多容忍 _CHALLENGE_WAIT_BUDGET 次挑战。
+            challenge_waits += 1
+            if challenge_waits > _CHALLENGE_WAIT_BUDGET:
+                logger.warning(
+                    "%s OTP输入框：人机验证反复出现 %s 次，不再无限等",
+                    _log_prefix(driver), challenge_waits)
+                break
+            continue
+        if not outcome:
             break
+        refresh_retry += 1
 
     raise RuntimeError(
         f"找不到 OTP 输入框，已刷新重试{_MISSING_PAGE_ELEMENT_REFRESH_RETRIES}次"
@@ -1425,7 +1468,14 @@ def _clear_otp_inputs(driver) -> None:
 
 
 def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
-    """点击重新发送邮箱验证码。优先按 DOM 属性识别，文本仅兜底。"""
+    """点击重新发送邮箱验证码。优先按 DOM 属性识别，文本仅兜底。
+
+    匹配必须严：误点"重试/再試一次"（Try again）会把页面打回 /log-in，
+    OTP 输入框消失、整个注册会话作废。实测 #175 就是这么挂的——
+    日志里写着"已点击重新发送验证码按钮：再試一次"，18 秒后
+    url 就变成了 auth.openai.com/log-in。
+    正常的重发按钮文案是 Resend email / 重新傳送電子郵件 / メールを再送信。
+    """
     end = time.time() + timeout
     last = None
     while time.time() < end:
@@ -1434,18 +1484,24 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
             const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
             const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
             const candidates = [...document.querySelectorAll('button,a,[role=button],[role=link],input[type=button],input[type=submit]')].filter(visible);
+            // "再試一次 / Try again" 是错误页的重试，点了会回登录页，必须排除
+            const isRetry = el => /try\s*again|再試一次|再试一次|重试|重試/.test(
+              ((el.innerText || el.textContent || '') + ' ' +
+               (el.getAttribute('aria-label') || '') + ' ' +
+               (el.getAttribute('data-dd-action-name') || '')).toLowerCase());
             const attrHit = candidates.find(el => {
-              if (!enabled(el)) return false;
+              if (!enabled(el) || isRetry(el)) return false;
               const attrs = [el.id, el.getAttribute('name'), el.getAttribute('value'), el.getAttribute('data-dd-action-name'), el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('data-testid')]
                 .join(' ').toLowerCase();
               const name = String(el.getAttribute('name') || '').toLowerCase();
               const value = String(el.getAttribute('value') || '').toLowerCase();
               if (name === 'intent' && value === 'resend') return true;
-              return /resend|send.*new|new.*code|again/.test(attrs);
+              // 不要裸的 again：它会命中 try-again。只认和"发送"连在一起的写法。
+              return /resend|send.*new|new.*code|send.*again/.test(attrs);
             });
             if (attrHit) return attrHit;
             // 兜底：多语言文本，避免因页面没有稳定属性时卡死。
-            return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
+            return candidates.find(el => enabled(el) && !isRetry(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重新傳送|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
             """)
             if btn:
                 # 读按钮文字只是为了写日志，取不到也必须照常点下去。
@@ -2092,8 +2148,12 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                     logger.info("%s 邮箱验证码页暂未找到“使用密码继续”，继续等待页面渲染：detail=%s", _log_prefix(driver), result)
                     time.sleep(0.5)
                     continue
-                if _refresh_after_missing_page_element(driver, "使用密码继续按钮", missing_element_refreshes):
-                    missing_element_refreshes += 1
+                outcome = _refresh_after_missing_page_element(
+                    driver, "使用密码继续按钮", missing_element_refreshes)
+                if outcome:
+                    # 等人机验证不算一次刷新重试，否则挑战一出现预算就没了
+                    if outcome is not CHALLENGE_WAITED:
+                        missing_element_refreshes += 1
                     end = time.time() + timeout
                     verification_wait_end = min(end, time.time() + 10)
                     continue
@@ -2151,10 +2211,15 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         """) or {}
         if not result.get('ok'):
             reason = str(result.get('reason') or '')
-            if reason in {'missing_password_input', 'missing_submit'} and _refresh_after_missing_page_element(
-                driver, "密码输入框/提交按钮", missing_element_refreshes
-            ):
-                missing_element_refreshes += 1
+            _pw_outcome = (
+                _refresh_after_missing_page_element(
+                    driver, "密码输入框/提交按钮", missing_element_refreshes)
+                if reason in {'missing_password_input', 'missing_submit'}
+                else False)
+            if _pw_outcome:
+                # 等人机验证不算一次刷新重试
+                if _pw_outcome is not CHALLENGE_WAITED:
+                    missing_element_refreshes += 1
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
@@ -2202,10 +2267,14 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         """) or {}
         if not submit_result.get("ok") or not submit_result.get("button"):
             reason = str(submit_result.get('reason') or '')
-            if reason == 'missing_enabled_submit' and _refresh_after_missing_page_element(
-                driver, "密码页 Continue 按钮", missing_element_refreshes
-            ):
-                missing_element_refreshes += 1
+            _sb_outcome = (
+                _refresh_after_missing_page_element(
+                    driver, "密码页 Continue 按钮", missing_element_refreshes)
+                if reason == 'missing_enabled_submit' else False)
+            if _sb_outcome:
+                # 等人机验证不算一次刷新重试
+                if _sb_outcome is not CHALLENGE_WAITED:
+                    missing_element_refreshes += 1
                 end = time.time() + timeout
                 continue
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
@@ -2886,13 +2955,9 @@ def run_roxy_registration(
             data_saver.stop()
         logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
-        # 未确认创建前回收邮箱；确认后避免重复使用。
-        try:
-            if email:
-                from core.email_provider import release_email
-                release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
-        except Exception:
-            pass
+        # 不要自己回收邮箱，交给 registration_service 统一处理：
+        # 它走 release_unconsumed_* 累加连续失败计数、到阈值自动停用。
+        # worker 抢先把邮箱改回 available 会让计数失效（同 Cloak 路径的坑）。
         return {
             "success": False,
             "email": email,
