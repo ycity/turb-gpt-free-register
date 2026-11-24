@@ -717,23 +717,36 @@ def _fetch_graph_messages(http: CurlSession, token: str) -> list[dict]:
         "User-Agent": USER_AGENT,
         "Prefer": 'outlook.body-content-type="html"',
     }
-    url = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
     params = {
         "$top": "20",
         "$orderby": "receivedDateTime desc",
         "$select": "id,subject,from,receivedDateTime,bodyPreview,body",
     }
-    resp = http.get(url, headers=headers, params=params)
-    text = resp.text or ""
-    if resp.status_code != 200:
-        raise OutlookClientError(f"Microsoft Graph messages HTTP {resp.status_code}: {text[:500]}")
-    data = resp.json()
-    rows = data.get("value") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        raise OutlookClientError(f"Microsoft Graph 响应缺少 value: {str(data)[:300]}")
-    out = [_normalize_ms_message(m) for m in rows if isinstance(m, dict)]
-    for item in out:
-        item["_fetch_source"] = "graph"
+    # 2026-11-20 实测：新池邮箱的 OpenAI OTP 会被 Outlook 分进 Junk；
+    # 只扫 INBOX 会把已送达的码当成超时。Junk 拉取失败不致命（老账号
+    # 可能没有该文件夹），INBOX 失败才抛错维持原语义。
+    out: list[dict] = []
+    for folder in ("inbox", "junkemail"):
+        url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
+        resp = http.get(url, headers=headers, params=params)
+        text = resp.text or ""
+        if resp.status_code != 200:
+            if folder != "inbox":
+                logger.debug("[Outlook] Graph junkemail 拉取失败（忽略）: HTTP %s", resp.status_code)
+                continue
+            raise OutlookClientError(f"Microsoft Graph messages HTTP {resp.status_code}: {text[:500]}")
+        data = resp.json()
+        rows = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            if folder != "inbox":
+                continue
+            raise OutlookClientError(f"Microsoft Graph 响应缺少 value: {str(data)[:300]}")
+        folder_items = [_normalize_ms_message(m) for m in rows if isinstance(m, dict)]
+        for item in folder_items:
+            item["_fetch_source"] = "graph"
+            if folder != "inbox":
+                item["_folder"] = "junk"
+        out.extend(folder_items)
     return out
 
 
@@ -759,48 +772,63 @@ def _fetch_outlook_rest_messages(http: CurlSession, token: str) -> list[dict]:
     ]
     last_text = ""
     data = None
-    for params in attempts:
-        resp = http.get(url, headers=headers, params=params)
-        text = resp.text or ""
-        last_text = text[:500]
-        if resp.status_code == 200:
-            data = resp.json()
-            break
-        # 字段名不兼容时自动降级下一套参数。
-        if resp.status_code == 400 and ("Could not find a property" in text or "ParseUri" in text):
-            logger.debug("[Outlook] Outlook REST 参数不兼容，降级重试: %s", text[:220])
-            continue
-        raise OutlookClientError(f"Outlook REST messages HTTP {resp.status_code}: {text[:500]}")
-    if data is None:
-        raise OutlookClientError(f"Outlook REST messages 失败: {last_text}")
-    rows = data.get("value") if isinstance(data, dict) else None
-    if not isinstance(rows, list):
-        raise OutlookClientError(f"Outlook REST 响应缺少 value: {str(data)[:300]}")
+    # inbox + junkemail 双文件夹：新池邮箱的 OpenAI OTP 常被分进 Junk
+    #（2026-11-20 实测）。junk 拉取失败不致命，inbox 失败维持原抛错。
     out = []
-    for m in rows:
-        if not isinstance(m, dict):
+    for folder in ("inbox", "junkemail"):
+        url = f"https://outlook.office.com/api/v2.0/me/mailfolders/{folder}/messages"
+        data = None
+        for params in attempts:
+            resp = http.get(url, headers=headers, params=params)
+            text = resp.text or ""
+            last_text = text[:500]
+            if resp.status_code == 200:
+                data = resp.json()
+                break
+            # 字段名不兼容时自动降级下一套参数。
+            if resp.status_code == 400 and ("Could not find a property" in text or "ParseUri" in text):
+                logger.debug("[Outlook] Outlook REST 参数不兼容，降级重试: %s", text[:220])
+                continue
+            if folder != "inbox":
+                logger.debug("[Outlook] Outlook REST %s 拉取失败（忽略）: HTTP %s", folder, resp.status_code)
+                break
+            raise OutlookClientError(f"Outlook REST messages HTTP {resp.status_code}: {text[:500]}")
+        if data is None:
+            if folder == "inbox":
+                raise OutlookClientError(f"Outlook REST messages 失败: {last_text}")
             continue
-        # Outlook REST 字段转 Graph 风格；不同版本字段大小写不同。
-        from_obj = m.get("From") or m.get("from") if isinstance(m.get("From") or m.get("from"), dict) else {}
-        email_addr = from_obj.get("EmailAddress") or from_obj.get("emailAddress") if isinstance(from_obj, dict) else {}
-        if not isinstance(email_addr, dict):
-            email_addr = {}
-        body_obj = m.get("Body") or m.get("body") if isinstance(m.get("Body") or m.get("body"), dict) else {}
-        received = m.get("ReceivedDateTime") or m.get("DateTimeReceived") or m.get("receivedDateTime") or ""
-        out.append({
-            "_fetch_source": "outlook_rest",
-            "id": m.get("Id") or m.get("id") or "",
-            "subject": m.get("Subject") or m.get("subject") or "",
-            "from": {"emailAddress": {"address": email_addr.get("Address") or email_addr.get("address") or "", "name": email_addr.get("Name") or email_addr.get("name") or ""}},
-            "fromEmail": email_addr.get("Address") or email_addr.get("address") or "",
-            "fromName": email_addr.get("Name") or email_addr.get("name") or "",
-            "receivedDateTime": received,
-            "date": received,
-            "bodyPreview": m.get("BodyPreview") or m.get("bodyPreview") or "",
-            "content": body_obj.get("Content") or body_obj.get("content") or "",
-            "body": body_obj.get("Content") or body_obj.get("content") or "",
-            "html": body_obj.get("Content") or body_obj.get("content") or "",
-        })
+        rows = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            if folder == "inbox":
+                raise OutlookClientError(f"Outlook REST 响应缺少 value: {str(data)[:300]}")
+            continue
+        for m in rows:
+            if not isinstance(m, dict):
+                continue
+            # Outlook REST 字段转 Graph 风格；不同版本字段大小写不同。
+            from_obj = m.get("From") or m.get("from") if isinstance(m.get("From") or m.get("from"), dict) else {}
+            email_addr = from_obj.get("EmailAddress") or from_obj.get("emailAddress") if isinstance(from_obj, dict) else {}
+            if not isinstance(email_addr, dict):
+                email_addr = {}
+            body_obj = m.get("Body") or m.get("body") if isinstance(m.get("Body") or m.get("body"), dict) else {}
+            received = m.get("ReceivedDateTime") or m.get("DateTimeReceived") or m.get("receivedDateTime") or ""
+            item = {
+                "_fetch_source": "outlook_rest",
+                "id": m.get("Id") or m.get("id") or "",
+                "subject": m.get("Subject") or m.get("subject") or "",
+                "from": {"emailAddress": {"address": email_addr.get("Address") or email_addr.get("address") or "", "name": email_addr.get("Name") or email_addr.get("name") or ""}},
+                "fromEmail": email_addr.get("Address") or email_addr.get("address") or "",
+                "fromName": email_addr.get("Name") or email_addr.get("name") or "",
+                "receivedDateTime": received,
+                "date": received,
+                "bodyPreview": m.get("BodyPreview") or m.get("bodyPreview") or "",
+                "content": body_obj.get("Content") or body_obj.get("content") or "",
+                "body": body_obj.get("Content") or body_obj.get("content") or "",
+                "html": body_obj.get("Content") or body_obj.get("content") or "",
+            }
+            if folder != "inbox":
+                item["_folder"] = "junk"
+            out.append(item)
     logger.debug(f"[Outlook] Outlook REST 直连拿到 {len(out)} 封邮件")
     return out
 
@@ -820,33 +848,42 @@ def _fetch_imap_direct_messages(account: OutlookAccount) -> list[dict]:
         auth_string = f"user={account.email}\x01auth=Bearer {token}\x01\x01"
         mail = imaplib.IMAP4_SSL("outlook.office365.com", 993)
         mail.authenticate("XOAUTH2", lambda _challenge: auth_string.encode("utf-8"))
-        status, _data = mail.select("INBOX")
-        if status != "OK":
-            raise OutlookClientError(f"IMAP select INBOX 失败: {status}")
-
-        status, msg_ids = mail.search(None, "ALL")
-        if status != "OK":
-            raise OutlookClientError(f"IMAP search 失败: {status}")
-        ids = msg_ids[0].split() if msg_ids and msg_ids[0] else []
-        if not ids:
-            logger.debug("[Outlook] 本地 IMAP 收件箱为空")
-            return []
-
+        # INBOX + Junk 双文件夹：新池邮箱的 OpenAI OTP 常被分进 Junk
+        #（2026-11-20 实测）。INBOX 失败维持原抛错；Junk 不存在/失败只跳过。
         out = []
-        for mid in ids[-20:]:
-            status, data = mail.fetch(mid, "(RFC822)")
-            if status != "OK" or not data:
-                continue
-            try:
-                raw = data[0][1]
-                if not isinstance(raw, (bytes, bytearray)):
+        for folder in ("INBOX", "Junk"):
+            status, _data = mail.select(folder)
+            if status != "OK":
+                if folder != "INBOX":
+                    logger.debug("[Outlook] IMAP select %s 失败（忽略）: %s", folder, status)
                     continue
-                msg = email_lib.message_from_bytes(raw)
-                item = _imap_msg_to_dict(msg)
-                item["_fetch_source"] = "imap_new" if token_source == "live_imap_new" else "imap_entra_outlook"
-                out.append(item)
-            except Exception as exc:
-                logger.debug("[Outlook] 本地 IMAP 解析邮件失败 mid=%s: %s", mid, exc)
+                raise OutlookClientError(f"IMAP select INBOX 失败: {status}")
+
+            status, msg_ids = mail.search(None, "ALL")
+            if status != "OK":
+                if folder != "INBOX":
+                    continue
+                raise OutlookClientError(f"IMAP search 失败: {status}")
+            ids = msg_ids[0].split() if msg_ids and msg_ids[0] else []
+            if not ids and folder == "INBOX":
+                logger.debug("[Outlook] 本地 IMAP 收件箱为空")
+
+            for mid in ids[-20:]:
+                status, data = mail.fetch(mid, "(RFC822)")
+                if status != "OK" or not data:
+                    continue
+                try:
+                    raw = data[0][1]
+                    if not isinstance(raw, (bytes, bytearray)):
+                        continue
+                    msg = email_lib.message_from_bytes(raw)
+                    item = _imap_msg_to_dict(msg)
+                    item["_fetch_source"] = "imap_new" if token_source == "live_imap_new" else "imap_entra_outlook"
+                    if folder != "INBOX":
+                        item["_folder"] = "junk"
+                    out.append(item)
+                except Exception as exc:
+                    logger.debug("[Outlook] 本地 IMAP 解析邮件失败 mid=%s: %s", mid, exc)
         if token_source == "live_imap_new":
             logger.info("[Outlook] 本地 IMAP(New) 直连拿到 %s 封邮件", len(out))
         else:

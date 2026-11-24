@@ -48,6 +48,8 @@ IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多�
 
 - 批量注册 ChatGPT 账号。
 - 支持注册驱动切换：
+  - `REGISTRATION_DRIVER = "ant"`：Ant Browser（HK 执行节点，经 SSH 隧道）+ Playwright/CDP，注册后自动绑 2FA；
+    见 [`docs/antbrowser-registration-playbook.md`](docs/antbrowser-registration-playbook.md)
   - `REGISTRATION_DRIVER = "protocol"`
   - `REGISTRATION_DRIVER = "roxy"`
   - `REGISTRATION_DRIVER = "cloak"`
