@@ -31,7 +31,7 @@ _TZ = datetime.timezone(datetime.timedelta(hours=8))
 class HoursTest(unittest.TestCase):
     def test_default_hours(self):
         with patch.object(sched, "_cfg", lambda n, d: d):
-            self.assertEqual(sched._hours(), [10, 12, 14, 16, 18, 20])
+            self.assertEqual(sched._hours(), [10, 12, 14, 16, 18, 20, 22])
 
     def test_parses_comma_string(self):
         with patch.object(sched, "_cfg", lambda n, d: "9, 13 ,21"):

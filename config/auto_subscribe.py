@@ -21,7 +21,7 @@ AUTO_SUBSCRIBE_ENABLED = False
 #
 # 写成字符串而不是列表：.env 覆盖只支持 bool/int/float/str/多行列表，
 # 没有整数列表类型；逗号分隔最直观，解析时会忽略空白和非法值。
-AUTO_SUBSCRIBE_HOURS = "10,12,14,16,18,20"
+AUTO_SUBSCRIBE_HOURS = "10,12,14,16,18,20,22"
 
 # 结算国家。出口国家必须和结算货币同区，否则 Stripe 直接拒付
 #（实测 EGP 账单配美国卡会被发卡行拒）。

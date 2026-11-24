@@ -63,7 +63,7 @@ def _hours() -> list[int]:
 
     容忍空白和非法值：配置写错一个字段不该让整个调度停摆。
     """
-    raw = _cfg("AUTO_SUBSCRIBE_HOURS", "10,12,14,16,18,20")
+    raw = _cfg("AUTO_SUBSCRIBE_HOURS", "10,12,14,16,18,20,22")
     if isinstance(raw, (list, tuple)):
         parts = list(raw)
     else:
