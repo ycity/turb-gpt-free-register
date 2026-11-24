@@ -656,6 +656,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 cloak_profile.cleanup_idle_profiles()
             except Exception:
                 logger.exception("清理闲置 Cloak 资料目录失败")
+            # 席位账号导入后的自动预热（查活+查席位，同注册代理串行）：重启会把内存
+            # 队列清空，这里把"已导入但从未执行过查活"的账号重新排入。
+            try:
+                from core import seat_warmup_service
+
+                seat_warmup_service.recover_interrupted_seat_warmups()
+            except Exception:
+                logger.exception("席位账号预热启动恢复失败")
 
     try:
         from core import auto_register_scheduler
@@ -836,6 +844,100 @@ def create_app(auth_code: str | None = None) -> Flask:
             else:
                 skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "值为空"})
         return jsonify({"ok": True, "field": field, "values": values, "count": len(values), "skipped": skipped})
+
+    @app.post("/api/accounts/import-seat")
+    def api_accounts_import_seat():
+        """
+        批量导入席位账号（已注册好的现成账号），每行：
+
+            邮箱----密码----https://xxx/2FA#密钥
+
+        分隔符兼容 ---- 与 ====；第 3 段 2FA 支持“链接#密钥”“2FA:密钥”或裸密钥，
+        缺省时允许只有 邮箱----密码 两段。导入后默认从代理池随机分配注册代理
+        （proxy_used），与注册流程 pick_proxy() 同源。
+        """
+        data = request.get_json(silent=True) or {}
+        text = str(data.get("text") or "")
+        assign_proxy = data.get("assign_proxy", True)
+        assign_proxy = assign_proxy if isinstance(assign_proxy, bool) else str(assign_proxy).strip().lower() not in {"0", "false", "no", "off"}
+        auto_warmup = data.get("auto_warmup", True)
+        auto_warmup = auto_warmup if isinstance(auto_warmup, bool) else str(auto_warmup).strip().lower() not in {"0", "false", "no", "off"}
+
+        email_re = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+        def _parse_totp_segment(segment: str) -> str:
+            seg = (segment or "").strip()
+            if not seg:
+                return ""
+            if "#" in seg:
+                seg = seg.split("#", 1)[1].strip()
+            elif seg.lower().startswith("2fa:"):
+                seg = seg[4:].strip()
+            return seg.upper()
+
+        records = []
+        errors = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "----" in line:
+                parts = line.split("----")
+            elif "====" in line:
+                parts = line.split("====")
+            else:
+                errors.append({"line": line[:120], "reason": "缺少 ---- 分隔符"})
+                continue
+            parts = [p.strip() for p in parts]
+            email = parts[0]
+            password = parts[1] if len(parts) > 1 else ""
+            if not email_re.match(email):
+                errors.append({"line": line[:120], "reason": "邮箱格式不正确"})
+                continue
+            if not password:
+                errors.append({"line": line[:120], "reason": "缺少密码段"})
+                continue
+            totp_secret = _parse_totp_segment(parts[2]) if len(parts) > 2 else ""
+            records.append({
+                "email": email,
+                "password": password,
+                "totp_secret": totp_secret,
+                "original_line": line,
+            })
+
+        if not records:
+            hint = "；".join(e["reason"] for e in errors[:3]) if errors else ""
+            return jsonify({"ok": False, "error": f"未解析到有效行（每行：邮箱----密码----2FA链接#密钥）{('：' + hint) if hint else ''}"}), 400
+
+        inserted, skipped, proxied, inserted_rows = db.import_seat_accounts(records, assign_proxy=assign_proxy)
+        # 导入成功后自动预热：按注册代理分组串行执行查活（登录拿 AT + 同会话查席位）。
+        # 预热入队失败不影响导入结果。
+        warmup = None
+        if inserted_rows and auto_warmup:
+            try:
+                from core import seat_warmup_service
+
+                warmup = seat_warmup_service.enqueue_seat_warmup(inserted_rows)
+            except Exception as exc:
+                logger.exception("席位账号预热入队失败")
+                warmup = {"queued": 0, "groups": 0, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        return jsonify({
+            "ok": True,
+            "parsed": len(records),
+            "inserted": inserted,
+            "skipped": skipped,
+            "proxied": proxied,
+            "assign_proxy": assign_proxy,
+            "warmup": warmup,
+            "errors": errors,
+        })
+
+    @app.get("/api/accounts/seat-warmup-status")
+    def api_seat_warmup_status():
+        """席位账号导入后自动预热（查活+查席位）的内存调度进度。"""
+        from core import seat_warmup_service
+
+        return jsonify({"ok": True, **seat_warmup_service.warmup_status()})
 
     @app.post("/api/accounts/<int:acc_id>/archive")
     def api_account_archive(acc_id: int):
@@ -2053,15 +2155,27 @@ def create_app(auth_code: str | None = None) -> Flask:
             vcc_error = f"{type(exc).__name__}: {exc}"
             logger.warning("查询 VCC 卡列表失败，仅返回自定义卡：%s", vcc_error)
 
+        # 自动订阅的使用次数和黑名单：调度器是唯一写入方（storage_meta
+        # 的 auto_sub_card_usage 计数 + AUTO_SUBSCRIBE_CARD_BLACKLIST），
+        # 卡池页要展示这两列。读不到就按全 0/不在黑名单，别挡住卡列表。
+        try:
+            from core.auto_subscribe_scheduler import _card_blacklist, card_usage
+            usage = card_usage()
+            blacklist = _card_blacklist()
+        except Exception:  # noqa: BLE001
+            usage, blacklist = {}, set()
+
         for r in rows:
             status = str(r.get("cardStatus") or "")
             try:
                 balance = float(r.get("balance") or 0.0)
             except (TypeError, ValueError):
                 balance = 0.0
+            mask = str(r.get("cardNoMask") or "")
+            tail4 = "".join(ch for ch in mask if ch.isdigit())[-4:]
             cards.append({
                 "card_id": str(r.get("cardId") or ""),
-                "mask": str(r.get("cardNoMask") or ""),
+                "mask": mask,
                 "balance": balance,
                 "status": status,
                 "holder_id": r.get("holderId"),
@@ -2069,6 +2183,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "card_bin": str(r.get("cardBin") or ""),
                 "usable": status.upper() == "ACTIVE",
                 "source": "vcc",
+                "tail4": tail4,
+                "auto_sub_used": usage.get(tail4, 0),
+                "auto_sub_blacklist": tail4 in blacklist,
+                "currency": "USD",
             })
 
         try:

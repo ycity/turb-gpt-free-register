@@ -25,7 +25,21 @@ from config import (
 
 logger = logging.getLogger(__name__)
 _GEO_CACHE: dict[str, dict] = {}
+_GEO_CACHE_TS: dict[str, float] = {}
+_GEO_CACHE_TTL_SEC = 300.0  # 动态住宅出口会漂移或断气，缓存 5 分钟防止长期误信旧结果
 _GEO_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_geo_cache(proxy: str | None = None) -> None:
+    """清除指定代理（或全部）的出口地理缓存，供验证逻辑强制实时探活。"""
+    with _GEO_CACHE_LOCK:
+        if proxy is None:
+            _GEO_CACHE.clear()
+            _GEO_CACHE_TS.clear()
+        else:
+            key = proxy or "__direct__"
+            _GEO_CACHE.pop(key, None)
+            _GEO_CACHE_TS.pop(key, None)
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 _COUNTRY_NAME_TO_CODE = {
     "JAPAN": "JP", "CHINA": "CN", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
@@ -430,10 +444,15 @@ class BrowserSession:
             return {}
 
         cache_key = self.proxy or "__direct__"
+        now_mono = time.monotonic()
         with _GEO_CACHE_LOCK:
             cached = _GEO_CACHE.get(cache_key)
+            cached_ts = _GEO_CACHE_TS.get(cache_key)
             if cached is not None:
-                return dict(cached)
+                if cached_ts is None or (now_mono - cached_ts) < _GEO_CACHE_TTL_SEC:
+                    return dict(cached)
+                _GEO_CACHE.pop(cache_key, None)
+                _GEO_CACHE_TS.pop(cache_key, None)
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
@@ -446,6 +465,7 @@ class BrowserSession:
                 if geo.get("country") or geo.get("timezone"):
                     with _GEO_CACHE_LOCK:
                         _GEO_CACHE[cache_key] = dict(geo)
+                        _GEO_CACHE_TS[cache_key] = time.monotonic()
                     logger.info(
                         "[指纹] 出口IP地理信息: ip=%s country=%s city=%s timezone=%s",
                         geo.get("ip") or "?", geo.get("country") or "?",
@@ -455,8 +475,10 @@ class BrowserSession:
             except Exception as exc:
                 logger.debug(f"[指纹] 出口 IP 地理检测失败 endpoint={url}: {type(exc).__name__}: {exc}")
                 continue
+        # 探测失败不写空结果进缓存，避免单次超时永久毒化该代理
         with _GEO_CACHE_LOCK:
-            _GEO_CACHE[cache_key] = {}
+            _GEO_CACHE.pop(cache_key, None)
+            _GEO_CACHE_TS.pop(cache_key, None)
         return {}
 
     @staticmethod

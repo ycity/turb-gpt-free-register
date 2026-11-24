@@ -67,6 +67,11 @@ class PaySession:
     submitted: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # 登录用的出口 IP 池（首选在前）+ 池子耗尽时的重拉回调。
+    # 风控 403 是 IP 级的，多轮登录各换一个出口才有意义；手动订阅
+    # 不传就是单出口，行为与从前一致。
+    _proxies: list[str] = field(default_factory=list, repr=False)
+    _refetch: Any = field(default=None, repr=False)
     _cmd: queue.Queue = field(default_factory=queue.Queue, repr=False)
     _thread: Any = field(default=None, repr=False)
 
@@ -134,49 +139,6 @@ def _record_promo(sess: PaySession) -> None:
         logger.exception("[pay-session] %s 优惠码登记失败", sess.sid)
 
 
-def _verify_subscription_active(page, cfg) -> tuple[bool | None, str]:
-    """提交后立刻确认订阅是否真的建立了。
-
-    返回 (状态, 说明)：
-      True  —— 确认已建立（页面出现了付款成功/订阅生效的迹象）
-      False —— 确认没建立（页面明确失败/仍在套餐配置页）
-      None  —— 判断不了（页面还没落定），交给延迟查套餐做最终结论
-
-    为什么不能只看"页面没报错"：2026-11-18 #110 用 9636 付款，提交后页面
-    跳回 "Configure your plan" 显示红框 "Payment was not approved"，但
-    _page_error 当时不认 OpenAI 的红框，于是被判成功——paid_at 落了、账号
-    移出候选队列，实际卡余额 20.96 一分没扣、subscriptions 接口 404。
-    """
-    # 1) 明确失败文案
-    try:
-        from core.vcc_checkout_pay import _page_error
-        err = _page_error(page)
-    except Exception:  # noqa: BLE001
-        err = ""
-    if err:
-        return False, str(err)[:200]
-
-    # 2) 仍在套餐配置页 = 没买成（成功的话会离开这页）
-    try:
-        body = (page.inner_text("body", timeout=2000) or "").lower()
-    except Exception:  # noqa: BLE001
-        body = ""
-    if body:
-        back_on_planner = ("configure your plan" in body
-                           or "monthly billing" in body)
-        if back_on_planner and "due today" in body:
-            return False, "提交后仍停在套餐配置页，订阅未建立"
-        # 明确的成功迹象
-        for phrase in ("you're all set", "subscription confirmed",
-                       "payment successful", "thanks for subscribing",
-                       "已订阅", "お支払いが完了"):
-            if phrase in body:
-                return True, phrase
-
-    # 3) 页面已经离开结账表单但要等后端写库 -> 交给延迟查套餐
-    return None, ""
-
-
 def _record_paid_at(sess: PaySession) -> None:
     """记下支付成功的时间和用的哪张卡。
 
@@ -229,11 +191,16 @@ def _clear_checkout_link(sess: PaySession) -> None:
 
 
 def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
-    """支付成功后延迟查一次套餐，确认 Team 是否真的生效。
+    """提交后延迟轮询套餐，确认订阅真的生效；不生效则回滚登记。
 
-    提交成功只代表扣款发出，OpenAI 侧写套餐有延迟，立刻查多半还是旧值。
+    提交后页面无报错不等于支付成功（2026-11-19 #150：填卡 iframe 异常
+    导致提交没生效，页面无报错文本，14 秒就被误判成功，paid_at/优惠码
+    全部错误落库）。所以这里的轮询才是最终裁决：
+      - plan 变成付费套餐（team/plus/pro/go）→ 确认成功
+      - 连续 POLL_ROUNDS 轮仍 free → 判定未生效，回滚 paid_at/卡标签/
+        优惠码，并把会话翻成 failed（钱扣没扣以 VCC 卡交易为准，人工核对）
+
     用独立线程延时，不占用支付线程，也不让前端等。
-
     等待期间会登记进 _PENDING_PLAN_CHECKS，让 /api/busy 看得见——
     2026-11-18 线上：#94 付款后 7 秒我重启了服务，safe-restart.sh 报
     "当前空闲"（延迟线程不在任何统计里），线程被杀，套餐查询从未执行，
@@ -258,38 +225,96 @@ def _schedule_plan_check(sess: PaySession, cfg: Any) -> None:
             if delay:
                 time.sleep(delay)
             try:
-                from core import db
-                from core.plan_check_service import enqueue_account_plan_check
-
-                acc = db.get_account(account_id)
-                if not acc:
-                    logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 不存在", account_id)
-                    return
-                token = str(acc.get("access_token") or "").strip()
-                if not token:
-                    logger.warning("[pay-session] 支付后查套餐跳过：账号 %s 没有 access_token",
-                                   account_id)
-                    return
-                res = enqueue_account_plan_check(
-                    account_id=account_id,
-                    email=str(acc.get("email") or ""),
-                    access_token=token,
-                    trigger="payment_auto",
-                )
-                if res.get("accepted"):
-                    logger.info("[pay-session] 支付后已入队套餐查询：%s", acc.get("email"))
-                else:
-                    logger.warning("[pay-session] 支付后套餐查询未入队：%s", res.get("error") or res)
-            except Exception as exc:  # noqa: BLE001 - 查套餐失败不影响已完成的支付
-                logger.warning("[pay-session] 支付后查套餐异常：%s: %s",
-                               type(exc).__name__, str(exc)[:160])
+                effective = _verify_payment_effective(sess, account_id)
+            except Exception as exc:  # noqa: BLE001 - 确认失败不炸线程，按未生效保守回滚
+                logger.warning("[pay-session] %s 支付确认异常（按未生效回滚）：%s: %s",
+                               sess.sid, type(exc).__name__, str(exc)[:160])
+                effective = False
+            if not effective:
+                _rollback_payment_records(sess)
+            else:
+                logger.info("[pay-session] %s 支付确认完成：账号 #%s 套餐已生效",
+                            sess.sid, account_id)
         finally:
             with _plan_check_lock:
                 _PENDING_PLAN_CHECKS.pop(account_id, None)
 
     threading.Thread(target=_run, name=f"plan-after-pay-{account_id}",
                      daemon=True).start()
-    logger.info("[pay-session] %s 支付成功，%.0fs 后自动查套餐", sess.sid, delay)
+    logger.info("[pay-session] %s 已提交，%.0fs 后开始套餐确认", sess.sid, delay)
+
+
+_VERIFY_POLL_ROUNDS = 4       # 套餐确认轮数；OpenAI 侧写套餐有延迟，一次 free 不定论
+_VERIFY_POLL_GAP = 45.0       # 每轮间隔（秒），总窗口 ≈ 3.5 分钟
+
+
+def _verify_payment_effective(sess: PaySession, account_id: int) -> bool:
+    """轮询套餐直到生效或轮数耗尽。生效返回 True。
+
+    每轮：入队一次套餐查询（服务内部带限速槽），等 POLL_GAP 秒后读
+    账号当前套餐。付费套餐（非 free）即认定生效。
+    """
+    from core import db
+    from core.plan_check_service import enqueue_account_plan_check
+
+    for attempt in range(1, _VERIFY_POLL_ROUNDS + 1):
+        acc = db.get_account(account_id)
+        if not acc:
+            logger.warning("[pay-session] %s 套餐确认跳过：账号 %s 不存在", sess.sid, account_id)
+            return False
+        token = str(acc.get("access_token") or "").strip()
+        if not token:
+            logger.warning("[pay-session] %s 套餐确认跳过：账号 %s 没有 access_token",
+                           sess.sid, account_id)
+            return False
+        res = enqueue_account_plan_check(
+            account_id=account_id,
+            email=str(acc.get("email") or ""),
+            access_token=token,
+            trigger="payment_auto",
+        )
+        if res.get("accepted"):
+            logger.info("[pay-session] %s 套餐确认第 %d/%d 轮已入队：%s",
+                        sess.sid, attempt, _VERIFY_POLL_ROUNDS, acc.get("email"))
+        else:
+            logger.warning("[pay-session] %s 套餐确认第 %d 轮未入队：%s",
+                           sess.sid, attempt, res.get("error") or res)
+        time.sleep(_VERIFY_POLL_GAP)
+        acc = db.get_account(account_id) or {}
+        plan = str(acc.get("current_plan_type") or acc.get("plan_type") or "").lower()
+        if plan and plan != "free":
+            return True
+        logger.warning("[pay-session] %s 套餐确认第 %d/%d 轮后仍为 %s",
+                       sess.sid, attempt, _VERIFY_POLL_ROUNDS, plan or "未知")
+    return False
+
+
+def _rollback_payment_records(sess: PaySession) -> None:
+    """套餐确认失败：回滚 paid_at/卡标签/优惠码，会话翻成 failed。
+
+    只回滚登记，不动 VCC 卡——钱扣没扣以卡交易流水为准，人工核对。
+    """
+    account_id = int(sess.account_id or 0)
+    logger.error("[pay-session] %s 支付疑似未生效：账号 #%s 连续 %d 轮套餐仍 free，"
+                 "回滚支付登记（paid_at/卡标签/优惠码）；请到 VCC 后台核对卡交易",
+                 sess.sid, account_id, _VERIFY_POLL_ROUNDS)
+    try:
+        from core import db
+        db.clear_account_payment(account_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("[pay-session] %s 回滚 paid_at 失败", sess.sid)
+    code = str(getattr(sess, "promo_code", "") or "").strip()
+    if code:
+        try:
+            from core.team_checkout_service import reset_promo_code_by_code
+            if reset_promo_code_by_code(code):
+                logger.info("[pay-session] %s 优惠码 %s 已回滚为 unused", sess.sid, code)
+        except Exception:  # noqa: BLE001
+            logger.exception("[pay-session] %s 回滚优惠码失败", sess.sid)
+    if sess.state == ST_DONE:
+        _touch(sess, state=ST_FAILED,
+               message="页面报成功但套餐未生效（多轮确认仍 free），已回滚登记；"
+                       "请核对卡交易后重试")
 
 
 def pending_plan_checks() -> list[dict]:
@@ -362,16 +387,23 @@ def _try_cloak_browser(cfg, proxy: str, sess):
     return browser
 
 
-def _login_cookies_for(email: str, proxy: str, *, rounds: int = 4,
-                       gap: float = 30.0) -> list[dict]:
+def _login_cookies_for(email: str, proxies, *, rounds: int = 6,
+                       gap: float = 30.0, refetch=None,
+                       used_proxy_out: list[str] | None = None) -> list[dict]:
     """登录账号并取回可注入浏览器的 chatgpt.com 会话 cookie。
 
     单席位结账页在 chatgpt.com 自己域下，必须有登录态才打得开，
     否则直接 302 到 /auth/login。而协议会话靠的是 Bearer header，
     光预热拿不到 session-token，必须真走完密码 + TOTP 登录。
 
-    OpenAI 对这些出口的 403 是间歇性的（实测同一出口几分钟后就好了），
-    所以这里重试几轮；全失败才放弃。
+    风控 403 是出口 IP 级的：2026-11-19 实测同一出口 4 轮全 403，
+    换设备指纹没用，等 3 分钟也没等来恢复。所以失败一轮就换下一个
+    出口 IP；池子耗尽且给了 refetch 回调时再拉一批（已试过的 IP 不
+    重试）。总轮数有上限，避免无限烧时间。
+
+    used_proxy_out：可选的输出列表，登录成功时把实际跑通的出口追加进去，
+    方便调用方让浏览器切换到同一个活出口（避免登录换了活口但浏览器仍死绑
+    初始坏出口，2026-11-24 18:00 #171 事故）。
     """
     import time as _t
 
@@ -381,10 +413,28 @@ def _login_cookies_for(email: str, proxy: str, *, rounds: int = 4,
     from core.openai_auth import follow_authorize
     from core.session import close_browser_session
 
+    # 兼容旧调用：单个地址字符串也当成一元池子
+    pool = ([proxies] if isinstance(proxies, str)
+            else [str(p or "").strip() for p in (proxies or [])
+                  if str(p or "").strip()])
+    tried: set[str] = set()
     acc = db.get_account_by_email(email) or {}
     src = str(acc.get("email_source") or "")
 
     for rd in range(1, int(rounds) + 1):
+        if not pool:
+            if refetch is None:
+                break
+            logger.info("[pay-session] 出口池已耗尽，重拉一批 1024proxy 出口")
+            try:
+                pool = [p for p in (refetch() or []) if p and p not in tried]
+            except Exception:  # noqa: BLE001 - 重拉失败按空处理
+                logger.warning("[pay-session] 重拉出口失败", exc_info=True)
+                pool = []
+            if not pool:
+                break
+        proxy = pool.pop(0)
+        tried.add(proxy)
         session = None
         try:
             session, authorize_url = _network_preflight_with_retry(
@@ -395,13 +445,21 @@ def _login_cookies_for(email: str, proxy: str, *, rounds: int = 4,
             jar = session.session.cookies.get_dict() or {}
             cookies = [_cookie_for_playwright(k, v) for k, v in jar.items()]
             if any("session-token" in c["name"] for c in cookies):
-                logger.info("[pay-session] 第 %s 轮登录成功，取到 %s 个 cookie",
-                            rd, len(cookies))
+                if used_proxy_out is not None:
+                    used_proxy_out.append(proxy)
+                logger.info("[pay-session] 第 %s 轮登录成功（出口 %s），取到 %s 个 cookie",
+                            rd, proxy, len(cookies))
                 return cookies
-            logger.warning("[pay-session] 第 %s 轮登录没拿到 session-token", rd)
-        except Exception as exc:  # noqa: BLE001 - 换一轮重试
-            logger.warning("[pay-session] 第 %s/%s 轮登录失败：%s",
-                           rd, rounds, str(exc)[:160])
+            logger.warning("[pay-session] 第 %s 轮登录没拿到 session-token（出口 %s）",
+                           rd, proxy)
+        except Exception as exc:  # noqa: BLE001 - 换出口重试
+            try:
+                from core.session import invalidate_geo_cache
+                invalidate_geo_cache(proxy)
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning("[pay-session] 第 %s/%s 轮登录失败（出口 %s）：%s",
+                           rd, rounds, proxy, str(exc)[:160])
         finally:
             if session is not None:
                 try:
@@ -669,18 +727,54 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
         logger.error("[pay-session] %s 准备失败：%s", sess.sid, exc)
         return
 
-    # CloakBrowser 自己管理 Playwright 实例，不能套在 sync_playwright() 里，
-    # 否则报 "Sync API inside the asyncio loop"。所以先独立试它，失败再开裸的。
-    browser = _try_cloak_browser(cfg, proxy, sess)
+    browser = None
     pw_ctx = None
-    if browser is None:
-        pw_ctx = sync_playwright().start()
-        browser = _plain_browser(pw_ctx, cfg, proxy)
-        logger.info("[pay-session] %s 使用裸 Playwright", sess.sid)
-
     context = None
     try:
-        if proxy:
+        # 单席位结账页在 chatgpt.com 自己域下，没登录态会被 302 到
+        # /auth/login，填表逻辑连表单都看不到。2 席的 Stripe 托管页
+        # 是匿名可访问的，不需要这步。
+        #
+        # 先登录、再起浏览器：2026-11-24 18:00 #171 事故中，初始出口 21048
+        # 提链后立刻断气，导致先起的浏览器 CloakBrowser GeoIP 超时退回裸内核；
+        # 随后登录自动换到活出口 21049 拿到 cookie，但浏览器仍死绑 21048，
+        # page.goto 直接 ERR_CONNECTION_CLOSED。先登录拿活出口，再用同一个活出口
+        # 起浏览器，登录和支付链路自然一致。
+        from core.elements_checkout import is_elements_checkout
+        use_elements = is_elements_checkout(checkout_url)
+        browser_proxy = proxy
+        login_cookies: list[dict] = []
+        if use_elements:
+            logger.info("[pay-session] %s 单席位结账页，先登录注入 cookie",
+                        sess.sid)
+            _touch(sess, message="正在登录账号（单席位结账页需要登录态）")
+            login_proxy_used: list[str] = []
+            login_cookies = _login_cookies_for(
+                sess.email,
+                getattr(sess, "_proxies", None) or proxy,
+                refetch=getattr(sess, "_refetch", None),
+                used_proxy_out=login_proxy_used,
+            )
+            if not login_cookies:
+                raise VccPayError(
+                    "单席位结账页需要登录态，但多轮登录（已换出口）都没成功"
+                    "（多半是该地区出口全被风控）。稍后重试，或改用手动支付")
+            if login_proxy_used and login_proxy_used[0]:
+                browser_proxy = login_proxy_used[0]
+                if browser_proxy != proxy:
+                    logger.info(
+                        "[pay-session] %s 浏览器切换至登录成功的活出口：%s（原出口 %s）",
+                        sess.sid, browser_proxy, proxy or "直连")
+
+        # CloakBrowser 自己管理 Playwright 实例，不能套在 sync_playwright() 里，
+        # 否则报 "Sync API inside the asyncio loop"。所以先独立试它，失败再开裸的。
+        browser = _try_cloak_browser(cfg, browser_proxy, sess)
+        if browser is None:
+            pw_ctx = sync_playwright().start()
+            browser = _plain_browser(pw_ctx, cfg, browser_proxy)
+            logger.info("[pay-session] %s 使用裸 Playwright", sess.sid)
+
+        if browser_proxy:
             logger.info("[pay-session] %s 浏览器走代理", sess.sid)
         context_kwargs: dict[str, Any] = {"viewport": {"width": VIEWPORT_W,
                                                        "height": VIEWPORT_H}}
@@ -689,7 +783,7 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
             # 否则代理在美国而浏览器报 UTC，风控一眼就看出来。
             try:
                 from core.cloakbrowser_driver import _build_cloak_locale_options
-                loc = _build_cloak_locale_options(proxy or None)
+                loc = _build_cloak_locale_options(browser_proxy or None)
                 if loc.get("locale"):
                     context_kwargs["locale"] = loc["locale"]
                 if loc.get("timezone"):
@@ -707,36 +801,23 @@ def _worker(sess: PaySession, checkout_url: str, proxy: str, cfg: Any,
             context.add_init_script(
                 "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
 
-        # 单席位结账页在 chatgpt.com 自己域下，没登录态会被 302 到
-        # /auth/login，填表逻辑连表单都看不到。2 席的 Stripe 托管页
-        # 是匿名可访问的，不需要这步。
-        from core.elements_checkout import is_elements_checkout
-        use_elements = is_elements_checkout(checkout_url)
-        if use_elements:
-            logger.info("[pay-session] %s 单席位结账页，先登录注入 cookie",
-                        sess.sid)
-            _touch(sess, message="正在登录账号（单席位结账页需要登录态）")
-            cookies = _login_cookies_for(sess.email, proxy)
-            if not cookies:
-                raise VccPayError(
-                    "单席位结账页需要登录态，但多轮登录都没成功（多半是出口"
-                    "被临时风控）。稍后重试，或改用手动支付")
+        if use_elements and login_cookies:
             try:
-                context.add_cookies(cookies)
+                context.add_cookies(login_cookies)
             except Exception as exc:  # noqa: BLE001 - 整批失败就逐条来
                 logger.warning("[pay-session] cookie 整批注入失败（%s），改逐条",
                                str(exc)[:80])
                 okn = 0
-                for c in cookies:
+                for c in login_cookies:
                     try:
                         context.add_cookies([c])
                         okn += 1
                     except Exception:  # noqa: BLE001
                         logger.debug("[pay-session] cookie %s 注入失败",
                                      c.get("name"))
-                if okn < len(cookies):
+                if okn < len(login_cookies):
                     logger.warning("[pay-session] cookie 注入 %s/%s",
-                                   okn, len(cookies))
+                                   okn, len(login_cookies))
 
         page = context.new_page()
         page.set_default_timeout(int(cfg.VCC_PAGE_TIMEOUT * 1000))
@@ -868,7 +949,12 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
         if sess.gate_error:
             logger.error("[pay-session] %s 闸门未通过，不自动提交：%s",
                          sess.sid, sess.gate_error)
-            _touch(sess, message="闸门未通过，等待人工处理：%s" % sess.gate_error)
+            # 自动流程没人会来点确认：闸门拦截的会话若停在 awaiting_confirm，
+            # 会一直占着 active 注册表，把本轮后续候选全挡在
+            # "已有进行中的支付会话" 上（11-23 makeup-run4 实证连堵 2 个候选）。
+            # 闸门没过 = 绝不会扣款，直接标 FAILED（终态），调度器立即换号。
+            _touch(sess, state=ST_FAILED,
+                   message="金额闸门未通过（未提交）：%s" % sess.gate_error)
         else:
             logger.warning("[pay-session] %s 自动确认（闸门已通过 %s %s）",
                            sess.sid, currency, amount)
@@ -955,31 +1041,15 @@ def _wait_and_submit(page, sess, cfg, client, card_id, out_dir,
         err = page_error(page)
         if err:
             _touch(sess, state=ST_FAILED, message=f"提交后页面报错：{err}")
-            return
-
-        # 页面没报错 ≠ 支付成功。必须再确认订阅真的建立了，否则会把失败单
-        # 记成成功（paid_at 一落，账号就被移出候选队列，再也不重试）。
-        verified, why = _verify_subscription_active(page, cfg)
-        if verified is False:
-            logger.error("[pay-session] %s 提交后核验未通过：%s", sess.sid, why)
-            _touch(sess, state=ST_FAILED,
-                   message=f"提交未成功：{why}。请到 VCC 后台确认该卡是否扣款，"
-                           f"若未扣款可重试")
-            return
-
-        shown = f"{currency} {amount:.2f}" if amount is not None else ""
-        if verified is True:
-            _touch(sess, state=ST_DONE,
-                   message=f"已提交支付 {shown}（页面已确认订阅生效）".strip())
         else:
-            # 页面没落定：先记为已提交，但把"待核验"写进 message，
-            # 由延迟查套餐给出最终结论。
-            _touch(sess, state=ST_DONE,
-                   message=f"已提交支付 {shown}，等待订阅核验".strip())
-        _record_promo(sess)
-        _record_paid_at(sess)
-        _clear_checkout_link(sess)
-        _schedule_plan_check(sess, cfg)
+            # 页面无报错只是消极证据（#150 教训：提交没生效时也没有报错
+            # 文本）。先按已提交登记，最终成功与否由套餐确认线程裁决。
+            shown = f"{currency} {amount:.2f}" if amount is not None else ""
+            _touch(sess, state=ST_DONE, message=f"已提交支付 {shown}，等待套餐确认".strip())
+            _record_promo(sess)
+            _record_paid_at(sess)
+            _clear_checkout_link(sess)
+            _schedule_plan_check(sess, cfg)
         return
 
     if sess.state not in _TERMINAL:
@@ -1437,8 +1507,15 @@ def _handle_3ds_interactive(page, sess, cfg, client, card_id) -> None:
 
 def start_session(*, account_id: int, email: str, checkout_url: str,
                   proxy: str = "", cfg: Any = None,
-                  client: Any = None, promo_code: str = "") -> PaySession:
-    """开一个支付会话。立即返回，填表在后台线程进行。"""
+                  client: Any = None, promo_code: str = "",
+                  extra_proxies: list[str] | None = None,
+                  refetch_proxies: Any = None) -> PaySession:
+    """开一个支付会话。立即返回，填表在后台线程进行。
+
+    extra_proxies：登录阶段的备选出口池（proxy 仍是首选，排最前）。
+    refetch_proxies：池子耗尽时重拉出口的回调，返回新代理列表；
+    两者都不传则登录只用 proxy，与手动订阅路径行为一致。
+    """
     if cfg is None:
         from config import vcc as cfg  # type: ignore[no-redef]
     from core.vcc_client import build_client_from_config
@@ -1454,6 +1531,9 @@ def start_session(*, account_id: int, email: str, checkout_url: str,
         sess = PaySession(sid=uuid.uuid4().hex[:12], account_id=account_id,
                           email=email,
                           promo_code=str(promo_code or "").strip())
+        sess._proxies = [p for p in ([proxy] + list(extra_proxies or []))
+                         if str(p or "").strip()]
+        sess._refetch = refetch_proxies
         _sessions[sess.sid] = sess
 
     client = client or build_client_from_config()

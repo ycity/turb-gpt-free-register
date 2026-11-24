@@ -146,6 +146,27 @@ def mark_promo_code(promo_id: int, status: str, account_id: int | None = None,
         )
 
 
+def reset_promo_code_by_code(code: str) -> bool:
+    """把误登记为 used 的优惠码按码重置回 unused（支付未生效回滚用）。
+
+    只动仍处于 used 的行：若已被人工改过状态，不覆盖人工决定。
+    """
+    clean = extract_clean_promo_code(code or "")
+    if not clean:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE promo_codes
+            SET status = 'unused', account_id = NULL, account_email = NULL,
+                updated_at = ?
+            WHERE code = ? AND status = 'used'
+            """,
+            (_now(), clean),
+        )
+        return cur.rowcount > 0
+
+
 def record_used_promo_code(code: str, account_id: int | None = None,
                            account_email: str | None = None,
                            status: str = "used") -> dict:
@@ -224,6 +245,36 @@ def reclaim_stale_promo_codes(older_than_minutes: float = 30.0) -> dict:
         logger.info("[优惠码] 退回 %d 个未完成支付的码：%s",
                     len(freed), ",".join(freed))
     return {"freed": freed, "count": len(freed), "stats": get_promo_stats()}
+
+
+def release_promo_code(code: str, reason: str = "") -> bool:
+    """把还挂在 using 的码退回 unused（流程失败、码没随支付消耗时调用）。
+
+    2026-11-20 补跑事故的另一半：失败候选的码一直挂在 using（
+    reclaim_stale_promo_codes 写了但从未被调用），把整个池子堵死，
+    后面的候选按原价跑完全程才被金额闸门拦下。
+
+    只动仍处于 using 的行：若支付实际提交成功过，_record_promo 已把它
+    升成 used，说明码已被 OpenAI 消耗，绝不能退回，否则会二次分派废码。
+    幂等：重复调用、码不在 using 时都是 no-op。
+    """
+    clean = extract_clean_promo_code(code or "")
+    if not clean:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE promo_codes
+            SET status = 'unused', account_id = NULL, account_email = NULL,
+                last_error = ?, updated_at = ?
+            WHERE code = ? AND status = 'using'
+            """,
+            (reason or "流程未完成支付，码未被消耗，退回池子", _now(), clean),
+        )
+        freed = cur.rowcount > 0
+    if freed:
+        logger.info("[优惠码] %s 未随支付消耗，已退回池子（%s）", clean, reason)
+    return freed
 
 
 def clear_promo_codes(status: str = "") -> int:
@@ -551,6 +602,7 @@ def generate_team_checkout_link(
     country: str = "EG",
     currency: str = "",
     promo_code: str = "",
+    promo_assigned: dict | None = None,
     use_1024proxy: bool = True,
     provider: str = "native",
     account_id: int | None = None,
@@ -558,11 +610,20 @@ def generate_team_checkout_link(
     account_proxy: str = "",
     timeout: int = 45,
     auto_pay: bool = True,
+    proxy_candidates: list[str] | None = None,
 ) -> dict:
     """生成长链。auto_pay=False 时只管提链，不做任何支付尝试。
 
     自动订阅必须传 False：它随后会用 vcc_pay_session 支付，那条路会先登录
     并注入 session-token。两个都付等于同一张链被匿名会话先打开一次，白烧。
+
+    promo_assigned：调用方已经从池里领好的码行（自动订阅的前置闸门在
+    选卡之前领码）。走 assigned 通道——成功留在 using、提链失败自动退回，
+    和内部领码完全同款；不会像显式 promo_code 那样在提链时就被记成 used。
+
+    proxy_candidates：调用方已验过国别的备选出口列表。传入时按序兜底切换
+    （proxy_address 若非空则排在最前），不再重复调 1024proxy，避免首选口
+    刚好断气就把整单拖死。
     """
     token = (token or "").strip()
     if not token:
@@ -578,9 +639,16 @@ def generate_team_checkout_link(
         return {"ok": False, "error": f"国家 {country} 没有内置货币映射，请手动填写货币代码（如 USD）"}
 
     proxy = (proxy_address or "").strip()
-    proxy_candidates: list[str] = []
-    if proxy:
-        proxy_candidates = [proxy]
+    explicit_candidates = [
+        str(p or "").strip() for p in (proxy_candidates or []) if str(p or "").strip()
+    ]
+    resolved_candidates: list[str] = []
+    if explicit_candidates:
+        resolved_candidates = list(dict.fromkeys(
+            ([proxy] if proxy else []) + explicit_candidates
+        ))
+    elif proxy:
+        resolved_candidates = [proxy]
     elif use_1024proxy:
         try:
             # 提链本身很快，但同一条链接着就要拿去支付（登录、填表、
@@ -590,19 +658,23 @@ def generate_team_checkout_link(
                 _mins = int(getattr(_vcc, "VCC_1024PROXY_MINUTES", 0) or 0)
             except Exception:  # noqa: BLE001 - 配置缺失不该挡住提链
                 _mins = 0
-            proxy_candidates = fetch_1024proxy_ips(region=country, num=4,
-                                                   minutes=_mins)
+            resolved_candidates = fetch_1024proxy_ips(region=country, num=4,
+                                                      minutes=_mins)
         except Exception as e:
             return {"ok": False, "error": f"1024proxy 取 IP 失败: {e}"}
     elif provider == "jinmotech":
         return {"ok": False, "error": "jinmotech 方式必须提供代理：请勾选 1024proxy 或填写自定义代理"}
     else:
-        proxy_candidates = [""]
+        resolved_candidates = [""]
 
     assigned = None
+    if isinstance(promo_assigned, dict) and promo_assigned.get("id"):
+        assigned = promo_assigned
     promo = (promo_code or "").strip()
     if promo:
         promo = extract_clean_promo_code(promo)
+    elif assigned:
+        promo = extract_clean_promo_code(str(assigned.get("code") or ""))
     else:
         assigned = claim_next_promo_code(account_id, account_email)
         if assigned:
@@ -611,9 +683,9 @@ def generate_team_checkout_link(
 
     url = data = None
     err_msg = ""
-    used_proxy = proxy_candidates[0] if proxy_candidates else ""
-    per_attempt_timeout = 18 if len(proxy_candidates) > 1 else timeout
-    for idx, cand in enumerate(proxy_candidates, 1):
+    used_proxy = resolved_candidates[0] if resolved_candidates else ""
+    per_attempt_timeout = 18 if len(resolved_candidates) > 1 else timeout
+    for idx, cand in enumerate(resolved_candidates, 1):
         used_proxy = cand
         try:
             if provider == "native":
@@ -626,9 +698,15 @@ def generate_team_checkout_link(
             break
         low_err = (err_msg or "").lower()
         retryable = any(k in low_err for k in ("timeout", "timed out", "connectionerror", "proxy", "cloudflare", "html", "curl: (7)", "curl: (28)", "curl: (35)", "curl: (56)"))
-        if not retryable or idx >= len(proxy_candidates):
+        if retryable and cand:
+            try:
+                from core.session import invalidate_geo_cache
+                invalidate_geo_cache(cand)
+            except Exception:  # noqa: BLE001
+                pass
+        if not retryable or idx >= len(resolved_candidates):
             break
-        logger.warning("Team 提链第 %s/%s 个代理出口 (%s) 不可用 (%s)，自动切换下一个出口...", idx, len(proxy_candidates), cand, err_msg[:100])
+        logger.warning("Team 提链第 %s/%s 个代理出口 (%s) 不可用 (%s)，自动切换下一个出口...", idx, len(resolved_candidates), cand, err_msg[:100])
 
     meta = {
         "provider": provider,

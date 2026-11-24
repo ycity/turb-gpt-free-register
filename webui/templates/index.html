@@ -1646,7 +1646,7 @@
     #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #teamCheckoutModal:not(.hidden), #promoImportModal:not(.hidden),
     #proxyPoolEditModal:not(.hidden), #proxyPoolImportModal:not(.hidden), #autoPayModal:not(.hidden),
     #mailboxModal:not(.hidden), #manualPayModal:not(.hidden), #cardEditModal:not(.hidden),
-    #teamMembersModal:not(.hidden) {
+    #teamMembersModal:not(.hidden), #seatImportModal:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -2678,6 +2678,10 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopyAllTokensV2" title="复制当前页所有 Token，每个账号一行">复制Token</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAllLinesV2" title="复制当前页所有账号整行，每个账号一行">复制整行</button>
         </div>
+        <div class="acc-v2-btn-group">
+          <span class="acc-v2-btn-group-title">导入</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportSeatV2" title="导入席位账号：每行 邮箱----密码----2FA链接#密钥，导入后从代理池随机分配注册代理">导入席位</button>
+        </div>
       </div>
       <div class="accounts-table-v2-wrap">
         <table class="accounts-table-v2">
@@ -2861,6 +2865,7 @@
           <span style="font-weight:600; color:#303133;">卡池概览：</span>
           <span class="pill status-available" id="cardStatEnabled">启用: 0</span>
           <span class="pill status-used" id="cardStatDisabled">停用: 0</span>
+          <span class="pill status-running" id="cardStatVcc">VCC: 0</span>
           <span style="color:#909399; font-size:12px;">总计: <span id="cardStatTotal">0</span></span>
         </div>
         <div style="display:flex; gap:8px;">
@@ -3136,6 +3141,36 @@
       <div class="banner warn">换绑成功后当前 access_token 会失效并被清空，系统会立即使用新邮箱自动查活并刷新 AT。原邮箱会保留在账号记录中。</div>
     </div>
     <div class="outlook-import-foot"><button type="button" class="jobs-tb-btn" id="btnCancelEmailChangeV2">取消</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitEmailChangeV2">开始换绑</button></div>
+  </div>
+</div>
+<div id="seatImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="seatImportTitle">
+  <div class="outlook-import-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="seatImportTitle">导入席位账号</h3>
+        <p>每行一个账号：邮箱----密码----https://xxx/2FA#密钥；分隔符兼容 ---- 与 ====。第 3 段 2FA 支持“链接#密钥”“2FA:密钥”或裸密钥，可省略。导入后即出现在账号页，可查活/查套餐/批量补跑。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseSeatImport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="outlook-import-result" id="seatImportResultV2"></div>
+      <label class="outlook-import-check">
+        <input id="seatAssignProxyV2" type="checkbox" checked>
+        <span>导入后从代理池随机分配注册代理（写入账号的 proxy_used；代理池为空则不分配）</span>
+      </label>
+      <label class="outlook-import-check">
+        <input id="seatAutoWarmupV2" type="checkbox" checked>
+        <span>导入后自动登录获取 Token 并测席位；检测到单席位会自动换绑 2FA（卖家密钥→本地新密钥，旧密钥自动备份）。同一注册代理串行执行，不同代理并行，进度见各账号“查活”状态</span>
+      </label>
+      <label class="outlook-import-field">
+        <span>席位账号列表</span>
+        <textarea id="seatImportTextV2" placeholder="email@example.com----password----https://akmoz.com/2FA#PBEJE22T3KDQZE3T4LSL3IJNZ2XGF5RG"></textarea>
+      </label>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelSeatImport">取消</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitSeatImport">导入</button>
+    </div>
   </div>
 </div>
 <div class="body hidden" id="logPanel">
@@ -4173,7 +4208,8 @@ function updateModalScrollLock() {
     || !$('#proxyPoolImportModal').classList.contains('hidden')
     || !$('#manualPayModal').classList.contains('hidden')
     || !$('#cardEditModal').classList.contains('hidden')
-    || !$('#teamMembersModal').classList.contains('hidden');
+    || !$('#teamMembersModal').classList.contains('hidden')
+    || !$('#seatImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -4997,6 +5033,17 @@ let CUSTOM_CARDS = [];
 
 async function loadCustomCards() {
   const wrap = $('#cardsTableWrap');
+  // VCC 托管卡：只读展示（使用次数/黑名单来自自动订阅调度器）。
+  // VCC 接口挂了不挡自定义卡表，单独给一行提示。
+  let vccCards = null;
+  try {
+    const res2 = await api('/api/pay/cards');
+    vccCards = (res2.cards || []).filter(c => c.source === 'vcc');
+    // 黑名单的沉底，其余按自动订阅使用次数降序：最常用和被拉黑的一眼看到
+    vccCards.sort((a, b) =>
+      ((a.auto_sub_blacklist ? 1 : 0) - (b.auto_sub_blacklist ? 1 : 0))
+      || ((b.auto_sub_used || 0) - (a.auto_sub_used || 0)));
+  } catch (e) { /* VCC 不可用时 vccCards 保持 null */ }
   try {
     const res = await api('/api/custom-cards');
     CUSTOM_CARDS = res.cards || [];
@@ -5008,9 +5055,37 @@ async function loadCustomCards() {
   $('#cardStatEnabled').textContent = `启用: ${on}`;
   $('#cardStatDisabled').textContent = `停用: ${CUSTOM_CARDS.length - on}`;
   $('#cardStatTotal').textContent = CUSTOM_CARDS.length;
+  $('#cardStatVcc').textContent = `VCC: ${vccCards ? vccCards.length : '?'}`;
 
+  const parts = [];
+  if (vccCards === null) {
+    parts.push('<div class="proxy-pool-v2-empty">VCC 卡列表拉取失败（VCC 接口不可用）。</div>');
+  } else if (!vccCards.length) {
+    parts.push('<div class="proxy-pool-v2-empty">VCC 接口没有返回任何卡。</div>');
+  } else {
+    const vccRows = vccCards.map(c => {
+      const used = c.auto_sub_used ? `用过 ${c.auto_sub_used} 次` : '未用过';
+      const bl = c.auto_sub_blacklist
+        ? '<span class="pill status-failed">黑名单</span>'
+        : '<span style="color:#c0c4cc; font-size:12px;">—</span>';
+      return `<tr>
+        <td class="mono">${esc(c.mask)}</td>
+        <td>${esc(c.holder_name || '-')}</td>
+        <td>${esc(c.currency || 'USD')} ${Number(c.balance).toFixed(2)}</td>
+        <td><span class="pill ${c.usable ? 'status-available' : 'status-used'}">${esc((c.status || '-').toUpperCase())}</span></td>
+        <td>${esc(used)}</td>
+        <td>${bl}</td>
+      </tr>`;
+    }).join('');
+    parts.push(`<div style="font-weight:600; color:#303133; margin:2px 0 8px;">VCC 托管卡 <span style="font-weight:400; color:#909399; font-size:12px;">（使用次数 = 自动订阅实际发起支付的次数）</span></div>
+      <table class="jobs-table-v2">
+      <thead><tr>
+        <th>卡号</th><th>持卡人</th><th>余额</th><th>状态</th><th>自动订阅使用</th><th>黑名单</th>
+      </tr></thead><tbody>${vccRows}</tbody></table>`);
+  }
   if (!CUSTOM_CARDS.length) {
-    wrap.innerHTML = '<div class="proxy-pool-v2-empty">还没有自定义卡，点右上角「添加银行卡」登记一张。</div>';
+    parts.push('<div class="proxy-pool-v2-empty" style="margin-top:16px;">还没有自定义卡，点右上角「添加银行卡」登记一张。</div>');
+    wrap.innerHTML = parts.join('');
     return;
   }
   const rows = CUSTOM_CARDS.map(c => {
@@ -5032,11 +5107,13 @@ async function loadCustomCards() {
       </td>
     </tr>`;
   }).join('');
-  wrap.innerHTML = `<table class="jobs-table-v2">
+  parts.push(`<div style="font-weight:600; color:#303133; margin:16px 0 8px;">自有卡</div>
+    <table class="jobs-table-v2">
     <thead><tr>
       <th>卡号</th><th>备注名</th><th>持卡人</th><th>有效期</th>
       <th>余额</th><th>状态</th><th>使用</th><th>操作</th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
+    </tr></thead><tbody>${rows}</tbody></table>`);
+  wrap.innerHTML = parts.join('');
 }
 
 function _cardModalShow(show) {
@@ -8804,6 +8881,7 @@ $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'e
   bind('btnCopySelectedLoginCredentialsV2', copySelectedAccountLoginCredentials);
   bind('btnArchiveSelectedAccountsV2', archiveSelectedAccounts);
   bind('btnDeleteSelectedAccountsV2', deleteSelectedAccounts);
+  bind('btnImportSeatV2', openSeatImportModal);
 })();
 
 // ---------- 邮箱池 ----------
@@ -9065,6 +9143,7 @@ async function onOutlookBodyClick(e) {
   window.addEventListener('scroll', () => closeOutlookV2MoreMenus(), true);
   window.addEventListener('resize', () => closeOutlookV2MoreMenus());
   bindOutlookImportModal();
+  bindSeatImportModal();
 })();
 
 const IMPORT_SOURCE_LABELS = {
@@ -9191,6 +9270,74 @@ async function doImportOutlook() {
     loadOutlook(); loadAccounts(); loadSummary();
     showToast(`导入完成：新增 ${r.inserted}，跳过 ${r.skipped}`);
     setTimeout(closeOutlookImportModal, 600);
+  } catch(e) {
+    if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
+    else showToast('导入失败: ' + e.message);
+  } finally {
+    if (submitBtn) submitBtn.disabled = false;
+  }
+}
+// ---------- 席位账号导入 ----------
+function openSeatImportModal() {
+  const modal = $('#seatImportModal');
+  if (!modal) return;
+  const result = $('#seatImportResultV2');
+  if (result) result.innerHTML = '';
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  const ta = $('#seatImportTextV2');
+  if (ta) setTimeout(() => ta.focus(), 50);
+}
+function closeSeatImportModal() {
+  const modal = $('#seatImportModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  updateModalScrollLock();
+}
+function bindSeatImportModal() {
+  const modal = $('#seatImportModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  const closeBtn = $('#btnCloseSeatImport');
+  const cancelBtn = $('#btnCancelSeatImport');
+  const submitBtn = $('#btnSubmitSeatImport');
+  if (closeBtn) closeBtn.addEventListener('click', closeSeatImportModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeSeatImportModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeSeatImportModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeSeatImportModal();
+  });
+  if (submitBtn) submitBtn.addEventListener('click', () => doImportSeat());
+}
+async function doImportSeat() {
+  const textEl = $('#seatImportTextV2');
+  const resultEl = $('#seatImportResultV2');
+  const submitBtn = $('#btnSubmitSeatImport');
+  const proxyEl = $('#seatAssignProxyV2');
+  const warmEl = $('#seatAutoWarmupV2');
+  const text = textEl ? textEl.value : '';
+  if (!text.trim()) { showToast('请粘贴席位账号'); return; }
+  if (submitBtn) submitBtn.disabled = true;
+  try {
+    const r = await api('/api/accounts/import-seat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text, assign_proxy: proxyEl ? !!proxyEl.checked : true, auto_warmup: warmEl ? !!warmEl.checked : true }),
+    });
+    const parts = [`解析 ${r.parsed} 行`, `新增 ${r.inserted}`, `跳过 ${r.skipped}`];
+    if (r.assign_proxy) parts.push(`分配代理 ${r.proxied}`);
+    const w = r.warmup;
+    if (w && w.queued) parts.push(`自动预热 ${w.queued} 个（${w.groups} 组代理串行）`);
+    let html = `<div class="banner info">${esc('导入完成：' + parts.join('，'))}</div>`;
+    if (w && w.error) html += `<div class="banner warn">自动预热入队失败：${esc(w.error)}</div>`;
+    if (r.errors && r.errors.length) {
+      html += `<div class="banner warn">有 ${r.errors.length} 行未通过解析：<br>${r.errors.slice(0, 5).map(err => esc(`${err.reason}：${err.line}`)).join('<br>')}</div>`;
+    }
+    if (resultEl) resultEl.innerHTML = html;
+    if (textEl && r.inserted > 0) textEl.value = '';
+    loadAccounts(); loadSummary();
+    showToast(`导入完成：新增 ${r.inserted}，跳过 ${r.skipped}`);
+    if (r.inserted > 0) setTimeout(closeSeatImportModal, 800);
   } catch(e) {
     if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
     else showToast('导入失败: ' + e.message);

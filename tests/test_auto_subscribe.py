@@ -293,17 +293,27 @@ class DeadCandidateRetryTest(unittest.TestCase):
         self.assertFalse(r["acted"])
         self.assertEqual(mark_dead.call_count, 3)
         self.assertEqual(start.call_count, 3)
-        set_meta.assert_called_once()
+        slot_writes = [c for c in set_meta.call_args_list
+                       if c.args and c.args[0] == sched._DONE_SLOT_KEY]
+        self.assertEqual(len(slot_writes), 1, "全死号要占用整点")
 
     def test_non_dead_error_stops_without_consuming_slot(self):
-        """代理超时/支付失败这类错误：换号大概率同样失败，停下且不占整点。"""
+        """环境类失败要轮转换号继续试，整轮没成不占整点。
+
+        尝试时间戳（auto_sub_last_attempt）和游标（auto_sub_cursor_id）
+        允许写入；整点键（auto_sub_last_slot）绝不能写。
+        """
         r, start, set_meta, mark_dead = self._run(
             lambda acc_id: {"ok": False, "error": "拿不到 EG 出口，无法保证结算国家一致"},
             self._cands(104, 106))
         self.assertFalse(r["ok"])
-        start.assert_called_once_with(104)
+        self.assertTrue(r["acted"])
+        # 环境失败换下一个号接着试，不是停在第一个
+        self.assertEqual([c.args[0] for c in start.call_args_list], [104, 106])
         mark_dead.assert_not_called()
-        set_meta.assert_not_called()
+        slot_writes = [c for c in set_meta.call_args_list
+                       if c.args and c.args[0] == sched._DONE_SLOT_KEY]
+        self.assertEqual(slot_writes, [], "失败后不该占用整点")
 
     def test_non_dead_error_does_not_mark_account_dead(self):
         """金额闸门拦截不是账号死亡，绝不能把好号标成废号。"""
@@ -689,7 +699,7 @@ class SafetyTest(unittest.TestCase):
         """出口国家必须和结算货币同区，否则 Stripe 拒付。"""
         import inspect
         src = inspect.getsource(sched.start_subscription)
-        self.assertIn("_first_proxy_in_country", src)
+        self.assertIn("_verified_proxies_in_country", src)
 
     def test_does_not_mutate_global_cfg(self):
         """钉卡号时不能改全局配置，会影响别的流程。"""
@@ -761,6 +771,329 @@ class CardAddressTest(unittest.TestCase):
         i = src.index("fetch_card_address")
         seg = src[max(0, i - 900):i]
         self.assertIn("is_custom_id", seg)
+
+
+class LoginProxyRotationTest(unittest.TestCase):
+    """登录失败换下一个出口 IP，而不是同一个出口反复撞。
+
+    2026-11-19 16:00 事故：EG 出口被风控，4 轮登录全用同一个代理，
+    只换设备指纹没用，403 全灭、整点静默烧掉。
+    """
+
+    def _patch_login_chain(self, preflight):
+        return [
+            patch("core.db.get_account_by_email", return_value={}),
+            patch("core.account_liveness._network_preflight_with_retry",
+                  side_effect=preflight),
+            patch("core.account_liveness._login_via_password_or_otp"),
+            patch("core.openai_auth.follow_authorize"),
+            patch("core.session.close_browser_session"),
+        ]
+
+    def test_rotates_to_next_proxy(self):
+        """第一个出口 403 要换第二个，第二个成功就返回。"""
+        from core import vcc_pay_session as ps
+        calls = []
+
+        def preflight(email, proxy, fingerprint_state=None):
+            calls.append(proxy)
+            if proxy.endswith("7004"):
+                raise RuntimeError("HTTP Error 403")
+            sess = MagicMock()
+            sess.session.cookies.get_dict.return_value = {
+                "__Secure-next-auth.session-token": "tok"}
+            return sess, "https://auth.openai.com/authorize"
+
+        patches = self._patch_login_chain(preflight)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        cookies = ps._login_cookies_for(
+            "a@e.test", ["http://1.1.1.1:7004", "http://2.2.2.2:7005"],
+            gap=0)
+        self.assertEqual(calls, ["http://1.1.1.1:7004", "http://2.2.2.2:7005"])
+        self.assertTrue(any("session-token" in c["name"] for c in cookies))
+
+    def test_refetch_when_pool_exhausted(self):
+        """池子耗尽要重拉，重拉到的新出口能接上。"""
+        from core import vcc_pay_session as ps
+        calls = []
+
+        def preflight(email, proxy, fingerprint_state=None):
+            calls.append(proxy)
+            if proxy.endswith("7004"):
+                raise RuntimeError("HTTP Error 403")
+            sess = MagicMock()
+            sess.session.cookies.get_dict.return_value = {
+                "__Secure-next-auth.session-token": "tok"}
+            return sess, "https://auth.openai.com/authorize"
+
+        patches = self._patch_login_chain(preflight)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        refetch = MagicMock(return_value=["http://3.3.3.3:7006"])
+        cookies = ps._login_cookies_for(
+            "a@e.test", ["http://1.1.1.1:7004"], gap=0, refetch=refetch)
+        refetch.assert_called_once_with()
+        self.assertEqual(calls, ["http://1.1.1.1:7004", "http://3.3.3.3:7006"])
+        self.assertTrue(cookies)
+
+    def test_single_string_proxy_still_works(self):
+        """旧调用只传一个字符串，也该按单出口池子跑通。"""
+        from core import vcc_pay_session as ps
+
+        def preflight(email, proxy, fingerprint_state=None):
+            sess = MagicMock()
+            sess.session.cookies.get_dict.return_value = {
+                "__Secure-next-auth.session-token": "tok"}
+            return sess, "https://auth.openai.com/authorize"
+
+        patches = self._patch_login_chain(preflight)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        cookies = ps._login_cookies_for("a@e.test", "http://1.1.1.1:7004",
+                                        gap=0, rounds=1)
+        self.assertTrue(cookies)
+
+    def test_no_refetch_no_infinite_loop(self):
+        """没有 refetch 回调时，池子空了就停，不能空转。"""
+        from core import vcc_pay_session as ps
+
+        def preflight(email, proxy, fingerprint_state=None):
+            raise RuntimeError("HTTP Error 403")
+
+        patches = self._patch_login_chain(preflight)
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        got = ps._login_cookies_for("a@e.test", ["http://1.1.1.1:7004"],
+                                    gap=0, rounds=8)
+        self.assertEqual(got, [])
+
+
+class RetryIntervalTest(unittest.TestCase):
+    """支付失败不占整点后，必须有最小重试间隔，否则每分钟空转一次。"""
+
+    def _cfg(self, over=None):
+        d = {"AUTO_SUBSCRIBE_ENABLED": True, "AUTO_SUBSCRIBE_HOURS": "10,12",
+             "AUTO_SUBSCRIBE_RETRY_INTERVAL_MIN": 15}
+        d.update(over or {})
+        return lambda n, dd: d.get(n, dd)
+
+    def _meta(self, attempt_age_sec):
+        import time as _time
+        ts = str(_time.time() - attempt_age_sec) if attempt_age_sec is not None else ""
+        return lambda k: ts if k == "auto_sub_last_attempt" else ""
+
+    def test_recent_attempt_skipped(self):
+        import time as _time
+        now = datetime.datetime(2026, 11, 19, 12, 0, tzinfo=_TZ)
+        with patch.object(sched, "_cfg", self._cfg()), \
+             patch.object(sched, "_now_sgt", return_value=now), \
+             patch("core.db.get_meta", side_effect=self._meta(60)), \
+             patch.object(sched, "find_candidates") as fc:
+            r = sched.run_once()
+        self.assertFalse(r["acted"])
+        self.assertIn("间隔", r["reason"])
+        fc.assert_not_called()
+
+    def test_stale_attempt_proceeds(self):
+        """过了间隔就该正常发起，不能把重试也挡死。"""
+        import time as _time
+        now = datetime.datetime(2026, 11, 19, 12, 0, tzinfo=_TZ)
+        start = MagicMock(return_value={"ok": True})
+        with patch.object(sched, "_cfg", self._cfg()), \
+             patch.object(sched, "_now_sgt", return_value=now), \
+             patch("core.db.get_meta", side_effect=self._meta(16 * 60)), \
+             patch("core.db.set_meta"), \
+             patch.object(sched, "_busy", return_value=""), \
+             patch.object(sched, "find_candidates",
+                          return_value=[{"id": 1, "email": "a@e.test"}]), \
+             patch.object(sched, "start_subscription", start):
+            r = sched.run_once()
+        self.assertTrue(r["acted"])
+        start.assert_called_once_with(1)
+
+    def test_force_ignores_interval(self):
+        """手动触发不受间隔限制。"""
+        now = datetime.datetime(2026, 11, 19, 3, 0, tzinfo=_TZ)
+        with patch.object(sched, "_cfg", self._cfg()), \
+             patch.object(sched, "_now_sgt", return_value=now), \
+             patch("core.db.get_meta", side_effect=self._meta(10)), \
+             patch.object(sched, "_busy", return_value=""), \
+             patch.object(sched, "find_candidates", return_value=[]):
+            r = sched.run_once(force=True)
+        self.assertNotIn("间隔", r["reason"])
+
+    def test_attempt_timestamp_written(self):
+        """发起前要落尝试时间戳，闸门才有依据。"""
+        import inspect
+        src = inspect.getsource(sched.run_once)
+        self.assertIn("set_meta(_ATTEMPT_KEY", src)
+
+
+class CursorRotationTest(unittest.TestCase):
+    """轮转游标：记住上次尝试位置，成功/失败都推进，到尾回绕。
+
+    需求（2026-11-19）：环境失败后 15 分钟重试要换下一个号，不能死磕
+    队首；下个整点从"上次成功 +1"开始；已经是最后一个单席位号时回到
+    第一个未订阅的单席位号。+1 只在单席位候选列表内算（列表本身已
+    过滤掉 2 席位账号），不按全量账号表偏移。
+    """
+
+    def _cands(self, *ids):
+        return [{"id": i, "email": "a%d@e.test" % i} for i in ids]
+
+    def _meta(self, cursor_id):
+        def getter(key):
+            if key == sched._CURSOR_KEY:
+                return str(cursor_id)
+            return ""
+        return getter
+
+    def _run(self, *, cursor, cands, start_side_effect):
+        import time as _time
+        now = datetime.datetime(2026, 11, 19, 12, 0, tzinfo=_TZ)
+        start = MagicMock(side_effect=start_side_effect)
+        with patch.object(sched, "_cfg",
+                          lambda n, dd: {"AUTO_SUBSCRIBE_ENABLED": True,
+                                         "AUTO_SUBSCRIBE_HOURS": "10,12"}.get(n, dd)), \
+             patch.object(sched, "_now_sgt", return_value=now), \
+             patch("core.db.get_meta", side_effect=self._meta(cursor)), \
+             patch("core.db.set_meta") as set_meta, \
+             patch.object(sched, "_busy", return_value=""), \
+             patch.object(sched, "find_candidates", return_value=cands), \
+             patch.object(sched, "start_subscription", start), \
+             patch.object(sched, "_mark_account_dead"):
+            r = sched.run_once()
+        return r, start, set_meta
+
+    def test_cursor_picks_next_candidate(self):
+        """游标在 104：跳过 104，从 106 开始。"""
+        r, start, _ = self._run(
+            cursor=104, cands=self._cands(104, 106, 108),
+            start_side_effect=lambda acc_id: {"ok": True})
+        start.assert_called_once_with(106)
+        self.assertTrue(r["ok"])
+
+    def test_cursor_wraps_to_first(self):
+        """游标已是最后一个单席位号：回到第一个未订阅的继续。"""
+        r, start, _ = self._run(
+            cursor=155, cands=self._cands(129, 149, 155),
+            start_side_effect=lambda acc_id: {"ok": True})
+        start.assert_called_once_with(129)
+        self.assertTrue(r["ok"])
+
+    def test_no_cursor_starts_at_first(self):
+        """没有游标（首次部署）：从第一个候选开始。"""
+        r, start, _ = self._run(
+            cursor=0, cands=self._cands(129, 149),
+            start_side_effect=lambda acc_id: {"ok": True})
+        start.assert_called_once_with(129)
+
+    def test_success_sets_cursor(self):
+        """成功后游标推进到该账号，下个整点从它 +1 开始。"""
+        r, start, set_meta = self._run(
+            cursor=0, cands=self._cands(104, 106),
+            start_side_effect=lambda acc_id: {"ok": True} if acc_id == 106
+            else {"ok": False, "error": "account_deactivated"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account_id"], 106)
+        cursor_writes = [c.args for c in set_meta.call_args_list
+                         if c.args and c.args[0] == sched._CURSOR_KEY]
+        self.assertEqual(cursor_writes, [(sched._CURSOR_KEY, "106")])
+
+    def test_failure_advances_cursor(self):
+        """环境失败也推游标：15 分钟后的重试从下一个号起，不再死磕队首。"""
+        r, start, set_meta = self._run(
+            cursor=0, cands=self._cands(104, 106, 108),
+            start_side_effect=lambda acc_id: {
+                "ok": False, "error": "支付会话失败：登录不成"})
+        self.assertFalse(r["ok"])
+        self.assertEqual([c.args[0] for c in start.call_args_list],
+                         [104, 106, 108])
+        cursor_writes = [c.args for c in set_meta.call_args_list
+                         if c.args and c.args[0] == sched._CURSOR_KEY]
+        self.assertEqual(cursor_writes, [(sched._CURSOR_KEY, "104"),
+                                         (sched._CURSOR_KEY, "106"),
+                                         (sched._CURSOR_KEY, "108")])
+
+    def test_three_env_failures_give_up_round(self):
+        """连续 3 个环境失败：放弃本轮，不占整点。"""
+        r, start, set_meta = self._run(
+            cursor=0, cands=self._cands(1, 2, 3, 4),
+            start_side_effect=lambda acc_id: {
+                "ok": False, "error": "出口被风控"})
+        self.assertEqual(start.call_count, 3, "连败 3 个就该停，不烧第 4 个")
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["acted"])
+        slot_writes = [c for c in set_meta.call_args_list
+                       if c.args and c.args[0] == sched._DONE_SLOT_KEY]
+        self.assertEqual(slot_writes, [], "环境失败不占整点")
+
+    def test_two_env_failures_exhaust_small_pool(self):
+        """候选不足 3 个且全环境失败：轮完就停，同样不占整点。"""
+        r, start, set_meta = self._run(
+            cursor=0, cands=self._cands(1, 2),
+            start_side_effect=lambda acc_id: {
+                "ok": False, "error": "出口被风控"})
+        self.assertEqual(start.call_count, 2)
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["acted"])
+        slot_writes = [c for c in set_meta.call_args_list
+                       if c.args and c.args[0] == sched._DONE_SLOT_KEY]
+        self.assertEqual(slot_writes, [], "环境失败不占整点")
+
+    def test_dead_failures_dont_advance_cursor(self):
+        """死号标废即从候选消失，不推游标也不占 3 次环境失败额度。"""
+        def side(acc_id):
+            if acc_id == 104:
+                return {"ok": False, "error": "token_revoked"}
+            return {"ok": True}
+
+        r, start, set_meta = self._run(
+            cursor=0, cands=self._cands(104, 106),
+            start_side_effect=side)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["account_id"], 106)
+        cursor_writes = [c.args for c in set_meta.call_args_list
+                         if c.args and c.args[0] == sched._CURSOR_KEY]
+        self.assertEqual(cursor_writes, [(sched._CURSOR_KEY, "106")],
+                         "游标只记成功位，不记死号")
+
+
+class PayResultFeedbackTest(unittest.TestCase):
+    """支付结果必须回流调度器：同步等终态，失败换来的信息要能用上。"""
+
+    def test_session_receives_proxy_pool(self):
+        import inspect
+        src = inspect.getsource(sched.start_subscription)
+        self.assertIn("extra_proxies=", src)
+        self.assertIn("refetch_proxies=", src)
+
+    def test_waits_for_terminal_state(self):
+        import inspect
+        src = inspect.getsource(sched.start_subscription)
+        self.assertIn("ST_FAILED", src)
+        self.assertIn("sess.state not in terminal", src)
+
+    def test_failure_maps_to_not_ok(self):
+        """会话终态 failed -> start_subscription 返回 ok=False，
+        这样 run_once 的"非死号错误，本轮停止"分支才真正可达。"""
+        import inspect
+        src = inspect.getsource(sched.start_subscription)
+        self.assertIn("sess.state == ST_DONE", src)
+        self.assertIn('"error": "支付会话失败', src)
+
+    def test_all_verified_proxies_kept(self):
+        """出口验证要把全部匹配的都留下，不能只取第一个。"""
+        import inspect
+        src = inspect.getsource(sched._verified_proxies_in_country)
+        self.assertIn("out.append", src)
+        start_src = inspect.getsource(sched.start_subscription)
+        self.assertIn("extra_proxies=pay_proxies[1:]", start_src)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,17 @@ AUTO_SUBSCRIBE_CARD_BLACKLIST = "5931,8361"
 # 调度线程多久醒一次（秒）。整点判断精确到小时，一分钟足够。
 AUTO_SUBSCRIBE_POLL_INTERVAL = 60.0
 
+# 支付失败后的最小重试间隔（分钟）。
+#
+# 失败（如出口被风控）不再占用整点，调度线程每分钟都醒着；没有这道闸
+# 就等于每分钟重新发起一次——每次都要拉出口、提链、登录，白烧流量。
+# 15 分钟 ≈ 熔断冷却时长，风控解除通常也在这个量级。
+AUTO_SUBSCRIBE_RETRY_INTERVAL_MIN = 15
+
+# 同步等支付结果的上限（秒）。各等待环节自身都有超时（会话级 900s），
+# 这里只是兜底：超过就按"已发起、结果未知"返回，不无限阻塞调度线程。
+AUTO_SUBSCRIBE_PAY_WAIT_SEC = 1800.0
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'AUTO_SUBSCRIBE_ENABLED': 'bool',
@@ -64,4 +75,6 @@ apply_env_overrides(globals(), {
     'AUTO_SUBSCRIBE_WORKSPACE': 'str',
     'AUTO_SUBSCRIBE_CARD_BLACKLIST': 'str',
     'AUTO_SUBSCRIBE_POLL_INTERVAL': 'float',
+    'AUTO_SUBSCRIBE_RETRY_INTERVAL_MIN': 'int',
+    'AUTO_SUBSCRIBE_PAY_WAIT_SEC': 'float',
 })

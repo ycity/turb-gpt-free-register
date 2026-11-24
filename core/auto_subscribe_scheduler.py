@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import logging
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,20 @@ _LAST: dict = {"reason": "尚未开始检查"}
 
 # 调度判重用：记下已经处理过的整点，避免同一个点被触发多次
 _DONE_SLOT_KEY = "auto_sub_last_slot"
+
+# 上次尝试的时间戳。支付失败后整点不再被占用（环境类错误换号也没用），
+# 调度线程每分钟都会看到"整点未处理"，没有最小间隔就等于每分钟重试一次：
+# 每次尝试都要拉出口、提链、登录，烧代理流量也烧时间。
+_ATTEMPT_KEY = "auto_sub_last_attempt"
+
+# 轮转游标：上次尝试过的账号 id（成功/环境失败都推进）。
+# 下次执行从候选列表里第一个 id 大于游标的账号开始，到尾回绕到第一个。
+# 候选列表本身只含"单席位且未订阅"的号，所以在列表内 +1 天然不会
+# 落进 2 席位账号——不要拿全量账号表算偏移。
+_CURSOR_KEY = "auto_sub_cursor_id"
+
+# 一轮里连续多少个候选环境类失败就放弃本轮（死号不计入：标废即消失）。
+_MAX_ENV_FAILURES = 3
 
 _TZ = datetime.timezone(datetime.timedelta(hours=8))   # 新加坡 UTC+8
 
@@ -207,6 +222,20 @@ def run_once(*, force: bool = False) -> dict:
         from core import db
         if str(db.get_meta(_DONE_SLOT_KEY) or "") == slot:
             return {"ok": True, "acted": False, "reason": "本整点已处理过"}
+        # 失败后的最小重试间隔。支付失败不再占用整点（环境类错误换号也没用），
+        # 调度线程每分钟都会看到"整点未处理"，没有这道闸就等于每分钟重试一次，
+        # 每次都要拉出口、提链、登录，白烧代理流量。
+        try:
+            last_ts = float(db.get_meta(_ATTEMPT_KEY) or 0)
+        except (TypeError, ValueError):
+            last_ts = 0.0
+        wait_min = float(_cfg("AUTO_SUBSCRIBE_RETRY_INTERVAL_MIN", 15) or 0)
+        if last_ts > 0 and wait_min > 0:
+            elapsed_min = (time.time() - last_ts) / 60.0
+            if elapsed_min < wait_min:
+                return {"ok": True, "acted": False,
+                        "reason": "距上次尝试仅 %.0f 分钟，间隔 %d 分钟后再试"
+                                  % (elapsed_min, int(wait_min))}
 
     busy = _busy()
     if busy:
@@ -219,19 +248,69 @@ def run_once(*, force: bool = False) -> dict:
             db.set_meta(_DONE_SLOT_KEY, slot)
         return {"ok": True, "acted": False, "reason": "没有待订阅的单席位账号"}
 
+    # ---- 优惠码轮级前置闸门：池子空了整轮直接跳过 ----
+    #
+    # 2026-11-20 补跑事故：最后一个码被 #162 领走后卡在 using
+    # （reclaim_stale_promo_codes 写了但从未被调用），#163/#165 领不到码
+    # 仍各跑一整轮流程，最后被金额闸门拦下（无码 = 原价，超八折上限），
+    # 3 连败烧完本轮。
+    # 轮级先回收卡在 using 的陈旧码（上次运行异常退出留下的），再数
+    # unused：没有码整轮直接跳过，按 15 分钟重试间隔等新码入库。
+    # 闸门自身出问题不能卡死订阅——统计失败就放行，候选级闸门兜底。
+    try:
+        from core.team_checkout_service import (get_promo_stats,
+                                                reclaim_stale_promo_codes)
+        reclaimed = reclaim_stale_promo_codes()
+        if reclaimed.get("count"):
+            logger.warning("[自动订阅] 回收 %d 个未完成支付的陈旧优惠码：%s",
+                           reclaimed.get("count"),
+                           ",".join(reclaimed.get("freed") or []))
+        if not int(get_promo_stats().get("unused") or 0):
+            if not force:
+                from core import db
+                db.set_meta(_ATTEMPT_KEY, str(time.time()))
+            logger.error("[自动订阅] 优惠码池没有可用码，本轮跳过"
+                         "（导入新码后自动恢复）")
+            return {"ok": False, "acted": False,
+                    "reason": "优惠码池没有可用码（轮级前置闸门）", "tried": []}
+    except Exception:  # noqa: BLE001 - 闸门自身故障不能卡死订阅
+        logger.warning("[自动订阅] 优惠码轮级闸门异常，跳过检查", exc_info=True)
+
     # 按顺序逐个尝试：遇到死号就标记为废号并换下一个，其余错误直接停。
     #
     # 旧逻辑只试 cands[0]，失败就放弃且立刻占用整点。#104 那种"token 被吊销
     # 但没被标记"的号会稳居队首，让每个整点都在它身上撞死（2026-11-18 的
     # 18:00 和 20:00 就这么废掉的）。现在死号会被踢出队列，后面的活号能轮到。
+    if not force:
+        from core import db
+        db.set_meta(_ATTEMPT_KEY, str(time.time()))
     tried: list[dict] = []
     last_res: dict = {}
-    for idx, acc in enumerate(cands):
+    from core import db
+    if not force:
+        db.set_meta(_ATTEMPT_KEY, str(time.time()))
+
+    # ---- 轮转起点：游标（上次尝试过的账号）之后，到尾回绕到第一个 ----
+    try:
+        cursor = int(db.get_meta(_CURSOR_KEY) or 0)
+    except (TypeError, ValueError):
+        cursor = 0
+    start_idx = len(cands)
+    for i, acc in enumerate(cands):
+        if int(acc.get("id") or 0) > cursor:
+            start_idx = i
+            break
+    if start_idx == len(cands):
+        start_idx = 0
+    ordered = cands[start_idx:] + cands[:start_idx]
+
+    env_fail_streak = 0
+    for idx, acc in enumerate(ordered):
         acc_id = int(acc.get("id") or 0)
         email = str(acc.get("email") or "")
 
         logger.warning("[自动订阅] 开始为账号 #%s %s 订阅 Team（候选 %d 个，第 %d 个）",
-                       acc_id, email, len(cands), idx + 1)
+                       acc_id, email, len(ordered), idx + 1)
         try:
             res = start_subscription(acc_id)
         except Exception as exc:  # noqa: BLE001
@@ -245,30 +324,46 @@ def run_once(*, force: bool = False) -> dict:
 
         if res.get("ok"):
             if not force:
-                from core import db
                 db.set_meta(_DONE_SLOT_KEY, slot)
+            # 成功也推游标：下个整点从"本次成功 +1"开始，不重复骚扰刚订完的号
+            db.set_meta(_CURSOR_KEY, str(acc_id))
             return {"ok": True, "acted": True, "account_id": acc_id, "email": email,
                     "reason": message, "session_id": res.get("session_id") or "",
                     "tried": tried}
 
         if _is_dead_account_error(message):
+            # 死号：标记移出队列即可。不推进游标——它已从后续候选里消失，
+            # 推了反而让"成功位 +1"的语义错位。
             _mark_account_dead(acc_id, message)
             continue
 
-        # 非死号错误：换号大概率同样失败，停下等下一轮，且不占用整点，
-        # 让下一次调度仍有机会重试。
-        logger.error("[自动订阅] 账号 #%s 订阅失败（非死号错误，本轮停止）：%s",
-                     acc_id, message)
-        return {"ok": False, "acted": True, "account_id": acc_id, "email": email,
-                "reason": message, "tried": tried}
+        # 环境/风控类失败：推游标换下一个号接着试（15 分钟后的重试
+        # 就会从新游标起，不再死磕同一个号）；连续 3 个都失败才放弃
+        # 本轮，不占用整点。
+        db.set_meta(_CURSOR_KEY, str(acc_id))
+        env_fail_streak += 1
+        if env_fail_streak >= _MAX_ENV_FAILURES:
+            logger.error("[自动订阅] 连续 %d 个候选失败（最后：账号 #%s %s），"
+                         "本轮放弃、不占整点：%s",
+                         env_fail_streak, acc_id, email, message)
+            return {"ok": False, "acted": True, "account_id": acc_id, "email": email,
+                    "reason": message, "tried": tried}
+        logger.warning("[自动订阅] 账号 #%s 订阅失败（环境类），换下一个候选：%s",
+                       acc_id, message)
 
-    # 所有候选都试过且都是死号：占用整点，避免本小时内反复空转。
-    if not force:
-        from core import db
-        db.set_meta(_DONE_SLOT_KEY, slot)
-    logger.error("[自动订阅] 全部 %d 个候选账号都已失效，本轮无可用账号", len(cands))
-    return {"ok": False, "acted": False,
-            "reason": "候选账号全部失效（均为死号）", "tried": tried}
+    # 循环走完还没成功：全是死号则占用整点防空转；候选不足 3 个但全是
+    # 环境失败时，按环境失败同口径不占整点。
+    if env_fail_streak == 0:
+        if not force:
+            db.set_meta(_DONE_SLOT_KEY, slot)
+        logger.error("[自动订阅] 全部 %d 个候选账号都已失效，本轮无可用账号", len(cands))
+        return {"ok": False, "acted": False,
+                "reason": "候选账号全部失效（均为死号）", "tried": tried}
+    logger.error("[自动订阅] %d 个候选全部环境类失败，本轮放弃、不占整点",
+                 len(ordered))
+    return {"ok": False, "acted": True,
+            "reason": str(last_res.get("message") or last_res.get("error") or ""),
+            "tried": tried}
 
 
 def _card_blacklist() -> set[str]:
@@ -386,14 +481,63 @@ def _addr_is_payable(client, card: dict) -> bool:
     return True
 
 
+def _verified_proxies_in_country(candidates, want_cc: str) -> list[str]:
+    """留下真正落在 want_cc 的出口，全部返回（首选在前）。
+
+    1024proxy 按地区取，但偶尔会给到别的国家；出口国家和结算货币
+    不一致会被 Stripe 直接拒，所以必须逐个实测真实出口再用。
+    （与 webui.app._first_proxy_in_country 同款探测，但一个不扔：
+    2026-11-19 16:00 登录被风控 403 全灭，才发现原来只留第一个、
+    没有备胎可换。）
+    """
+    import uuid as _uuid
+
+    from config.proxy import normalize_proxy_url
+    from core import session as _session_mod
+    from core.session import BrowserSession
+
+    want = str(want_cc or "").strip().upper()
+    out: list[str] = []
+    for raw in candidates or []:
+        url = normalize_proxy_url(str(raw or "").strip())
+        if not url:
+            continue
+        env = None
+        try:
+            # 必须绕过内存地理缓存做实时探活：1024proxy 动态端口会在租约内
+            # 断气或漂移到别的国家（2026-11-24 18:00 事故：21048 已超时、
+            # 21050/21052 漂移成 PE/BR，却全部 3ms 命中 2 小时前的 EG 缓存）。
+            if hasattr(_session_mod, "invalidate_geo_cache"):
+                _session_mod.invalidate_geo_cache(url)
+            env = BrowserSession(proxy=url, detect_exit_geo=True,
+                                 fingerprint_seed=f"pay:{_uuid.uuid4()}")
+            geo = env.exit_geo or {}
+            got = str(geo.get("country") or "").strip().upper()
+            if got and (not want or got == want):
+                out.append(url)
+            else:
+                logger.warning("[自动订阅] 1024proxy 出口 %s 在 %s，要的是 %s，跳过",
+                               geo.get("ip") or raw, got or "?", want)
+        except Exception as exc:  # noqa: BLE001 - 验不了的跳过
+            logger.debug("[自动订阅] 验 1024proxy 出口失败 %s: %s", raw, exc)
+        finally:
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:  # noqa: BLE001
+                    pass
+    return out
+
+
 def start_subscription(account_id: int) -> dict:
     """给一个账号走完整订阅流程。
 
     步骤和人在界面上点「订阅Team」一致：
+      0. 先从池里领优惠码（前置闸门：没码直接失败，不烧任何流程）
       1. 随机选一张余额够付的 VCC 卡
       2. 卡内余额不足时自动充值
       3. 按结算国家取 1024proxy 出口（出口国家必须和结算货币同区）
-      4. 生成单席位 Team 长链（优惠码从池里自动分派）
+      4. 生成单席位 Team 长链（用第 0 步领到的码）
       5. 起支付会话；账单地址在会话内按卡号实时查
 
     返回 {ok, session_id, card, error}。
@@ -401,6 +545,8 @@ def start_subscription(account_id: int) -> dict:
     import random
 
     from core import db
+    from core.team_checkout_service import (claim_next_promo_code,
+                                            release_promo_code)
     from core.vcc_client import build_client_from_config
     from core.vcc_funds import InsufficientFunds, ensure_funds, required_usd
 
@@ -412,7 +558,62 @@ def start_subscription(account_id: int) -> dict:
     if not token:
         return {"ok": False, "error": "账号没有 access_token"}
 
-    # ---- 选卡：黑名单之外随机挑一张，余额不足由 ensure_funds 自动充值 ----
+    # ---- 优惠码前置闸门：先领码，再动手 ----
+    #
+    # 2026-11-20 补跑事故：池里最后一个码被上一个失败的候选领走后卡在
+    # using，后面的候选领不到码，却照旧走完选卡、充值、验出口、提链、
+    # 起浏览器、登录、填卡的全流程，最后才被金额闸门拦下——上限 920 按
+    # 八折价算（EGP 1150×0.8），无码就是原价 1150，必然拦。整轮 3 个
+    # 候选约 6 分钟全部白烧。现在没码就在最开始失败，一个字节的代理
+    # 流量都不花。
+    promo_row = claim_next_promo_code(int(account_id), str(acc.get("email") or ""))
+    if not promo_row:
+        return {"ok": False,
+                "error": "优惠码池没有可用码（前置闸门）：金额上限按八折价计，"
+                         "无码必撞闸门，不再空跑流程"}
+
+    def _release_promo(reason: str) -> None:
+        # 只退得回还挂在 using 的码：若支付实际提交成功过，_record_promo
+        # 已把它升成 used，这里自然是 no-op，不会把真消耗的码二次分派。
+        release_promo_code(str(promo_row.get("code") or ""),
+                           "账号 #%s：%s" % (account_id, reason))
+
+    # ---- 出口前置验活：先确认有落在结算国家的活出口，再碰卡和充值 ----
+    #
+    # 2026-11-24 18:00 事故：出口已断气，旧顺序先选卡+自动充 $20 再提链，
+    # 4 轮重试把 6 张卡白充了 $120 才发现出口不通。现在先实测出口，没活口
+    # 直接退码退出；充值放到长链成功、马上起支付会话之前。
+    country = str(_cfg("AUTO_SUBSCRIBE_COUNTRY", "US") or "US").upper()
+    from core.team_checkout_service import COUNTRY_CURRENCY
+    currency = COUNTRY_CURRENCY.get(country, "")
+    if not currency:
+        _release_promo("国家 %s 没有内置货币映射" % country)
+        return {"ok": False, "error": "国家 %s 没有内置货币映射" % country}
+
+    # 验过落在结算国家的出口全留下：提链/登录失败时换下一个出口重试，
+    # 只留一个等于没有备胎（2026-11-19 16:00 的 403 全灭就是这么来的）。
+    def _refetch_pay_proxies() -> list[str]:
+        from core.team_checkout_service import fetch_1024proxy_ips
+        return _verified_proxies_in_country(
+            fetch_1024proxy_ips(
+                country, 6, minutes=int(getattr(cfg, "VCC_1024PROXY_MINUTES", 60))),
+            country)
+
+    pay_proxies: list[str] = []
+    try:
+        from core.team_checkout_service import fetch_1024proxy_ips
+        ips = fetch_1024proxy_ips(
+            country, 6, minutes=int(getattr(cfg, "VCC_1024PROXY_MINUTES", 60)))
+        pay_proxies = _verified_proxies_in_country(ips, country)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[自动订阅] 取 %s 出口失败：%s", country, exc)
+    if not pay_proxies:
+        _release_promo("拿不到 %s 出口" % country)
+        return {"ok": False,
+                "error": "拿不到 %s 出口，无法保证结算国家一致" % country}
+    pay_proxy = pay_proxies[0]
+
+    # ---- 选卡（只读）：黑名单之外均衡挑一张，不在此处划钱充值 ----
     #
     # 不按余额筛卡：卡内不够时会从 VCC 账户划钱过来（和手动订阅同一套逻辑）。
     # 按余额筛会让刚用过的卡长期选不中，失去"分散单卡用量"的意义。
@@ -434,6 +635,7 @@ def start_subscription(account_id: int) -> dict:
         logger.info("[自动订阅] 黑名单跳过 %d 张卡：%s",
                     len(skipped_black), ",".join(sorted(set(skipped_black))))
     if not usable:
+        _release_promo("没有可用的 VCC 卡")
         return {"ok": False,
                 "error": "没有可用的 VCC 卡（黑名单跳过 %d 张）" % len(skipped_black)}
 
@@ -450,6 +652,7 @@ def start_subscription(account_id: int) -> dict:
                 break
             rest = [c for c in rest if c is not pick]
         else:
+            _release_promo("所有卡的账单地址都不可用")
             return {"ok": False,
                     "error": "所有卡的账单地址都不可用（城市/州不匹配或取不到）"}
         card_id = str(pick.get("cardId") or "")
@@ -458,44 +661,17 @@ def start_subscription(account_id: int) -> dict:
     logger.info("[自动订阅] 选中卡 %s（余额 %s，候选 %d 张，需 %.2f USD）",
                 card_mask, pick.get("balance"), len(usable), need)
 
-    # ---- 余额兜底：不够就从账户充 ----
-    try:
-        check = ensure_funds(client, card_id, cfg)
-        if check.recharged:
-            logger.warning("[自动订阅] 已自动充值 %.2f USD 到卡 %s",
-                           check.recharged, card_mask)
-    except InsufficientFunds as exc:
-        return {"ok": False, "error": "余额不足：%s" % exc}
-
-    # ---- 出口：结算国家和出口国家必须同区，否则 Stripe 拒付 ----
-    country = str(_cfg("AUTO_SUBSCRIBE_COUNTRY", "US") or "US").upper()
-    from core.team_checkout_service import COUNTRY_CURRENCY
-    currency = COUNTRY_CURRENCY.get(country, "")
-    if not currency:
-        return {"ok": False, "error": "国家 %s 没有内置货币映射" % country}
-
-    pay_proxy = ""
-    try:
-        from webui.app import _first_proxy_in_country
-        from core.team_checkout_service import fetch_1024proxy_ips
-        ips = fetch_1024proxy_ips(
-            country, 4, minutes=int(getattr(cfg, "VCC_1024PROXY_MINUTES", 60)))
-        pay_proxy = _first_proxy_in_country(ips, country)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[自动订阅] 取 %s 出口失败：%s", country, exc)
-    if not pay_proxy:
-        return {"ok": False,
-                "error": "拿不到 %s 出口，无法保证结算国家一致" % country}
-
-    # ---- 生成长链（单席位）----
+    # ---- 生成长链（单席位）：传入全部活出口兜底切换 ----
     from core.team_checkout_service import generate_team_checkout_link
     res = generate_team_checkout_link(
         token=token,
         proxy_address=pay_proxy,
+        proxy_candidates=pay_proxies,
         workspace=str(_cfg("AUTO_SUBSCRIBE_WORKSPACE", "MyTeam")),
         seats=2,                 # 服务端支持时会自动降到 1 席
         country=country,
         currency=currency,
+        promo_assigned=promo_row,  # 用前置闸门领好的码，别让它再领一个
         use_1024proxy=False,     # 已显式给出口，别再让它自己取
         account_id=int(account_id),
         account_email=acc.get("email"),
@@ -507,16 +683,36 @@ def start_subscription(account_id: int) -> dict:
         auto_pay=False,
     )
     if not res.get("ok"):
+        # 提链失败时 generate 内部已把 assigned 码退回 unused/expired；
+        # 这里再兜一次底（码不在 using 时是 no-op）。
+        _release_promo("生成长链失败：%s" % res.get("error"))
         return {"ok": False, "error": "生成长链失败：%s" % res.get("error")}
 
     url = str(res.get("url") or "")
     seats = res.get("seats")
     if seats and int(seats) > 1:
+        _release_promo("该账号本次只拿到 %s 席，已放弃" % seats)
         return {"ok": False,
                 "error": "该账号本次只拿到 %s 席，不符合单席位条件，已放弃" % seats}
+    # 把刚提链跑通的活出口晋升到首位，支付会话优先复用它，其余继续当备胎
+    used_checkout_proxy = str(res.get("proxy_used") or "").strip()
+    if used_checkout_proxy and used_checkout_proxy in pay_proxies and used_checkout_proxy != pay_proxies[0]:
+        pay_proxies = [used_checkout_proxy] + [p for p in pay_proxies if p != used_checkout_proxy]
+        pay_proxy = pay_proxies[0]
+        logger.info("[自动订阅] 提链切到活出口 %s，支付会话将优先复用它", pay_proxy)
     db.update_account_team_checkout(int(account_id), {"url": url})
     logger.info("[自动订阅] 长链已生成（%s 席，%s/%s）：账号 #%s",
                 seats or "?", country, currency, account_id)
+
+    # ---- 余额兜底：确认长链已就绪、马上起支付会话才划钱充值 ----
+    try:
+        check = ensure_funds(client, card_id, cfg)
+        if check.recharged:
+            logger.warning("[自动订阅] 已自动充值 %.2f USD 到卡 %s",
+                           check.recharged, card_mask)
+    except InsufficientFunds as exc:
+        _release_promo("余额不足：%s" % exc)
+        return {"ok": False, "error": "余额不足：%s" % exc}
 
     # ---- 起支付会话；账单地址在会话内按卡号查 ----
     #
@@ -537,7 +733,8 @@ def start_subscription(account_id: int) -> dict:
         run_cfg.VCC_AUTO_CONFIRM = False
         logger.warning("[自动订阅] 未设金额上限，将停在等待确认")
 
-    from core.vcc_pay_session import start_session
+    from core.vcc_pay_session import (ST_CANCELLED, ST_DONE, ST_FAILED,
+                                      start_session)
     sess = start_session(
         account_id=int(account_id),
         email=str(acc.get("email") or ""),
@@ -545,15 +742,53 @@ def start_subscription(account_id: int) -> dict:
         proxy=pay_proxy,
         cfg=run_cfg,
         promo_code=str(res.get("promo_used") or ""),
+        extra_proxies=pay_proxies[1:],
+        refetch_proxies=_refetch_pay_proxies,
     )
     # 会话真起来了才记一次使用：前面任何一步失败都不该占用配额，
     # 否则失败几次就会把一张好卡挤到"用得最多"那一档去。
     note_card_used(card_mask)
-    return {"ok": True, "session_id": getattr(sess, "sid", ""),
+
+    # ---- 同步等结果：失败要让调度器看到，而不是"已发起"就完 ----
+    #
+    # 2026-11-19 16:00 的教训：支付会话在 worker 线程里异步炸掉（登录
+    # 403 全灭），调度器只拿到"已发起"就把整点标成已处理，失败完全静默。
+    # 终态必然可达——各等待环节都有超时（会话级 900s），这里 30 分钟兜底。
+    terminal = (ST_DONE, ST_FAILED, ST_CANCELLED)
+    deadline = time.time() + float(_cfg("AUTO_SUBSCRIBE_PAY_WAIT_SEC", 1800.0)
+                                   or 1800.0)
+    while time.time() < deadline and sess.state not in terminal:
+        # 闸门拦截的会话永远停在 awaiting_confirm：worker 不提交也不终态，
+        # 傻等只会把整轮卡死 30 分钟（11-20 #165、11-23 #91 两次实证）。
+        # 闸门没过 = 绝不会扣款，按环境类失败立即放行换下一个候选；
+        # 码没被消耗，留给 reclaim_stale_promo_codes 退回。
+        if getattr(sess, "gate_error", ""):
+            break
+        time.sleep(5.0)
+    if getattr(sess, "gate_error", "") and sess.state not in terminal:
+        return {"ok": False, "session_id": getattr(sess, "sid", ""),
+                "card": card_mask, "seats": seats,
+                "error": "金额闸门拦截（%s），未提交" % sess.gate_error}
+    if sess.state not in terminal:
+        # 超时仍未终态：按旧口径视为"已发起"，占用整点
+        cap_note = "，上限 %s %.2f" % (currency, cap) if cap > 0 else ""
+        return {"ok": True, "session_id": getattr(sess, "sid", ""),
+                "card": card_mask, "seats": seats,
+                "message": "支付会话仍在进行（%s），结果未知——已发起支付会话"
+                           "（卡 %s%s）" % (sess.state, card_mask, cap_note)}
+    if sess.state == ST_DONE:
+        return {"ok": True, "session_id": getattr(sess, "sid", ""),
+                "card": card_mask, "seats": seats,
+                "message": "支付完成（卡 %s）：%s" % (card_mask, sess.message)}
+    reason = "已取消，未提交" if sess.state == ST_CANCELLED else sess.message
+    # 支付没提交成功 = 码没被 OpenAI 消耗，退回池子。
+    # 2026-11-20 事故：失败候选的码一直挂在 using，把整个池子堵死，
+    # 后面的候选领不到码、按原价跑完全程才被闸门拦下。若支付其实提交
+    # 成功过（_record_promo 已升 used），这里是 no-op，不会误退。
+    _release_promo("支付会话终态 %s：%s" % (sess.state, reason))
+    return {"ok": False, "session_id": getattr(sess, "sid", ""),
             "card": card_mask, "seats": seats,
-            "message": "已发起支付会话（卡 %s，上限 %s %.2f）"
-                       % (card_mask, currency, cap) if cap > 0
-                       else "已发起支付会话（卡 %s）" % card_mask}
+            "error": "支付会话失败（卡 %s）：%s" % (card_mask, reason)}
 
 
 def _with_card(cfg, card_id: str):

@@ -2336,6 +2336,29 @@ def set_account_pay_card(acc_id: int, label: str, *, force: bool = False) -> boo
         return True
 
 
+def clear_account_payment(acc_id: int) -> bool:
+    """回滚"已支付"登记：清掉 paid_at 与支付卡标签。
+
+    仅用于套餐确认失败的补偿（2026-11-19 #150：页面无报错被当成支付
+    成功，实际未扣款未生效）。有值才清，无值返回 False，幂等可重入。
+    """
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        changed = False
+        for key in ("paid_at", "pay_card_label"):
+            if str(row.get(key) or "").strip():
+                row[key] = ""
+                changed = True
+        if not changed:
+            return False
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
 # 两种限额各自独立编号，起点由历史数据定：5h 从 49 开始（id 1~8 那批
 # 已删除的账号占了 41~48），周限额从 8 开始。
 _SUB_NO_START = {"5h": 49, "weekly": 8}
@@ -3438,6 +3461,104 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
         _save_akmoz_emails(akmoz_rows)
         _save_accounts(accounts)
         return inserted, skipped
+
+
+def import_seat_accounts(records: list[dict], *, assign_proxy: bool = True) -> tuple[int, int, int]:
+    """
+    导入席位账号（已注册好的现成账号）：邮箱 + 登录密码 + 2FA 密钥。
+
+    records 元素：{email, password, totp_secret, proxy_used, original_line}
+    assign_proxy=True 时，没有显式代理的行从代理池（config.proxy.PROXY_POOL）
+    随机抽一个写入 proxy_used，与注册流程 pick_proxy() 的取法一致。
+
+    密码同时写入 extra_json.registration_password（账号页“密码”列、复制登录凭据、
+    查活登录都从这里读取）。2FA 写入 totp_secret，账号页可直接看验证码。
+
+    返回 (新增数, 跳过数, 分配代理数, 新增账号列表)。已存在同邮箱账号会跳过；
+    新增账号列表元素为 {"id", "email", "proxy_used"}，供导入后自动预热使用。
+    """
+    with _LOCK:
+        accounts = _load_accounts()
+        inserted = skipped = proxied = 0
+        inserted_rows: list[dict] = []
+
+        for raw in records:
+            email = (raw.get("email") or "").strip()
+            password = str(raw.get("password") or "").strip()
+            if not email or not password:
+                skipped += 1
+                continue
+            if _find_by_email(accounts, email):
+                skipped += 1
+                continue
+
+            now = _now()
+            totp_secret = (raw.get("totp_secret") or "").strip()
+            proxy_used = (raw.get("proxy_used") or "").strip()
+            if not proxy_used and assign_proxy:
+                try:
+                    # 延迟导入，避免 core.db 与 config 包产生循环依赖。
+                    from config.proxy import pick_proxy
+
+                    proxy_used = str(pick_proxy() or "").strip()
+                except Exception:
+                    proxy_used = ""
+            if proxy_used:
+                proxied += 1
+
+            row_id = _next_account_id()
+            account = {
+                "id": row_id,
+                "email": email,
+                "created_at": now,
+                "access_token": "",
+                "totp_secret": totp_secret or None,
+                "user_id": None,
+                "user_name": raw.get("user_name") or "Imported Account",
+                "plan_type": None,
+                "expires_at": None,
+                "device_id": None,
+                "proxy_used": proxy_used or None,
+                "email_source": "seat",
+                "password": password,
+                "extra_json": json.dumps(
+                    {"registration_password": password, "imported_seat": True},
+                    ensure_ascii=False,
+                ),
+                "codex_status": "",
+                "codex_error": None,
+                "updated_at": now,
+                "original_email_line": (raw.get("original_line") or "").strip()
+                or "----".join(p for p in (email, password, totp_secret) if p),
+            }
+            account["copy_line"] = _account_line(account)
+            accounts.append(account)
+            inserted_rows.append({"id": row_id, "email": email, "proxy_used": proxy_used})
+            inserted += 1
+
+        if inserted:
+            _save_accounts(accounts)
+        return inserted, skipped, proxied, inserted_rows
+
+
+def list_seat_accounts_pending_warmup() -> list[dict]:
+    """导入后从未执行过查活的席位账号（重启后恢复预热用）。
+
+    只挑 imported_seat 标记且 live_check_status 为空的行；查活已跑过的
+    （含真实失败）不重复排队。"""
+    _ensure_sqlite()
+    with closing(_sqlite_conn()) as conn:
+        cur = conn.execute(
+            "SELECT id, email, json_extract(payload, '$.proxy_used') AS proxy_used "
+            "FROM accounts "
+            # imported_seat 标记在 extra_json 里，而 extra_json 是嵌套的 JSON 字符串
+            # （历史行也可能直接是对象），SQLite json_extract 对两种形式都能再解析。
+            "WHERE json_extract(json_extract(payload, '$.extra_json'), '$.imported_seat') = 1 "
+            "AND (json_extract(payload, '$.live_check_status') IS NULL "
+            "     OR json_extract(payload, '$.live_check_status') = '') "
+            "ORDER BY id"
+        )
+        return [dict(row) for row in cur.fetchall()]
 
 
 def claim_next_outlook() -> dict | None:
