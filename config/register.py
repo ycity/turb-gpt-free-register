@@ -37,22 +37,22 @@ POST_REGISTER_DWELL_SECONDS_RANGE = "5,15"
 # pay.openai.com 长链，VCC 自动支付的填表逻辑未必适配，必要时关掉它。
 TEAM_TRY_SINGLE_SEAT = True
 
-# 2FA 绑定成功后顺带探测该账号是否支持单席位 Team。
-# 只创建 checkout session 读限制，不支付、不消耗优惠码。
+# 2FA 绑定成功后顺带探测该账号的 Team 单席位及结账折扣（首月免费 / 具体折扣比例）。
+# 只创建 checkout session 读限制与折扣，不支付、不消耗优惠码。
 TEAM_PROBE_SINGLE_SEAT_AFTER_2FA = True
 
-# 注册落库后就探测单席位，不等 2FA。
+# 注册落库后自动探测 Team 单席位及结账折扣，不等 2FA。
 #
-# 席位探测只用 access_token 直连 API，和 2FA 本来没有任何关系。但它以前
-# 只挂在 2FA 成功之后，于是 2FA 一关或一失败，席位信息就永远拿不到——
+# 席位与折扣探测只用 access_token 直连 API，和 2FA 本来没有任何关系。但它以前
+# 只挂在 2FA 成功之后，于是 2FA 一关或一失败，席位与折扣信息就永远拿不到——
 # 2026-11-17 关掉自动 2FA 做对照实验时撞上过：账号注册正常、人也活着，
 # 席位却查不出来。
 #
-# 两条路径并存，按"是否已有结果"去重：2FA 那条用的是刚刷新的新 token，
-# 更准，所以保留；这条兜住"没有 2FA"的情况。
+# 两条路径并存，按"是否已有成功结果"去重：2FA 那条用的是刚刷新的新 token，
+# 更准，所以保留；这条兜住"没有 2FA"或 2FA 探测失败的情况。
 PROBE_SINGLE_SEAT_AFTER_REGISTER = True
 
-# 注册后等多少秒再探测单席位。
+# 注册后等多少秒再探测单席位与折扣。
 #
 # 不能一落库就探：账号刚建好，OpenAI 风控还在观察期，立刻去创建 checkout
 # session 会被判 "unusual activity"（HTTP 400）——2026-11-17 账号 #105

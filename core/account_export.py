@@ -868,17 +868,18 @@ def setup_2fa(
 
 def _maybe_probe_single_seat(account_id: int, email: str,
                              access_token: str, proxy_used: str = "") -> None:
-    """注册落库后探测这个账号能不能只买 1 席。
+    """注册落库后探测这个账号的 Team 单席位及结账折扣（首月免费 / 具体折扣比例）。
 
     为什么放在这里：探测只用 access_token 直连 API，和 2FA 没有任何关系。
     但以前它只挂在 2FA 成功之后（core/twofa_service.py 里那一处），于是
-    2FA 一关或一失败，席位信息就永远拿不到——2026-11-17 关掉自动 2FA 做
+    2FA 一关或一失败，席位与折扣信息就永远拿不到——2026-11-17 关掉自动 2FA 做
     对照实验时就撞上了：#103 #104 注册正常、账号活着，却查不出席位。
 
-    这里按"是否已有结果"去重：2FA 成功后那条路径仍然保留（它拿的是刚
-    刷新的新 token，更准），已经探过的账号不会重复探。
+    这里按"是否已有成功结果"去重：2FA 成功后那条路径仍然保留（它拿的是刚
+    刷新的新 token，更准），已经成功探过的账号不会重复探；若上次探测报错，
+    允许由本路径补探一次。
 
-    只创建 checkout session 读限制，不改席位、不支付、不传优惠码，
+    只创建 checkout session 读限制与结账价格/折扣，不改席位、不支付、不传优惠码，
     既不扣款也不消耗优惠码。
 
     任何异常都吞掉：注册已经成功了，不能因为一个附加探测把结果搞成失败。
@@ -886,14 +887,14 @@ def _maybe_probe_single_seat(account_id: int, email: str,
     try:
         from config import register as reg_cfg
         if not bool(getattr(reg_cfg, "PROBE_SINGLE_SEAT_AFTER_REGISTER", True)):
-            logger.info(f"[单席位] 注册后自动探测已关闭: id={account_id}, email={email}")
+            logger.info(f"[单席位/折扣] 注册后自动探测已关闭: id={account_id}, email={email}")
             return
         delay = float(getattr(reg_cfg, "PROBE_SINGLE_SEAT_DELAY", 180.0) or 0.0)
     except Exception:  # noqa: BLE001 - 读不到配置按开启处理
         delay = 180.0
 
     if not str(access_token or "").strip():
-        logger.info(f"[单席位] 无 access_token，跳过探测: id={account_id}, email={email}")
+        logger.info(f"[单席位/折扣] 无 access_token，跳过探测: id={account_id}, email={email}")
         return
 
     def _run() -> None:
@@ -905,33 +906,124 @@ def _maybe_probe_single_seat(account_id: int, email: str,
             acc = _db.get_account(int(account_id))
             if not acc:
                 return
-            # 2FA 那条路径可能已经探过了，别重复消耗一次请求
-            if acc.get("single_seat_checked_at"):
+            # 2FA 那条路径可能已经成功探过（且无报错），别重复消耗一次请求；
+            # 若上次探测失败（single_seat_error 非空），则允许补探一次。
+            if acc.get("single_seat_checked_at") and not acc.get("single_seat_error"):
                 return
-            from core.single_seat import probe_single_seat
+            from core.single_seat import format_probe_summary, probe_single_seat
             res = probe_single_seat(acc)
+            if (
+                not res.get("ok")
+                and delay > 0
+                and "access_token" not in str(res.get("error") or "")
+            ):
+                retry_wait = min(60.0, delay)
+                logger.info(
+                    "[单席位/折扣] %s 首次探测失败（%s），%ds 后重试一次",
+                    email, res.get("error"), int(retry_wait),
+                )
+                time.sleep(retry_wait)
+                acc_retry = _db.get_account(int(account_id)) or acc
+                if acc_retry.get("single_seat_checked_at") and not acc_retry.get("single_seat_error"):
+                    return
+                res = probe_single_seat(acc_retry)
             _db.update_account_single_seat(int(account_id), res)
-            if res.get("ok"):
-                msg = ("支持单席位（最少 1 席，可省一半订阅费）"
-                       if res.get("supported")
-                       else f"不支持单席位（最少 {res.get('minimum_seats')} 席）")
-                logger.info("[单席位] %s：%s", email, msg)
-            else:
-                logger.info("[单席位] %s 探测失败：%s", email, res.get("error"))
+            logger.info("[单席位/折扣] %s：%s", email, format_probe_summary(res))
         except Exception:  # noqa: BLE001 - 注册已成功，探测失败不能影响它
-            logger.exception("[单席位] 注册后探测异常：account_id=%s", account_id)
+            logger.exception("[单席位/折扣] 注册后探测异常：account_id=%s", account_id)
 
     # 放后台线程：要等几分钟再探，更不能占着注册工作线程
     try:
         import threading
         threading.Thread(target=_run, name=f"seat-probe-{account_id}",
                          daemon=True).start()
-        logger.info(f"[单席位] 注册后探测已入队（{int(delay)}s 后执行）: "
+        logger.info(f"[单席位/折扣] 注册后席位与折扣探测已入队（{int(delay)}s 后执行）: "
                     f"id={account_id}, email={email}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            f"[单席位] 注册后探测启动失败（不影响注册结果）: "
+            f"[单席位/折扣] 注册后探测启动失败（不影响注册结果）: "
             f"{email}, {type(exc).__name__}: {str(exc)[:180]}")
+
+
+def recover_pending_register_seat_probes(max_age_hours: float = 24.0) -> int:
+    """服务启动时补跑因重启丢失的注册后席位与折扣探测。
+
+    注册后的探测线程在后台 sleep(PROBE_SINGLE_SEAT_DELAY) 期间若遇到服务重启会丢失。
+    这里只捞最近 max_age_hours 小时内注册、未归档、未订阅、有有效 AT、尚未探测
+    且没有排队跑 2FA 的账号，在后台单线程错峰补探，避免遗漏折扣检测。
+    """
+    try:
+        from config import register as reg_cfg
+        if not bool(getattr(reg_cfg, "PROBE_SINGLE_SEAT_AFTER_REGISTER", True)):
+            return 0
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        from datetime import datetime, timedelta
+        from core import db as _db
+        from core.chatgpt_plan import normalize_token, token_claims
+
+        cutoff = datetime.now() - timedelta(hours=max(1.0, float(max_age_hours)))
+        candidates: list[dict] = []
+        for acc in _db.list_accounts():
+            if acc.get("archived"):
+                continue
+            plan = str(acc.get("current_plan_type") or acc.get("plan_type") or "").strip().lower()
+            if acc.get("paid_at") or acc.get("subscription_no") or (plan and plan not in ("free", "unknown", "")):
+                continue
+            if acc.get("single_seat_checked_at"):
+                continue
+            if str(acc.get("totp_setup_status") or "").strip().lower() in ("queued", "running"):
+                continue
+            created_raw = str(acc.get("created_at") or "").strip()
+            if not created_raw:
+                continue
+            try:
+                created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                if created_dt.tzinfo is not None:
+                    created_dt = created_dt.replace(tzinfo=None)
+                if created_dt < cutoff:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            tok = normalize_token(str(acc.get("access_token") or ""))
+            if not tok or token_claims(tok).get("token_expired") is True:
+                continue
+            candidates.append(acc)
+        if not candidates:
+            return 0
+
+        def _worker(items: list[dict]) -> None:
+            from core.single_seat import format_probe_summary, probe_single_seat
+
+            for idx, item in enumerate(items):
+                aid = int(item["id"])
+                em = str(item.get("email") or aid)
+                try:
+                    if idx > 0:
+                        time.sleep(5.0)
+                    latest = _db.get_account(aid)
+                    if not latest or latest.get("single_seat_checked_at"):
+                        continue
+                    res = probe_single_seat(latest)
+                    _db.update_account_single_seat(aid, res)
+                    logger.info("[单席位/折扣] 启动补探 %s：%s", em, format_probe_summary(res))
+                except Exception:  # noqa: BLE001
+                    logger.exception("[单席位/折扣] 启动补探异常：account_id=%s", aid)
+
+        import threading
+        threading.Thread(
+            target=_worker,
+            args=(candidates,),
+            name="seat-probe-recovery",
+            daemon=True,
+        ).start()
+        logger.info("[单席位/折扣] 启动恢复：已排入 %d 个近期注册未探折扣的账号", len(candidates))
+        return len(candidates)
+    except Exception:  # noqa: BLE001
+        logger.exception("[单席位/折扣] 启动恢复查询失败")
+        return 0
 
 
 def save_account_data(

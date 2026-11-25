@@ -669,6 +669,13 @@ def create_app(auth_code: str | None = None) -> Flask:
                 seat_warmup_service.recover_interrupted_seat_warmups()
             except Exception:
                 logger.exception("席位账号预热启动恢复失败")
+            # 注册后延迟探测单席位/折扣的后台线程在重启时会丢失，启动时补捞 24h 内未探账号。
+            try:
+                from core import account_export
+
+                account_export.recover_pending_register_seat_probes()
+            except Exception:
+                logger.exception("注册后席位与折扣探测启动恢复失败")
 
     try:
         from core import auto_register_scheduler

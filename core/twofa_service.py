@@ -134,9 +134,9 @@ def _persist_refreshed_token(account_id: int, email: str, refreshed: dict) -> No
 
 
 def _probe_single_seat_after_2fa(account_id: int, email: str) -> None:
-    """2FA 完成后顺带探测这个账号能不能只买 1 席。
+    """2FA 完成后顺带探测这个账号的 Team 单席位及结账折扣（首月免费 / 具体折扣比例）。
 
-    只创建 checkout session 读限制，不改席位、不支付、不传优惠码，
+    只创建 checkout session 读限制与结账价格/折扣，不改席位、不支付、不传优惠码，
     所以既不扣款也不消耗码。探测结果写进账号，提链时直接用。
 
     任何异常都吞掉：2FA 已经成功了，不能因为一个附加探测把结果搞成失败。
@@ -152,22 +152,16 @@ def _probe_single_seat_after_2fa(account_id: int, email: str) -> None:
         acc = db.get_account(int(account_id))
         if not acc:
             return
-        from core.single_seat import probe_single_seat
+        from core.single_seat import format_probe_summary, probe_single_seat
         res = probe_single_seat(acc)
         db.update_account_single_seat(int(account_id), res)
-        if res.get("ok"):
-            msg = ("支持单席位（最少 1 席，可省一半订阅费）"
-                   if res.get("supported")
-                   else f"不支持单席位（最少 {res.get('minimum_seats')} 席）")
-            _append_log(email, f"[单席位] {msg}")
-            logger.info("[单席位] %s：%s", email, msg)
-        else:
-            _append_log(email, f"[单席位] 探测失败：{res.get('error')}")
-            logger.info("[单席位] %s 探测失败：%s", email, res.get("error"))
+        summary = format_probe_summary(res)
+        _append_log(email, f"[单席位/折扣] {summary}")
+        logger.info("[单席位/折扣] %s：%s", email, summary)
     except Exception:  # noqa: BLE001 - 2FA 已成功，探测失败不能影响它
-        logger.exception("[单席位] 探测异常：account_id=%s", account_id)
+        logger.exception("[单席位/折扣] 探测异常：account_id=%s", account_id)
         try:
-            _append_log(email, "[单席位] 探测异常，已跳过")
+            _append_log(email, "[单席位/折扣] 探测异常，已跳过")
         except Exception:  # noqa: BLE001
             pass
 

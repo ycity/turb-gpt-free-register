@@ -505,5 +505,268 @@ class TeamSeatColumnUiTest(unittest.TestCase):
         self.assertEqual(int(m.group(1)), cols)
 
 
+class StripeFallbackAndRegistrationFlowTest(unittest.TestCase):
+    def test_parse_stripe_payment_page_paid_discount_and_free_trial(self):
+        detail = {
+            "business_minimum_seats": 1,
+            "checkout_provider": "stripe",
+            "checkout_state": None,
+            "billing_details": {"country": "JP", "currency": "JPY"},
+        }
+        stripe_paid = {
+            "currency": "jpy",
+            "total_summary": {
+                "due": 7700,
+                "subtotal": 7700,
+                "total": 7700,
+                "total_discount_amount_aggregate": 0,
+                "total_discount_amounts": [],
+            },
+        }
+        got_paid = single_seat.parse_checkout_pricing(detail, stripe_page=stripe_paid)
+        self.assertFalse(got_paid["free_trial"])
+        self.assertEqual(got_paid["checkout_total_amount"], 7700.0)
+        self.assertEqual(got_paid["checkout_subtotal_amount"], 7700.0)
+        self.assertEqual(got_paid["checkout_discount_pct"], 0.0)
+        self.assertEqual(got_paid["checkout_currency"], "JPY")
+
+        stripe_disc = {
+            "currency": "usd",
+            "total_summary": {
+                "due": 2500,
+                "subtotal": 5000,
+                "total": 2500,
+                "total_discount_amount_aggregate": 2500,
+                "total_discount_amounts": [
+                    {
+                        "amount": 2500,
+                        "discount": {
+                            "coupon": {"id": "c_1", "name": "Stripe 50% Off", "percent_off": 50}
+                        },
+                    }
+                ],
+            },
+        }
+        got_disc = single_seat.parse_checkout_pricing(
+            {"checkout_provider": "stripe", "checkout_state": None},
+            stripe_page=stripe_disc,
+        )
+        self.assertFalse(got_disc["free_trial"])
+        self.assertEqual(got_disc["checkout_subtotal_amount"], 50.0)
+        self.assertEqual(got_disc["checkout_discount_amount"], 25.0)
+        self.assertEqual(got_disc["checkout_total_amount"], 25.0)
+        self.assertEqual(got_disc["checkout_discount_pct"], 50.0)
+        self.assertEqual(got_disc["checkout_discount_label"], "Stripe 50% Off")
+
+        stripe_free = {
+            "currency": "usd",
+            "total_summary": {"due": 0, "subtotal": 5000, "total": 0},
+            "subscription_data": {"trial_period_days": 30},
+        }
+        got_free = single_seat.parse_checkout_pricing(
+            {"checkout_provider": "stripe", "checkout_state": None},
+            stripe_page=stripe_free,
+        )
+        self.assertTrue(got_free["free_trial"])
+        self.assertEqual(got_free["checkout_discount_pct"], 100.0)
+        self.assertEqual(got_free["checkout_discount_label"], "Trial 30d")
+
+    def test_probe_uses_stripe_payment_page_when_checkout_state_null(self):
+        class FakeResp:
+            def __init__(self, payload, status_code=200):
+                self._p = payload
+                self.status_code = status_code
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._p
+
+        class FakeEnv:
+            exit_geo = {"country": "JP"}
+            blocked_until = 0.0
+            blocked_reason = ""
+
+            def __init__(self, **_kw):
+                pass
+
+            def get_chatgpt_navigate_headers(self, **_kw):
+                return {}
+
+            def get_chatgpt_headers(self, **_kw):
+                return {}
+
+            def get(self, url, **_kw):
+                if "payments/checkout/openai_llc" in url:
+                    return FakeResp({
+                        "business_minimum_seats": 1,
+                        "checkout_provider": "stripe",
+                        "checkout_state": None,
+                        "publishable_key": "pk_live_123",
+                        "client_secret": "cs_live_1_secret_abc",
+                        "billing_details": {"country": "JP", "currency": "JPY"},
+                    })
+                return FakeResp({})
+
+            def post(self, url, **_kw):
+                if "api.stripe.com/v1/payment_pages/" in url:
+                    return FakeResp({
+                        "currency": "jpy",
+                        "total_summary": {
+                            "due": 3850,
+                            "subtotal": 7700,
+                            "total": 3850,
+                            "total_discount_amount_aggregate": 3850,
+                        },
+                    })
+                return FakeResp({"checkout_session_id": "cs_live_1"})
+
+            def close(self):
+                pass
+
+        acc = {"id": 176, "email": "s@e.test", "access_token": "tok"}
+        with patch("core.chatgpt_plan.normalize_token", return_value="tok"), \
+             patch("core.chatgpt_plan.token_claims", return_value={"token_expired": False}), \
+             patch("core.region_proxy.adopt_pool_exit", return_value=("", "")), \
+             patch("core.session.BrowserSession", FakeEnv):
+            res = single_seat.probe_single_seat(acc)
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["supported"])
+        self.assertFalse(res["free_trial"])
+        self.assertEqual(res["checkout_total_amount"], 3850.0)
+        self.assertEqual(res["checkout_subtotal_amount"], 7700.0)
+        self.assertEqual(res["checkout_discount_amount"], 3850.0)
+        self.assertEqual(res["checkout_discount_pct"], 50.0)
+        self.assertEqual(res["checkout_currency"], "JPY")
+
+    def test_probe_falls_back_to_pool_when_saved_proxy_geo_fails(self):
+        created_proxies = []
+
+        class FakeResp:
+            def __init__(self, payload, status_code=200):
+                self._p = payload
+                self.status_code = status_code
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._p
+
+        class FakeEnv:
+            blocked_until = 0.0
+            blocked_reason = ""
+
+            def __init__(self, proxy=None, **_kw):
+                created_proxies.append(proxy)
+                self.exit_geo = {} if proxy and "dead" in proxy else {"country": "US"}
+
+            def get_chatgpt_navigate_headers(self, **_kw):
+                return {}
+
+            def get_chatgpt_headers(self, **_kw):
+                return {}
+
+            def get(self, url, **_kw):
+                if "payments/checkout/openai_llc" in url:
+                    return FakeResp({
+                        "business_minimum_seats": 1,
+                        "checkout_state": {
+                            "currency": "usd",
+                            "total": {"subtotal": {"minorUnitsAmount": 5000}, "discount": {"minorUnitsAmount": 0}, "total": {"minorUnitsAmount": 5000}},
+                        },
+                    })
+                return FakeResp({})
+
+            def post(self, url, **_kw):
+                return FakeResp({"checkout_session_id": "oaics_fb"})
+
+            def close(self):
+                pass
+
+        acc = {"id": 181, "email": "fb@e.test", "access_token": "tok", "proxy_used": "http://u:p@dead:1234"}
+        with patch("core.chatgpt_plan.normalize_token", return_value="tok"), \
+             patch("core.chatgpt_plan.token_claims", return_value={"token_expired": False}), \
+             patch("core.region_proxy.adopt_pool_exit", return_value=("http://u:p@dead:1234", "")), \
+             patch("core.region_proxy.pick_pool_exit", return_value=("http://u:p@good:5678", "回落 US")), \
+             patch("core.session.BrowserSession", FakeEnv):
+            res = single_seat.probe_single_seat(acc)
+        self.assertTrue(res["ok"])
+        self.assertFalse(res["free_trial"])
+        self.assertEqual(res["checkout_total_amount"], 50.0)
+        self.assertEqual(len(created_proxies), 2)
+
+    def test_format_probe_summary(self):
+        self.assertIn("首月免费", single_seat.format_probe_summary({
+            "ok": True, "supported": True, "minimum_seats": 1, "free_trial": True,
+            "checkout_subtotal_amount": 50.0, "checkout_currency": "USD",
+        }))
+        self.assertIn("50%折扣", single_seat.format_probe_summary({
+            "ok": True, "supported": False, "minimum_seats": 2, "free_trial": False,
+            "checkout_discount_pct": 50.0, "checkout_discount_amount": 25.0,
+            "checkout_total_amount": 25.0, "checkout_currency": "USD",
+            "checkout_discount_label": "Half Off",
+        }))
+        self.assertIn("无折扣", single_seat.format_probe_summary({
+            "ok": True, "supported": True, "minimum_seats": 1, "free_trial": False,
+            "checkout_discount_pct": 0.0, "checkout_total_amount": 69.76, "checkout_currency": "SGD",
+        }))
+        self.assertIn("探测失败", single_seat.format_probe_summary({"ok": False, "error": "timeout"}))
+
+    def test_register_probe_retries_if_prior_check_had_error_and_startup_recovers_recent(self):
+        from datetime import datetime, timedelta
+        from config import register as reg_cfg
+        from core import account_export
+
+        probe = MagicMock(return_value={
+            "ok": True, "supported": True, "minimum_seats": 1,
+            "free_trial": False, "checkout_discount_pct": 50.0,
+            "checkout_total_amount": 25.0, "checkout_currency": "USD",
+        })
+        update = MagicMock()
+
+        def run_now(target=None, args=(), name=None, daemon=None):
+            t = MagicMock()
+            t.start = lambda: target(*args)
+            return t
+
+        # 上次探测报错（single_seat_error 非空）时，注册后路径允许补探
+        with patch.object(reg_cfg, "PROBE_SINGLE_SEAT_AFTER_REGISTER", True), \
+             patch.object(reg_cfg, "PROBE_SINGLE_SEAT_DELAY", 0.0), \
+             patch("core.single_seat.probe_single_seat", probe), \
+             patch("core.db.update_account_single_seat", update), \
+             patch("core.db.get_account", return_value={
+                 "id": 9, "single_seat_checked_at": "2026-11-25T00:00:00",
+                 "single_seat_error": "HTTP 400",
+             }), \
+             patch("threading.Thread", side_effect=run_now):
+            account_export._maybe_probe_single_seat(9, "r@e.test", "tok")
+        probe.assert_called_once()
+        update.assert_called_once()
+
+        # 启动恢复只捞 24h 内、未归档、未订阅、未探过、未排队 2FA 的账号
+        now = datetime.now()
+        rows = [
+            {"id": 101, "email": "new@e.test", "created_at": (now - timedelta(hours=1)).isoformat(timespec="seconds"), "access_token": "tok"},
+            {"id": 102, "email": "done@e.test", "created_at": (now - timedelta(hours=1)).isoformat(timespec="seconds"), "access_token": "tok", "single_seat_checked_at": now.isoformat()},
+            {"id": 103, "email": "sub@e.test", "created_at": (now - timedelta(hours=1)).isoformat(timespec="seconds"), "access_token": "tok", "paid_at": now.isoformat()},
+            {"id": 104, "email": "old@e.test", "created_at": (now - timedelta(hours=48)).isoformat(timespec="seconds"), "access_token": "tok"},
+            {"id": 105, "email": "twofa@e.test", "created_at": (now - timedelta(hours=1)).isoformat(timespec="seconds"), "access_token": "tok", "totp_setup_status": "queued"},
+            {"id": 106, "email": "arch@e.test", "created_at": (now - timedelta(hours=1)).isoformat(timespec="seconds"), "access_token": "tok", "archived": True},
+        ]
+        probe2 = MagicMock(return_value={"ok": True, "supported": True, "minimum_seats": 1, "free_trial": False, "checkout_discount_pct": 0.0})
+        update2 = MagicMock()
+        with patch.object(reg_cfg, "PROBE_SINGLE_SEAT_AFTER_REGISTER", True), \
+             patch("core.db.list_accounts", return_value=rows), \
+             patch("core.db.get_account", side_effect=lambda i: next((r for r in rows if r["id"] == i), None)), \
+             patch("core.chatgpt_plan.normalize_token", side_effect=lambda t: t), \
+             patch("core.chatgpt_plan.token_claims", return_value={"token_expired": False}), \
+             patch("core.single_seat.probe_single_seat", probe2), \
+             patch("core.db.update_account_single_seat", update2), \
+             patch("threading.Thread", side_effect=run_now):
+            n = account_export.recover_pending_register_seat_probes()
+        self.assertEqual(n, 1)
+        probe2.assert_called_once()
+        self.assertEqual(update2.call_args[0][0], 101)
+        self.assertIn("recover_pending_register_seat_probes", APP)
+
+
 if __name__ == "__main__":
     unittest.main()

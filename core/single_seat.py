@@ -33,6 +33,7 @@ import json
 import logging
 import re
 import time
+import urllib.parse
 import uuid
 from typing import Any
 
@@ -192,12 +193,18 @@ def _extract_discount_meta(sources: list[dict], currency: str = "") -> tuple[flo
                     found_minor = True
                 except (TypeError, ValueError):
                     pass
-        if not found_minor and isinstance(obj.get("amount"), str):
-            parsed = _extract_minor_amount(obj, currency)
-            if parsed is not None and abs(parsed) > 0:
-                minor = abs(parsed)
+        if not found_minor:
+            raw_amt = obj.get("amount")
+            if isinstance(raw_amt, int) and not isinstance(raw_amt, bool) and abs(raw_amt) > 0:
+                minor = abs(raw_amt)
                 if best_amt_minor is None or minor > best_amt_minor:
                     best_amt_minor = minor
+            elif isinstance(raw_amt, str):
+                parsed = _extract_minor_amount(obj, currency)
+                if parsed is not None and abs(parsed) > 0:
+                    minor = abs(parsed)
+                    if best_amt_minor is None or minor > best_amt_minor:
+                        best_amt_minor = minor
         if not best_label:
             for k in label_keys:
                 v = obj.get(k)
@@ -228,6 +235,21 @@ def _extract_discount_meta(sources: list[dict], currency: str = "") -> tuple[flo
                 _visit(li.get("discount"))
             if li.get("discountAmounts"):
                 _visit(li.get("discountAmounts"))
+        # Stripe payment_pages/{sid}/init 结构支持
+        tsum = src.get("total_summary") if isinstance(src.get("total_summary"), dict) else {}
+        if tsum.get("total_discount_amounts"):
+            _visit(tsum.get("total_discount_amounts"))
+        lig = src.get("line_item_group") if isinstance(src.get("line_item_group"), dict) else {}
+        if lig.get("discount_amounts"):
+            _visit(lig.get("discount_amounts"))
+        inv = src.get("invoice") if isinstance(src.get("invoice"), dict) else {}
+        for inv_k in ("total_discount_amounts", "discount", "discounts"):
+            if inv.get(inv_k):
+                _visit(inv.get(inv_k))
+        inv_lines = (inv.get("lines") or {}).get("data") if isinstance(inv.get("lines"), dict) else []
+        for li in inv_lines or []:
+            if isinstance(li, dict) and li.get("discount_amounts"):
+                _visit(li.get("discount_amounts"))
 
     # 仅保留合法范围
     if best_pct is not None and not (0 < best_pct <= 100):
@@ -236,10 +258,13 @@ def _extract_discount_meta(sources: list[dict], currency: str = "") -> tuple[flo
 
 
 def parse_checkout_pricing(detail: dict | None,
-                           fallback: dict | None = None) -> dict:
+                           fallback: dict | None = None,
+                           stripe_page: dict | None = None) -> dict:
     """从 checkout 响应解析本次应付价格、是否首月免费（支付价 == 0）及具体折扣比例。
 
-    优先读 GET 详情的 checkout_state.total；缺失时回退到 POST 创建响应。
+    优先读 GET 详情的 checkout_state.total；缺失时回退到 POST 创建响应或
+    Stripe payment_pages/{sid}/init 响应（checkout_provider == "stripe" 时
+    OpenAI 详情里的 checkout_state 为 null）。
     """
     out: dict[str, Any] = {
         "free_trial": None,
@@ -254,7 +279,7 @@ def parse_checkout_pricing(detail: dict | None,
         "checkout_currency": "",
         "checkout_campaign": "",
     }
-    sources = [s for s in (detail, fallback) if isinstance(s, dict)]
+    sources = [s for s in (detail, fallback, stripe_page) if isinstance(s, dict)]
     if not sources:
         return out
 
@@ -262,7 +287,16 @@ def parse_checkout_pricing(detail: dict | None,
     for src in sources:
         state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
         bd = src.get("billing_details") if isinstance(src.get("billing_details"), dict) else {}
-        cur = str(state.get("currency") or bd.get("currency") or "").strip().upper()
+        inv = src.get("invoice") if isinstance(src.get("invoice"), dict) else {}
+        lig = src.get("line_item_group") if isinstance(src.get("line_item_group"), dict) else {}
+        cur = str(
+            state.get("currency")
+            or bd.get("currency")
+            or src.get("currency")
+            or inv.get("currency")
+            or lig.get("currency")
+            or ""
+        ).strip().upper()
         if cur:
             currency = cur
             break
@@ -298,7 +332,38 @@ def parse_checkout_pricing(detail: dict | None,
             if cand_disc is not None:
                 discount_minor = abs(cand_disc)
 
-    # 若 total.subtotal 缺失，尝试累加 lineItems.subtotal
+        # Stripe payment_pages/{sid}/init 回退字段：total_summary / invoice / line_item_group
+        tsum = src.get("total_summary") if isinstance(src.get("total_summary"), dict) else {}
+        inv = src.get("invoice") if isinstance(src.get("invoice"), dict) else {}
+        lig = src.get("line_item_group") if isinstance(src.get("line_item_group"), dict) else {}
+        if total_minor is None:
+            for cand_raw in (
+                tsum.get("due"),
+                tsum.get("total"),
+                inv.get("amount_due"),
+                lig.get("due"),
+                lig.get("total"),
+            ):
+                cand = _extract_minor_amount(cand_raw, currency)
+                if cand is not None:
+                    total_minor = cand
+                    break
+        if subtotal_minor is None:
+            for cand_raw in (
+                tsum.get("subtotal"),
+                inv.get("subtotal"),
+                lig.get("subtotal"),
+            ):
+                cand_sub = _extract_minor_amount(cand_raw, currency)
+                if cand_sub is not None:
+                    subtotal_minor = cand_sub
+                    break
+        if discount_minor is None:
+            cand_disc = _extract_minor_amount(tsum.get("total_discount_amount_aggregate"), currency)
+            if cand_disc is not None:
+                discount_minor = abs(cand_disc)
+
+    # 若 total.subtotal 缺失，尝试累加 lineItems.subtotal 或 Stripe invoice.lines.data[*].amount
     if subtotal_minor is None:
         for src in sources:
             state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
@@ -308,8 +373,25 @@ def parse_checkout_pricing(detail: dict | None,
                 if vals and all(v is not None for v in vals):
                     subtotal_minor = sum(int(v) for v in vals if v is not None)
                     break
+            inv = src.get("invoice") if isinstance(src.get("invoice"), dict) else {}
+            inv_lines = [
+                li for li in ((inv.get("lines") or {}).get("data") if isinstance(inv.get("lines"), dict) else [])
+                if isinstance(li, dict)
+            ]
+            if inv_lines:
+                vals = [_extract_minor_amount(li.get("amount"), currency) for li in inv_lines]
+                if vals and all(v is not None for v in vals):
+                    subtotal_minor = sum(int(v) for v in vals if v is not None)
+                    break
 
     meta_pct, meta_amt_minor, meta_label = _extract_discount_meta(sources, currency)
+    if not meta_label and total_minor == 0:
+        for src in sources:
+            sdata = src.get("subscription_data") if isinstance(src.get("subscription_data"), dict) else {}
+            tdays = sdata.get("trial_period_days") or sdata.get("display_trial_period_days")
+            if tdays:
+                meta_label = f"Trial {tdays}d"
+                break
     if (discount_minor is None or discount_minor == 0) and meta_amt_minor:
         discount_minor = meta_amt_minor
     if total_minor == 0 and subtotal_minor and subtotal_minor > 0 and (not discount_minor):
@@ -340,6 +422,44 @@ def parse_checkout_pricing(detail: dict | None,
         out["free_trial"] = (total_minor == 0)
     out["checkout_discount_pct"] = discount_pct
     return out
+
+
+def read_stripe_payment_page(env: Any, session_id: str, publishable_key: str,
+                             client_secret: str = "", timeout: float = 25.0) -> dict | None:
+    """当 OpenAI checkout_provider == 'stripe' 且 checkout_state 为空时，
+    调用 Stripe 公开只读接口 payment_pages/{sid}/init 读取实付价格与折扣明细。
+    """
+    sid = str(session_id or "").strip()
+    pk = str(publishable_key or "").strip()
+    if not sid or not pk:
+        return None
+    url = f"https://api.stripe.com/v1/payment_pages/{urllib.parse.quote(sid, safe='')}/init"
+    body = urllib.parse.urlencode({
+        "key": pk,
+        "client_secret": str(client_secret or ""),
+        "eid": "NA",
+        "browser_locale": "en-US",
+        "redirect_type": "url",
+    })
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://checkout.stripe.com",
+        "Referer": "https://checkout.stripe.com/",
+    }
+    try:
+        resp = env.post(url, headers=headers, data=body, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[单席位] Stripe payment_pages/init 失败：%s", exc)
+        return None
+    if resp.status_code != 200:
+        logger.debug("[单席位] Stripe payment_pages/init HTTP %s", resp.status_code)
+        return None
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_checkout_detail(env: Any, headers: dict, session_id: str,
@@ -483,6 +603,26 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
     try:
         country = str((env.exit_geo or {}).get("country") or "").upper()
         currency = COUNTRY_CURRENCY.get(country, "")
+        # 原保存的固定代理若已失联导致探不出出口国家，临时借代理池健康出口重试一次
+        if (not country or not currency) and proxy:
+            try:
+                from core.region_proxy import pick_pool_exit
+                fallback_proxy, fb_why = pick_pool_exit(region)
+                if fallback_proxy and fallback_proxy != proxy:
+                    logger.info("[单席位] 原出口不可用（国家=%s），临时改用代理池出口：%s",
+                                country or "未知", fb_why)
+                    try:
+                        env.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    env = BrowserSession(
+                        proxy=normalize_proxy_url(fallback_proxy),
+                        detect_exit_geo=True,
+                        fingerprint_seed=f"seat-probe-fb:{uuid.uuid4()}")
+                    country = str((env.exit_geo or {}).get("country") or "").upper()
+                    currency = COUNTRY_CURRENCY.get(country, "")
+            except Exception:  # noqa: BLE001
+                logger.debug("[单席位] 回退代理池失败", exc_info=True)
         if not country or not currency:
             out["error"] = f"出口国家 {country or '未知'} 没有内置货币映射"
             return out
@@ -542,6 +682,14 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
             out["error"] = "读不到 business_minimum_seats"
             return out
         pricing = parse_checkout_pricing(detail, fallback=created)
+        if pricing["free_trial"] is None and isinstance(detail, dict):
+            pk = str(detail.get("publishable_key") or created.get("publishable_key") or "").strip()
+            cs = str(detail.get("client_secret") or created.get("client_secret") or "").strip()
+            if pk and sid.startswith("cs_"):
+                stripe_page = read_stripe_payment_page(
+                    env, sid, pk, cs, timeout=min(timeout, 25.0))
+                if stripe_page:
+                    pricing = parse_checkout_pricing(detail, fallback=created, stripe_page=stripe_page)
         out["ok"] = True
         out["minimum_seats"] = minimum
         out["supported"] = minimum <= 1
@@ -570,3 +718,43 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
             env.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+def format_probe_summary(res: dict | None) -> str:
+    """把单席位 + 结账折扣探测结果格式化成日志摘要。"""
+    res = res or {}
+    if not res.get("ok"):
+        return f"探测失败：{res.get('error') or '未知错误'}"
+    seat_part = (
+        "支持单席位（最少 1 席，可省一半订阅费）"
+        if res.get("supported")
+        else f"不支持单席位（最少 {res.get('minimum_seats')} 席）"
+    )
+    cur = str(res.get("checkout_currency") or res.get("currency") or "").strip().upper()
+    unit = f" {cur}" if cur else ""
+    tot = res.get("checkout_total_amount")
+    sub = res.get("checkout_subtotal_amount")
+    disc = res.get("checkout_discount_amount")
+    pct = res.get("checkout_discount_pct")
+    label = str(res.get("checkout_discount_label") or "").strip()
+    label_suffix = f" [{label}]" if label else ""
+    if res.get("free_trial") is True:
+        sub_part = f"，原价 {sub}{unit}" if sub is not None else ""
+        return f"{seat_part} · 首月免费（支付价 0{unit}，减免 100%{sub_part}）{label_suffix}"
+    has_pct = pct is not None and float(pct) > 0
+    has_disc = disc is not None and float(disc) > 0
+    if has_pct or has_disc:
+        parts = []
+        if has_pct:
+            pct_f = float(pct)
+            pct_str = str(int(pct_f)) if pct_f.is_integer() else f"{pct_f:.1f}".rstrip("0").rstrip(".")
+            parts.append(f"{pct_str}%折扣")
+        if has_disc:
+            parts.append(f"优惠 -{disc}{unit}")
+        if tot is not None:
+            parts.append(f"实付 {tot}{unit}")
+        return f"{seat_part} · 有折扣（{'，'.join(parts)}）{label_suffix}"
+    if res.get("free_trial") is False:
+        price_str = f"{tot}{unit}" if tot is not None else "大于 0"
+        return f"{seat_part} · 无折扣（实付 {price_str}）"
+    return seat_part
