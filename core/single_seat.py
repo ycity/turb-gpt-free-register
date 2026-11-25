@@ -31,11 +31,18 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Stripe 零小数币种（minorUnitsAmount 直接等于面额，不除以 100）
+_ZERO_DECIMAL_CURRENCIES = {
+    "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA",
+    "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+}
 
 CHECKOUT_CREATE = "https://chatgpt.com/backend-api/payments/checkout"
 CHECKOUT_DETAIL = "https://chatgpt.com/backend-api/payments/checkout/openai_llc/{sid}"
@@ -97,6 +104,122 @@ def build_create_payload(workspace: str, seats: int, country: str,
     if promo:
         payload["promo_code"] = promo
     return payload
+
+
+def _extract_minor_amount(box: Any, currency: str = "") -> int | None:
+    """从 {minorUnitsAmount, amount} 对象提取最小货币单位整数；读不到返回 None。
+
+    严禁把缺失/None 当 0，否则接口缺字段时会被误标为"首月免费"。
+    """
+    if isinstance(box, bool) or box is None:
+        return None
+    scale = 1 if str(currency or "").strip().upper() in _ZERO_DECIMAL_CURRENCIES else 100
+    if isinstance(box, (int, float)):
+        return int(round(float(box)))
+    if isinstance(box, dict):
+        minor = box.get("minorUnitsAmount")
+        if minor is not None and not isinstance(minor, bool):
+            try:
+                return int(round(float(minor)))
+            except (TypeError, ValueError):
+                pass
+        amt = box.get("amount")
+        if amt is not None and not isinstance(amt, bool):
+            if isinstance(amt, (int, float)):
+                return int(round(float(amt) * scale))
+            text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", str(amt).strip())
+            m = re.search(r"-?\d+(?:[.,]\d+)?", text)
+            if m:
+                try:
+                    return int(round(float(m.group(0).replace(",", ".")) * scale))
+                except ValueError:
+                    pass
+    return None
+
+
+def _minor_to_major(minor: int | None, currency: str = "") -> float | None:
+    """把最小货币单位转成展示金额（如 6976 -> 69.76，0 -> 0.0）。"""
+    if minor is None:
+        return None
+    if str(currency or "").strip().upper() in _ZERO_DECIMAL_CURRENCIES:
+        return float(minor)
+    return round(minor / 100.0, 2)
+
+
+def parse_checkout_pricing(detail: dict | None,
+                           fallback: dict | None = None) -> dict:
+    """从 checkout 响应解析本次应付价格并判断是否首月免费（支付价 == 0）。
+
+    优先读 GET 详情的 checkout_state.total.total；缺失时回退到 POST 创建响应。
+    """
+    out: dict[str, Any] = {
+        "free_trial": None,
+        "checkout_total_minor": None,
+        "checkout_total_amount": None,
+        "checkout_currency": "",
+        "checkout_campaign": "",
+    }
+    sources = [s for s in (detail, fallback) if isinstance(s, dict)]
+    if not sources:
+        return out
+
+    currency = ""
+    for src in sources:
+        state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
+        bd = src.get("billing_details") if isinstance(src.get("billing_details"), dict) else {}
+        cur = str(state.get("currency") or bd.get("currency") or "").strip().upper()
+        if cur:
+            currency = cur
+            break
+    out["checkout_currency"] = currency
+
+    for src in sources:
+        camp = src.get("promo_campaign")
+        if isinstance(camp, dict):
+            cid = str(camp.get("promo_campaign_id") or camp.get("id") or camp.get("name") or "").strip()
+            if cid:
+                out["checkout_campaign"] = cid
+                break
+        elif isinstance(camp, str) and camp.strip():
+            out["checkout_campaign"] = camp.strip()
+            break
+
+    total_minor: int | None = None
+    for src in sources:
+        state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
+        tot_box = state.get("total") if isinstance(state.get("total"), dict) else {}
+        cand = _extract_minor_amount(tot_box.get("total"), currency)
+        if cand is not None:
+            total_minor = cand
+            break
+
+    if total_minor is not None:
+        out["checkout_total_minor"] = total_minor
+        out["checkout_total_amount"] = _minor_to_major(total_minor, currency)
+        out["free_trial"] = (total_minor == 0)
+    return out
+
+
+def read_checkout_detail(env: Any, headers: dict, session_id: str,
+                         timeout: float = 45.0) -> dict | None:
+    """读 checkout 详情完整 JSON；失败返回 None。
+
+    必须带 supports_business_seat_offer=true，否则 business_minimum_seats 不返回。
+    """
+    url = CHECKOUT_DETAIL.format(sid=session_id) + "?supports_business_seat_offer=true"
+    try:
+        resp = env.get(url, headers=headers, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 - 探测失败不该打断主流程
+        logger.debug("[单席位] 读详情失败：%s", exc)
+        return None
+    if resp.status_code != 200:
+        logger.debug("[单席位] 读详情 HTTP %s", resp.status_code)
+        return None
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def read_minimum_seats(env: Any, headers: dict, session_id: str,
@@ -174,6 +297,9 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
     from core.team_checkout_service import COUNTRY_CURRENCY
 
     out = {"ok": False, "supported": None, "minimum_seats": None,
+           "free_trial": None, "checkout_total_minor": None,
+           "checkout_total_amount": None, "checkout_currency": "",
+           "checkout_campaign": "",
            "country": "", "currency": "", "error": ""}
 
     token = normalize_token(str(account.get("access_token") or ""))
@@ -251,7 +377,8 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
             out["error"] = f"创建 checkout HTTP {resp.status_code}: {(resp.text or '')[:160]}"
             return out
         try:
-            sid = str((resp.json() or {}).get("checkout_session_id") or "")
+            created = resp.json() or {}
+            sid = str(created.get("checkout_session_id") or "")
         except Exception:  # noqa: BLE001
             out["error"] = "创建响应不是 JSON"
             return out
@@ -259,16 +386,32 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
             out["error"] = "创建成功但没拿到 checkout_session_id"
             return out
 
-        minimum = read_minimum_seats(env, headers, sid, timeout=timeout)
+        detail = read_checkout_detail(env, headers, sid, timeout=timeout)
+        minimum = None
+        if isinstance(detail, dict):
+            try:
+                minimum = int(detail.get("business_minimum_seats"))
+            except (TypeError, ValueError):
+                minimum = None
         if minimum is None:
             out["error"] = "读不到 business_minimum_seats"
             return out
+        pricing = parse_checkout_pricing(detail, fallback=created)
         out["ok"] = True
         out["minimum_seats"] = minimum
         out["supported"] = minimum <= 1
-        logger.info("[单席位] 账号 %s 探测结果：min=%s 支持=%s（出口 %s/%s）",
-                    account.get("email") or account.get("id"),
-                    minimum, out["supported"], country, currency)
+        out["free_trial"] = pricing["free_trial"]
+        out["checkout_total_minor"] = pricing["checkout_total_minor"]
+        out["checkout_total_amount"] = pricing["checkout_total_amount"]
+        out["checkout_currency"] = pricing["checkout_currency"] or currency
+        out["checkout_campaign"] = pricing["checkout_campaign"]
+        logger.info(
+            "[单席位] 账号 %s 探测结果：min=%s 支持1席=%s 首月免费=%s 支付价=%s %s（出口 %s/%s）",
+            account.get("email") or account.get("id"),
+            minimum, out["supported"], out["free_trial"],
+            out["checkout_total_amount"], out["checkout_currency"],
+            country, currency,
+        )
         return out
     finally:
         try:

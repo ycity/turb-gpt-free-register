@@ -46,47 +46,29 @@ def _returns(src):
     return [m.group(0) for m in re.finditer(r"return `[^`]*`;", src)]
 
 
-class SeatInEveryBranchTest(unittest.TestCase):
-    """核心：每条 return 分支都要带席位徽章。"""
+class SeatColumnDecoupledFrom2FATest(unittest.TestCase):
+    """席位和首月免费独立成「Team席位」列，彻底与 2FA 列解耦。
 
-    def setUp(self):
-        self.src = _fn("_totpCellV2")
-        self.rets = _returns(self.src)
+    以前席位挤在 _totpCellV2 里导致未开 2FA 分支漏渲染；现在独立成
+    <td class="col-seat">${_teamSeatCellV2(r)}</td>，无论 2FA 处于何种状态
+    每行都会无条件渲染席位列。
+    """
 
-    def test_has_multiple_branches(self):
-        self.assertGreaterEqual(len(self.rets), 3, "分支数变了，测试需同步更新")
+    def test_dedicated_team_seat_column_in_row(self):
+        i = HTML.index("const rowHtmlV2 = (r) =>")
+        row = HTML[i:HTML.index("`;", i)]
+        self.assertIn('<td class="col-seat">${_teamSeatCellV2(r)}</td>', row)
 
-    def test_every_branch_renders_seat(self):
-        """这是本次修复的核心断言。
+    def test_seat_cell_does_not_depend_on_2fa(self):
+        src = _fn("_teamSeatCellV2")
+        self.assertIn("_singleSeatTag(r)", src)
+        self.assertIn("_teamFreeTrialTag(r)", src)
+        for bad in ("totp_enabled", "totp_secret", "totp_setup_status"):
+            self.assertNotIn(bad, src, "Team席位列不该依赖 2FA 字段：%s" % bad)
 
-        以前只有 enabled 分支有，没开 2FA 的号就看不到席位。
-        """
-        missing = [i for i, r in enumerate(self.rets) if "${seat}" not in r]
-        self.assertEqual(
-            missing, [],
-            "第 %s 条 return 分支没有渲染席位徽章：%s" % (
-                missing, [self.rets[i][:90] for i in missing]))
-
-    def test_seat_computed_before_branches(self):
-        """席位要在分支外算好，避免某条分支漏掉。"""
-        self.assertIn("const seat = _singleSeatTag(r);", self.src)
-        seat_pos = self.src.index("const seat = _singleSeatTag(r);")
-        first_ret = self.src.index("return `")
-        self.assertLess(seat_pos, first_ret, "席位必须在所有分支之前算好")
-
-    def test_no_2fa_branch_has_seat(self):
-        """没开 2FA 那条分支（有「开启2FA」按钮的）必须带席位。"""
-        target = [r for r in self.rets if "${btn}" in r]
-        self.assertTrue(target, "找不到『开启2FA』那条分支")
-        for r in target:
-            self.assertIn("${seat}", r, "没开 2FA 的号看不到席位")
-
-    def test_queued_branch_has_seat(self):
-        """2FA 排队/开启中的号，席位也该照常显示。"""
-        target = [r for r in self.rets if "status-running" in r]
-        self.assertTrue(target)
-        for r in target:
-            self.assertIn("${seat}", r)
+    def test_totp_cell_no_longer_embeds_seat(self):
+        src = _fn("_totpCellV2")
+        self.assertNotIn("_singleSeatTag", src, "席位已独立成列，2FA 列里不再重复渲染")
 
 
 class SeatTagTest(unittest.TestCase):

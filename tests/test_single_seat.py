@@ -176,10 +176,11 @@ class UiTest(unittest.TestCase):
     def test_route_exists(self):
         self.assertIn('"/api/accounts/<int:acc_id>/probe-single-seat"', APP)
 
-    def test_tag_rendered_in_2fa_cell(self):
+    def test_tag_rendered_in_team_seat_cell(self):
         self.assertIn("_singleSeatTag", HTML)
-        i = HTML.index("function _totpCellV2")
-        self.assertIn("_singleSeatTag(r)", HTML[i:i + 1800])
+        i = HTML.index("function _teamSeatCellV2")
+        self.assertIn("_singleSeatTag(r)", HTML[i:i + 1200])
+        self.assertIn("_teamFreeTrialTag(r)", HTML[i:i + 1200])
 
     def test_distinguishes_unknown_from_unsupported(self):
         """没探测过 ≠ 不支持，必须区分显示。"""

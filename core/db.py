@@ -687,6 +687,8 @@ def _account_filter_sql(
             where.append(f"{seat_expr} = 0")
         elif seat in {"unknown", "unprobed", "not_checked"}:
             where.append(f"{seat_expr} IS NULL")
+        elif seat in {"free_trial", "free", "team_free_trial"}:
+            where.append("json_extract(payload, '$.team_free_trial') = 1")
     return where, params
 
 
@@ -2036,6 +2038,8 @@ def _matches_seat_filter(row: dict, seat_filter: str | None) -> bool:
         return is_multi
     if seat_filter in {"unknown", "unprobed", "not_checked"}:
         return not probed
+    if seat_filter in {"free_trial", "free", "team_free_trial"}:
+        return bool(row.get("team_free_trial"))
     return True
 
 
@@ -2130,6 +2134,8 @@ def list_account_plan_check_statuses(
         "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
         "single_seat_supported", "single_seat_minimum",
         "single_seat_checked_at", "single_seat_error",
+        "team_free_trial", "team_checkout_total_minor",
+        "team_checkout_total_amount", "team_checkout_currency",
     )
     with _LOCK:
         limit = max(1, int(limit))
@@ -2930,6 +2936,23 @@ def update_account_single_seat(acc_id: int, result: dict | None = None) -> bool:
         if result.get("ok"):
             row["single_seat_supported"] = bool(result.get("supported"))
             row["single_seat_minimum"] = result.get("minimum_seats")
+            if result.get("free_trial") is not None:
+                row["team_free_trial"] = bool(result.get("free_trial"))
+            else:
+                row.pop("team_free_trial", None)
+            if result.get("checkout_total_minor") is not None:
+                row["team_checkout_total_minor"] = int(result.get("checkout_total_minor"))
+            else:
+                row.pop("team_checkout_total_minor", None)
+            if result.get("checkout_total_amount") is not None:
+                row["team_checkout_total_amount"] = float(result.get("checkout_total_amount"))
+            else:
+                row.pop("team_checkout_total_amount", None)
+            cur = str(result.get("checkout_currency") or result.get("currency") or "").strip().upper()
+            if cur:
+                row["team_checkout_currency"] = cur
+            else:
+                row.pop("team_checkout_currency", None)
             row["single_seat_error"] = None
         else:
             row["single_seat_error"] = str(result.get("error") or "")[:300]
