@@ -749,7 +749,7 @@
     .accounts-table-v2 .col-proxy { width: 120px; }
     .accounts-table-v2 .col-token { width: 100px; }
     .accounts-table-v2 .col-plan { width: 220px; }
-    .accounts-table-v2 .col-seat { width: 155px; }
+    .accounts-table-v2 .col-seat { width: 165px; }
     .accounts-table-v2 .col-small { width: 330px; }
     .accounts-table-v2 .col-status { width: 110px; }
     .accounts-table-v2 .col-agent { width: 140px; }
@@ -4607,11 +4607,20 @@ function _singleSeatTag(r) {
   return `<button type="button" class="acc-v2-twofa-btn" data-probe-single-seat="${esc(r.id)}" title="${t}">测席位</button>`;
 }
 function _teamFreeTrialTag(r) {
-  if (r.team_free_trial !== true) return '';
   const checked = r.single_seat_checked_at;
   const cur = r.team_checkout_currency || '';
-  const tip = `Team 结账探测支付价格为 0${cur ? ' ' + cur : ''}（具备首月最多 5 席位免费体验资格）${checked ? '\n探测时间: ' + checked : ''}`;
-  return `<span class="pill status-free-trial" title="${esc(tip)}">首月免费</span>`;
+  if (r.team_free_trial === true) {
+    const tip = `Team 结账探测支付价格为 0${cur ? ' ' + cur : ''}（具备首月最多 5 席位免费体验资格）${checked ? '\n探测时间: ' + checked : ''}`;
+    return `<span class="pill status-free-trial" title="${esc(tip)}">首月免费</span>`;
+  }
+  if (r.team_free_trial === false) {
+    const amt = r.team_checkout_total_amount;
+    const priceDesc = (amt !== undefined && amt !== null && amt !== '')
+      ? `${amt}${cur ? ' ' + cur : ''}` : '大于 0';
+    const tip = `Team 结账探测支付价格为 ${priceDesc}（非首月免费）${checked ? '\n探测时间: ' + checked : ''}`;
+    return `<span class="pill status-used" title="${esc(tip)}">非免费</span>`;
+  }
+  return '';
 }
 function _teamSeatCellV2(r) {
   // 独立「Team席位」列：集中展示 1席/2席 与 首月免费 徽章，与 2FA 完全解耦。

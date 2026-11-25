@@ -296,6 +296,7 @@ class TeamSeatColumnUiTest(unittest.TestCase):
     def test_free_trial_badge_and_styles_present(self):
         self.assertIn("function _teamFreeTrialTag", HTML)
         self.assertIn("首月免费", HTML)
+        self.assertIn("非免费", HTML)
         self.assertIn(".accounts-table-v2 .pill.status-free-trial", HTML)
         self.assertIn(".accounts-table-v2 .col-seat { width:", HTML)
 
