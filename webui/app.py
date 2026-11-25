@@ -220,11 +220,14 @@ def _compact_account_for_list(row: dict, proxy_names: dict[str, str] | None = No
         "subscription_no", "subscription_kind", "paid_at", "paid_at_estimated",
         # 这一单用的是哪张卡（VCC-后四位 或 卡池备注名），对账和排查用
         "pay_card_label",
-        # 单席位 / 首月免费 Team 探测结果
+        # 单席位 / 首月免费 / 折扣 Team 探测结果
         "single_seat_supported", "single_seat_minimum",
         "single_seat_checked_at", "single_seat_error",
         "team_free_trial", "team_checkout_total_minor",
         "team_checkout_total_amount", "team_checkout_currency",
+        "team_checkout_subtotal_minor", "team_checkout_subtotal_amount",
+        "team_checkout_discount_minor", "team_checkout_discount_amount",
+        "team_checkout_discount_pct", "team_checkout_discount_label",
         # 套餐展示补充：付费到期/折扣/失败原因。
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",

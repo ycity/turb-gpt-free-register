@@ -146,16 +146,111 @@ def _minor_to_major(minor: int | None, currency: str = "") -> float | None:
     return round(minor / 100.0, 2)
 
 
+def _extract_discount_meta(sources: list[dict], currency: str = "") -> tuple[float | None, int | None, str]:
+    """从 checkout 响应里提取显式折扣百分比、折扣金额（最小单位）和活动标签。"""
+    pct_keys = ("percent_off", "percentOff", "discount_percentage", "discountPercentage", "percentage")
+    amt_keys = ("minorUnitsAmount", "amount_off", "amountOff")
+    label_keys = ("displayName", "display_name", "promotion_type_label", "title", "name", "promo_campaign_id")
+
+    best_pct: float | None = None
+    best_amt_minor: int | None = None
+    best_label = ""
+    fallback_label = ""
+
+    def _visit(obj: Any, depth: int = 0) -> None:
+        nonlocal best_pct, best_amt_minor, best_label, fallback_label
+        if depth > 4 or obj is None:
+            return
+        if isinstance(obj, list):
+            for it in obj:
+                _visit(it, depth + 1)
+            return
+        if isinstance(obj, str):
+            s = obj.strip()
+            if s and not best_label:
+                best_label = s
+            return
+        if not isinstance(obj, dict):
+            return
+        for k in pct_keys:
+            v = obj.get(k)
+            if v is not None and not isinstance(v, bool):
+                try:
+                    f = float(v)
+                    if 0 < f <= 100 and (best_pct is None or f > best_pct):
+                        best_pct = round(f, 2)
+                except (TypeError, ValueError):
+                    pass
+        found_minor = False
+        for k in amt_keys:
+            v = obj.get(k)
+            if v is not None and not isinstance(v, bool):
+                try:
+                    minor = abs(int(round(float(v))))
+                    if minor > 0 and (best_amt_minor is None or minor > best_amt_minor):
+                        best_amt_minor = minor
+                    found_minor = True
+                except (TypeError, ValueError):
+                    pass
+        if not found_minor and isinstance(obj.get("amount"), str):
+            parsed = _extract_minor_amount(obj, currency)
+            if parsed is not None and abs(parsed) > 0:
+                minor = abs(parsed)
+                if best_amt_minor is None or minor > best_amt_minor:
+                    best_amt_minor = minor
+        if not best_label:
+            for k in label_keys:
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    best_label = v.strip()
+                    break
+        if not fallback_label:
+            vid = obj.get("id")
+            if isinstance(vid, str) and vid.strip():
+                fallback_label = vid.strip()
+        for sub_k in ("coupon", "discount", "amount", "metadata", "promotion_code", "promo_campaign"):
+            if sub_k in obj and obj[sub_k] is not None:
+                if sub_k == "amount" and not isinstance(obj[sub_k], (dict, list)):
+                    continue
+                _visit(obj[sub_k], depth + 1)
+
+    for src in sources:
+        for top_k in ("promo_campaign", "immediate_discount_settings", "scheduled_discount_preview"):
+            if src.get(top_k) is not None:
+                _visit(src.get(top_k))
+        state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
+        if state.get("discountAmounts"):
+            _visit(state.get("discountAmounts"))
+        for li in state.get("lineItems") or []:
+            if not isinstance(li, dict):
+                continue
+            if li.get("discount") is not None:
+                _visit(li.get("discount"))
+            if li.get("discountAmounts"):
+                _visit(li.get("discountAmounts"))
+
+    # 仅保留合法范围
+    if best_pct is not None and not (0 < best_pct <= 100):
+        best_pct = None
+    return best_pct, best_amt_minor, (best_label or fallback_label)
+
+
 def parse_checkout_pricing(detail: dict | None,
                            fallback: dict | None = None) -> dict:
-    """从 checkout 响应解析本次应付价格并判断是否首月免费（支付价 == 0）。
+    """从 checkout 响应解析本次应付价格、是否首月免费（支付价 == 0）及具体折扣比例。
 
-    优先读 GET 详情的 checkout_state.total.total；缺失时回退到 POST 创建响应。
+    优先读 GET 详情的 checkout_state.total；缺失时回退到 POST 创建响应。
     """
     out: dict[str, Any] = {
         "free_trial": None,
         "checkout_total_minor": None,
         "checkout_total_amount": None,
+        "checkout_subtotal_minor": None,
+        "checkout_subtotal_amount": None,
+        "checkout_discount_minor": None,
+        "checkout_discount_amount": None,
+        "checkout_discount_pct": None,
+        "checkout_discount_label": "",
         "checkout_currency": "",
         "checkout_campaign": "",
     }
@@ -185,18 +280,65 @@ def parse_checkout_pricing(detail: dict | None,
             break
 
     total_minor: int | None = None
+    subtotal_minor: int | None = None
+    discount_minor: int | None = None
     for src in sources:
         state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
         tot_box = state.get("total") if isinstance(state.get("total"), dict) else {}
-        cand = _extract_minor_amount(tot_box.get("total"), currency)
-        if cand is not None:
-            total_minor = cand
-            break
+        if total_minor is None:
+            cand = _extract_minor_amount(tot_box.get("total"), currency)
+            if cand is not None:
+                total_minor = cand
+        if subtotal_minor is None:
+            cand_sub = _extract_minor_amount(tot_box.get("subtotal"), currency)
+            if cand_sub is not None:
+                subtotal_minor = cand_sub
+        if discount_minor is None:
+            cand_disc = _extract_minor_amount(tot_box.get("discount"), currency)
+            if cand_disc is not None:
+                discount_minor = abs(cand_disc)
+
+    # 若 total.subtotal 缺失，尝试累加 lineItems.subtotal
+    if subtotal_minor is None:
+        for src in sources:
+            state = src.get("checkout_state") if isinstance(src.get("checkout_state"), dict) else {}
+            items = [li for li in (state.get("lineItems") or []) if isinstance(li, dict)]
+            if items:
+                vals = [_extract_minor_amount(li.get("subtotal"), currency) for li in items]
+                if vals and all(v is not None for v in vals):
+                    subtotal_minor = sum(int(v) for v in vals if v is not None)
+                    break
+
+    meta_pct, meta_amt_minor, meta_label = _extract_discount_meta(sources, currency)
+    if (discount_minor is None or discount_minor == 0) and meta_amt_minor:
+        discount_minor = meta_amt_minor
+    if total_minor == 0 and subtotal_minor and subtotal_minor > 0 and (not discount_minor):
+        discount_minor = subtotal_minor
+
+    if subtotal_minor is not None:
+        out["checkout_subtotal_minor"] = subtotal_minor
+        out["checkout_subtotal_amount"] = _minor_to_major(subtotal_minor, currency)
+    if discount_minor is not None:
+        out["checkout_discount_minor"] = discount_minor
+        out["checkout_discount_amount"] = _minor_to_major(discount_minor, currency)
+    if meta_label:
+        out["checkout_discount_label"] = meta_label[:120]
+
+    discount_pct: float | None = None
+    if total_minor == 0:
+        discount_pct = 100.0
+    elif meta_pct is not None:
+        discount_pct = meta_pct
+    elif discount_minor is not None and discount_minor > 0 and subtotal_minor is not None and subtotal_minor > 0:
+        discount_pct = min(100.0, round(discount_minor * 100.0 / subtotal_minor, 2))
+    elif total_minor is not None:
+        discount_pct = 0.0
 
     if total_minor is not None:
         out["checkout_total_minor"] = total_minor
         out["checkout_total_amount"] = _minor_to_major(total_minor, currency)
         out["free_trial"] = (total_minor == 0)
+    out["checkout_discount_pct"] = discount_pct
     return out
 
 
@@ -298,7 +440,10 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
 
     out = {"ok": False, "supported": None, "minimum_seats": None,
            "free_trial": None, "checkout_total_minor": None,
-           "checkout_total_amount": None, "checkout_currency": "",
+           "checkout_total_amount": None, "checkout_subtotal_minor": None,
+           "checkout_subtotal_amount": None, "checkout_discount_minor": None,
+           "checkout_discount_amount": None, "checkout_discount_pct": None,
+           "checkout_discount_label": "", "checkout_currency": "",
            "checkout_campaign": "",
            "country": "", "currency": "", "error": ""}
 
@@ -403,12 +548,19 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
         out["free_trial"] = pricing["free_trial"]
         out["checkout_total_minor"] = pricing["checkout_total_minor"]
         out["checkout_total_amount"] = pricing["checkout_total_amount"]
+        out["checkout_subtotal_minor"] = pricing["checkout_subtotal_minor"]
+        out["checkout_subtotal_amount"] = pricing["checkout_subtotal_amount"]
+        out["checkout_discount_minor"] = pricing["checkout_discount_minor"]
+        out["checkout_discount_amount"] = pricing["checkout_discount_amount"]
+        out["checkout_discount_pct"] = pricing["checkout_discount_pct"]
+        out["checkout_discount_label"] = pricing["checkout_discount_label"]
         out["checkout_currency"] = pricing["checkout_currency"] or currency
         out["checkout_campaign"] = pricing["checkout_campaign"]
         logger.info(
-            "[单席位] 账号 %s 探测结果：min=%s 支持1席=%s 首月免费=%s 支付价=%s %s（出口 %s/%s）",
+            "[单席位] 账号 %s 探测结果：min=%s 支持1席=%s 首月免费=%s 折扣=%s%% 支付价=%s %s（出口 %s/%s）",
             account.get("email") or account.get("id"),
             minimum, out["supported"], out["free_trial"],
+            out["checkout_discount_pct"],
             out["checkout_total_amount"], out["checkout_currency"],
             country, currency,
         )

@@ -127,11 +127,15 @@ def _probe_single_seat(account_id: int, email: str) -> dict:
 
 
 def _probe_ok(probe: dict) -> bool:
-    """测席位成功且命中单席位或首月免费（任一条件成立即值得自动换绑 2FA）。"""
+    """测席位成功且命中单席位、首月免费或任意折扣（任一成立即值得自动换绑 2FA）。"""
+    has_discount = (
+        float(probe.get("checkout_discount_pct") or 0) > 0
+        or int(probe.get("checkout_discount_minor") or 0) > 0
+    ) if isinstance(probe, dict) else False
     return (
         bool(probe)
         and probe.get("ok") is True
-        and (probe.get("supported") is True or probe.get("free_trial") is True)
+        and (probe.get("supported") is True or probe.get("free_trial") is True or has_discount)
     )
 
 
@@ -204,9 +208,10 @@ def _run_group(proxy: str, accounts: list[dict]) -> None:
                     probe = _probe_single_seat(account_id, email)
                     if probe.get("ok"):
                         logger.info(
-                            "[席位预热] %s 测席位：supported=%s minimum=%s free_trial=%s price=%s %s 出口=%s/%s",
+                            "[席位预热] %s 测席位：supported=%s minimum=%s free_trial=%s discount_pct=%s price=%s %s 出口=%s/%s",
                             email, probe.get("supported"), probe.get("minimum_seats"),
-                            probe.get("free_trial"), probe.get("checkout_total_amount"),
+                            probe.get("free_trial"), probe.get("checkout_discount_pct"),
+                            probe.get("checkout_total_amount"),
                             probe.get("checkout_currency") or probe.get("currency"),
                             probe.get("country"), probe.get("currency"),
                         )

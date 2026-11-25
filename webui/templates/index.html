@@ -850,6 +850,9 @@
     .accounts-table-v2 .pill.status-free-trial {
       color: #b45309; background: #fef3c7; border-color: #fcd34d; font-weight: 700;
     }
+    .accounts-table-v2 .pill.status-discount {
+      color: #4338ca; background: #eef2ff; border-color: #c7d2fe; font-weight: 700;
+    }
     .accounts-table-v2 .acc-v2-seat-wrap {
       display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap;
     }
@@ -4578,14 +4581,35 @@ function _codexCellV2(r) {
   if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="acc-v2-muted">-</span>`;
 }
+function _fmtPctValue(pct) {
+  const n = Number(pct);
+  if (Number.isNaN(n)) return '';
+  return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(1)));
+}
 function _seatPriceTip(r) {
   const amt = r.team_checkout_total_amount;
+  const sub = r.team_checkout_subtotal_amount;
+  const disc = r.team_checkout_discount_amount;
+  const pct = r.team_checkout_discount_pct;
   const cur = r.team_checkout_currency || '';
+  const unit = cur ? ' ' + cur : '';
+  const label = r.team_checkout_discount_label || '';
   if (r.team_free_trial === true) {
-    return `结账支付价: 0${cur ? ' ' + cur : ''}（首月最多 5 席免费体验）`;
+    const subStr = (sub !== undefined && sub !== null && sub !== '') ? `，原价 ${sub}${unit}` : '';
+    return `结账支付价: 0${unit}（首月免费 / 减免 100%${subStr}）${label ? `\n活动: ${label}` : ''}`;
+  }
+  const hasPct = pct !== undefined && pct !== null && Number(pct) > 0;
+  const hasDiscAmt = disc !== undefined && disc !== null && Number(disc) > 0;
+  if (hasPct || hasDiscAmt) {
+    const parts = [];
+    if (hasPct) parts.push(`减免 ${_fmtPctValue(pct)}%`);
+    if (hasDiscAmt) parts.push(`优惠 -${disc}${unit}`);
+    if (sub !== undefined && sub !== null && sub !== '') parts.push(`原价 ${sub}${unit}`);
+    if (amt !== undefined && amt !== null && amt !== '') parts.push(`实付 ${amt}${unit}`);
+    return `结账有折扣：${parts.join('，')}${label ? `\n活动: ${label}` : ''}`;
   }
   if (amt !== undefined && amt !== null && amt !== '') {
-    return `结账支付价: ${amt}${cur ? ' ' + cur : ''}（非首月免费）`;
+    return `结账支付价: ${amt}${unit}（无折扣）`;
   }
   return '';
 }
@@ -4603,36 +4627,50 @@ function _singleSeatTag(r) {
     return `<span class="acc-v2-muted" title="${esc(`该账号最少 ${mn || 2} 席` + extra)}">${esc(mn || 2)}席</span>`;
   }
   const err = r.single_seat_error || '';
-  const t = err ? `上次探测失败：${esc(err)}` : '检测该账号 Team 席位（1席）及首月免费资格（不支付、不消耗优惠码）';
+  const t = err ? `上次探测失败：${esc(err)}` : '检测该账号 Team 席位（1席）及首月免费/折扣资格（不支付、不消耗优惠码）';
   return `<button type="button" class="acc-v2-twofa-btn" data-probe-single-seat="${esc(r.id)}" title="${t}">测席位</button>`;
 }
 function _teamFreeTrialTag(r) {
   const checked = r.single_seat_checked_at;
   const cur = r.team_checkout_currency || '';
+  const unit = cur ? ' ' + cur : '';
+  const priceTip = _seatPriceTip(r);
+  const tail = checked ? `\n探测时间: ${checked}` : '';
   if (r.team_free_trial === true) {
-    const tip = `Team 结账探测支付价格为 0${cur ? ' ' + cur : ''}（具备首月最多 5 席位免费体验资格）${checked ? '\n探测时间: ' + checked : ''}`;
+    const tip = `${priceTip || `Team 结账探测支付价格为 0${unit}（首月最多 5 席免费体验）`}${tail}`;
     return `<span class="pill status-free-trial" title="${esc(tip)}">首月免费</span>`;
+  }
+  const pct = r.team_checkout_discount_pct;
+  const discAmt = r.team_checkout_discount_amount;
+  const discMinor = r.team_checkout_discount_minor;
+  const hasPct = pct !== undefined && pct !== null && Number(pct) > 0;
+  const hasDisc = (discMinor !== undefined && discMinor !== null && Number(discMinor) > 0)
+    || (discAmt !== undefined && discAmt !== null && Number(discAmt) > 0);
+  if (hasPct || hasDisc) {
+    const badge = hasPct ? `${_fmtPctValue(pct)}%折扣` : `减${discAmt}${unit}`;
+    const tip = `${priceTip || `Team 结账有折扣：${badge}`}${tail}`;
+    return `<span class="pill status-discount" title="${esc(tip)}">${esc(badge)}</span>`;
   }
   if (r.team_free_trial === false) {
     const amt = r.team_checkout_total_amount;
     const priceDesc = (amt !== undefined && amt !== null && amt !== '')
-      ? `${amt}${cur ? ' ' + cur : ''}` : '大于 0';
-    const tip = `Team 结账探测支付价格为 ${priceDesc}（非首月免费）${checked ? '\n探测时间: ' + checked : ''}`;
-    return `<span class="pill status-used" title="${esc(tip)}">非免费</span>`;
+      ? `${amt}${unit}` : '大于 0';
+    const tip = `Team 结账探测支付价格为 ${priceDesc}（无折扣 / 非首月免费）${tail}`;
+    return `<span class="pill status-used" title="${esc(tip)}">无折扣</span>`;
   }
   return '';
 }
 function _teamSeatCellV2(r) {
-  // 独立「Team席位」列：集中展示 1席/2席 与 首月免费 徽章，与 2FA 完全解耦。
+  // 独立「Team席位」列：集中展示 1席/2席 与 首月免费/具体折扣/无折扣 徽章，与 2FA 完全解耦。
   const seat = _singleSeatTag(r);
   const freeTag = _teamFreeTrialTag(r);
   const probed = r.single_seat_supported === true || r.single_seat_supported === false;
   const priceUnchecked = r.team_free_trial === undefined || r.team_free_trial === null;
   const plan = String(r.current_plan_type || r.plan_type || '').toLowerCase();
   const isPaid = !!(r.paid_at || r.subscription_no || (plan && plan !== 'free'));
-  // 老版本已测过席位但没测过 0 元价格的未订阅账号，提供一键补测按钮
+  // 老版本已测过席位但没测过折扣/0元价格的未订阅账号，提供一键补测按钮
   const reprobe = (probed && priceUnchecked && !isPaid)
-    ? `<button type="button" class="acc-v2-seat-reprobe" data-probe-single-seat="${esc(r.id)}" title="重新检测 Team 席位及首月免费资格（支付价格是否为 0）">测免费</button>`
+    ? `<button type="button" class="acc-v2-seat-reprobe" data-probe-single-seat="${esc(r.id)}" title="重新检测 Team 席位、首月免费及具体折扣比例">测折扣</button>`
     : '';
   return `<div class="acc-v2-seat-wrap">${seat}${freeTag}${reprobe}</div>`;
 }
@@ -8260,14 +8298,25 @@ async function probeSingleSeat(id, btn) {
                           { method: 'POST' });
     const s = await r.json();
     if (!s.ok) throw new Error(s.error || '探测失败');
+    const curUnit = s.checkout_currency ? ' ' + s.checkout_currency : '';
+    const hasPct = s.checkout_discount_pct !== null && s.checkout_discount_pct !== undefined && Number(s.checkout_discount_pct) > 0;
+    const hasDiscAmt = s.checkout_discount_amount !== null && s.checkout_discount_amount !== undefined && Number(s.checkout_discount_amount) > 0;
+    let priceMsg = '';
+    if (s.free_trial === true) {
+      priceMsg = ' · 支付价格为 0（首月免费）';
+    } else if (hasPct || hasDiscAmt) {
+      const discText = hasPct
+        ? `${_fmtPctValue(s.checkout_discount_pct)}%折扣`
+        : `减${s.checkout_discount_amount}${curUnit}`;
+      const payText = (s.checkout_total_amount !== null && s.checkout_total_amount !== undefined)
+        ? `，实付 ${s.checkout_total_amount}${curUnit}` : '';
+      priceMsg = ` · 有折扣（${discText}${payText}）`;
+    } else if (s.checkout_total_amount !== null && s.checkout_total_amount !== undefined) {
+      priceMsg = ` · 无折扣（支付价 ${s.checkout_total_amount}${curUnit}）`;
+    }
     showToast(
-      (s.supported ? '支持单席位（最少 1 席）' : `不支持单席位，最少 ${s.minimum_seats} 席`)
-      + (s.free_trial === true
-          ? ' · 支付价格为 0（首月免费）'
-          : (s.checkout_total_amount !== null && s.checkout_total_amount !== undefined
-              ? ` · 支付价 ${s.checkout_total_amount}${s.checkout_currency ? ' ' + s.checkout_currency : ''}`
-              : '')),
-      3000
+      (s.supported ? '支持单席位（最少 1 席）' : `不支持单席位，最少 ${s.minimum_seats} 席`) + priceMsg,
+      3500
     );
     if (typeof loadAccounts === 'function') loadAccounts();
   } catch (err) {

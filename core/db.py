@@ -689,6 +689,12 @@ def _account_filter_sql(
             where.append(f"{seat_expr} IS NULL")
         elif seat in {"free_trial", "free", "team_free_trial"}:
             where.append("json_extract(payload, '$.team_free_trial') = 1")
+        elif seat in {"discount", "has_discount"}:
+            where.append(
+                "(json_extract(payload, '$.team_free_trial') = 1 "
+                "OR COALESCE(json_extract(payload, '$.team_checkout_discount_pct'), 0) > 0 "
+                "OR COALESCE(json_extract(payload, '$.team_checkout_discount_minor'), 0) > 0)"
+            )
     return where, params
 
 
@@ -2040,6 +2046,12 @@ def _matches_seat_filter(row: dict, seat_filter: str | None) -> bool:
         return not probed
     if seat_filter in {"free_trial", "free", "team_free_trial"}:
         return bool(row.get("team_free_trial"))
+    if seat_filter in {"discount", "has_discount"}:
+        return (
+            bool(row.get("team_free_trial"))
+            or float(row.get("team_checkout_discount_pct") or 0) > 0
+            or int(row.get("team_checkout_discount_minor") or 0) > 0
+        )
     return True
 
 
@@ -2136,6 +2148,9 @@ def list_account_plan_check_statuses(
         "single_seat_checked_at", "single_seat_error",
         "team_free_trial", "team_checkout_total_minor",
         "team_checkout_total_amount", "team_checkout_currency",
+        "team_checkout_subtotal_minor", "team_checkout_subtotal_amount",
+        "team_checkout_discount_minor", "team_checkout_discount_amount",
+        "team_checkout_discount_pct", "team_checkout_discount_label",
     )
     with _LOCK:
         limit = max(1, int(limit))
@@ -2948,6 +2963,31 @@ def update_account_single_seat(acc_id: int, result: dict | None = None) -> bool:
                 row["team_checkout_total_amount"] = float(result.get("checkout_total_amount"))
             else:
                 row.pop("team_checkout_total_amount", None)
+            if result.get("checkout_subtotal_minor") is not None:
+                row["team_checkout_subtotal_minor"] = int(result.get("checkout_subtotal_minor"))
+            else:
+                row.pop("team_checkout_subtotal_minor", None)
+            if result.get("checkout_subtotal_amount") is not None:
+                row["team_checkout_subtotal_amount"] = float(result.get("checkout_subtotal_amount"))
+            else:
+                row.pop("team_checkout_subtotal_amount", None)
+            if result.get("checkout_discount_minor") is not None:
+                row["team_checkout_discount_minor"] = int(result.get("checkout_discount_minor"))
+            else:
+                row.pop("team_checkout_discount_minor", None)
+            if result.get("checkout_discount_amount") is not None:
+                row["team_checkout_discount_amount"] = float(result.get("checkout_discount_amount"))
+            else:
+                row.pop("team_checkout_discount_amount", None)
+            if result.get("checkout_discount_pct") is not None:
+                row["team_checkout_discount_pct"] = float(result.get("checkout_discount_pct"))
+            else:
+                row.pop("team_checkout_discount_pct", None)
+            disc_label = str(result.get("checkout_discount_label") or "").strip()[:120]
+            if disc_label:
+                row["team_checkout_discount_label"] = disc_label
+            else:
+                row.pop("team_checkout_discount_label", None)
             cur = str(result.get("checkout_currency") or result.get("currency") or "").strip().upper()
             if cur:
                 row["team_checkout_currency"] = cur
