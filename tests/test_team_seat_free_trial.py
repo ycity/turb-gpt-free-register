@@ -767,6 +767,108 @@ class StripeFallbackAndRegistrationFlowTest(unittest.TestCase):
         self.assertEqual(update2.call_args[0][0], 101)
         self.assertIn("recover_pending_register_seat_probes", APP)
 
+    def test_probe_piggybacks_accounts_check_promos_and_syncs_db(self):
+        class FakeResp:
+            def __init__(self, payload, status_code=200):
+                self._p = payload
+                self.status_code = status_code
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._p
+
+        class FakeEnv:
+            exit_geo = {"country": "US"}
+            blocked_until = 0.0
+            blocked_reason = ""
+
+            def __init__(self, **_kw):
+                pass
+
+            def js_timezone_offset_min(self):
+                return -480
+
+            def get_chatgpt_navigate_headers(self, **_kw):
+                return {}
+
+            def get_chatgpt_headers(self, **_kw):
+                return {}
+
+            def get(self, url, **_kw):
+                if "payments/checkout/openai_llc" in url:
+                    return FakeResp({
+                        "business_minimum_seats": 1,
+                        "checkout_state": {
+                            "currency": "usd",
+                            "total": {
+                                "subtotal": {"minorUnitsAmount": 5000, "amount": None},
+                                "discount": {"minorUnitsAmount": 0, "amount": None},
+                                "total": {"minorUnitsAmount": 5000, "amount": None},
+                            },
+                        },
+                    })
+                if "accounts/check/v4-2023-04-27" in url:
+                    return FakeResp({
+                        "accounts": {
+                            "default": {
+                                "account": {"account_id": "acc-1", "plan_type": "free"},
+                                "entitlement": {"subscription_plan": "chatgptfreeplan", "has_active_subscription": False},
+                                "has_eligible_promotion": True,
+                                "eligible_promo_campaigns": {
+                                    "plus": {
+                                        "id": "plus-1-month-free",
+                                        "metadata": {"discount": {"percentage": 100}, "title": "Try Plus free"},
+                                    },
+                                    "go": {
+                                        "id": "go-1-month-50-pct-off",
+                                        "metadata": {"discount": {"percentage": 50}},
+                                    },
+                                },
+                                "eligible_offers": {"offers": [{"id": "chatgptplusplan"}]},
+                            }
+                        }
+                    })
+                return FakeResp({})
+
+            def post(self, url, **_kw):
+                return FakeResp({"checkout_session_id": "oaics_promo1"})
+
+            def close(self):
+                pass
+
+        acc = {"id": 55, "email": "promo@e.test", "access_token": "tok"}
+        with patch("core.chatgpt_plan.normalize_token", return_value="tok"), \
+             patch("core.chatgpt_plan.token_claims", return_value={"token_expired": False}), \
+             patch("core.region_proxy.adopt_pool_exit", return_value=("", "")), \
+             patch("core.session.BrowserSession", FakeEnv):
+            res = single_seat.probe_single_seat(acc)
+
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["plus_trial_eligible"])
+        self.assertIn("plus", res["eligible_promo_campaigns"])
+        self.assertIn("go", res["eligible_promo_campaigns"])
+        self.assertTrue(res["plan_check"]["ok"])
+        self.assertTrue(res["plan_check"]["has_eligible_promotion"])
+        summary = single_seat.format_probe_summary(res)
+        self.assertIn("plus(100%)", summary)
+        self.assertIn("go(50%)", summary)
+
+        # update_account_single_seat 应自动同步调用 update_account_plan_check
+        rows = [{"id": 55}]
+        with patch.object(db, "_load_accounts", return_value=rows), \
+             patch.object(db, "_save_accounts"), \
+             patch.object(db, "update_account_plan_check") as mock_plan_upd:
+            db.update_account_single_seat(55, res)
+        mock_plan_upd.assert_called_once_with(acc_id=55, result=res["plan_check"])
+
+        # 若该账号正在手动查套餐（running），不应抢写覆盖
+        busy_rows = [{"id": 56, "plan_check_status": "running"}]
+        with patch.object(db, "_load_accounts", return_value=busy_rows), \
+             patch.object(db, "_save_accounts"), \
+             patch.object(db, "update_account_plan_check") as mock_plan_upd2:
+            db.update_account_single_seat(56, res)
+        mock_plan_upd2.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

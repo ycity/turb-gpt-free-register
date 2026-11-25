@@ -462,6 +462,38 @@ def read_stripe_payment_page(env: Any, session_id: str, publishable_key: str,
     return data if isinstance(data, dict) else None
 
 
+def _fetch_plan_check_in_session(env: Any, token: str, claims: dict,
+                                 *, timeout: float = 15.0) -> dict | None:
+    """复用席位探测已预热的 BrowserSession 顺带发 1 次 accounts/check。
+
+    与 ChatGPT #pricing 页面判断账号优惠资格同源：单次轻量 GET 即可拿到
+    eligible_promo_campaigns（Plus/Go/Business 促销与折扣百分比）、
+    has_eligible_promotion 与当前套餐。失败静默返回 None，不影响席位探测结果。
+    """
+    try:
+        from core.chatgpt_plan import ACCOUNTS_CHECK_PATH, _common_headers, parse_accounts_check
+        tz_fn = getattr(env, "js_timezone_offset_min", None)
+        tz = str(tz_fn()) if callable(tz_fn) else "-480"
+        url = f"https://chatgpt.com{ACCOUNTS_CHECK_PATH}?timezone_offset_min={urllib.parse.quote(tz)}"
+        headers = _common_headers(env, token, claims)
+        resp = env.get(url, headers=headers, allow_redirects=False, timeout=timeout)
+        status = int(getattr(resp, "status_code", 0) or 0)
+        if not (200 <= status < 300):
+            return None
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        parsed = parse_accounts_check(data, token=token)
+        parsed["http_status"] = status
+        parsed["attempt_count"] = 1
+        parsed["max_attempts"] = 1
+        parsed["timezone_offset_min"] = tz
+        return parsed
+    except Exception as exc:  # noqa: BLE001 - 附加检查绝不能打断席位探测
+        logger.debug("[单席位] 同会话顺带查套餐促销跳过/失败：%s", exc)
+        return None
+
+
 def read_checkout_detail(env: Any, headers: dict, session_id: str,
                          timeout: float = 45.0) -> dict | None:
     """读 checkout 详情完整 JSON；失败返回 None。
@@ -564,7 +596,8 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
            "checkout_subtotal_amount": None, "checkout_discount_minor": None,
            "checkout_discount_amount": None, "checkout_discount_pct": None,
            "checkout_discount_label": "", "checkout_currency": "",
-           "checkout_campaign": "",
+           "checkout_campaign": "", "eligible_promo_campaigns": {},
+           "plus_trial_eligible": None, "plan_check": None,
            "country": "", "currency": "", "error": ""}
 
     token = normalize_token(str(account.get("access_token") or ""))
@@ -704,12 +737,19 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
         out["checkout_discount_label"] = pricing["checkout_discount_label"]
         out["checkout_currency"] = pricing["checkout_currency"] or currency
         out["checkout_campaign"] = pricing["checkout_campaign"]
+        # 同会话顺带拉一次 accounts/check，把 #pricing 对应的套餐促销活动（Plus/Go/Business）一并带回
+        plan_check = _fetch_plan_check_in_session(env, token, claims, timeout=min(timeout, 15.0))
+        if isinstance(plan_check, dict) and plan_check.get("ok"):
+            out["plan_check"] = plan_check
+            out["eligible_promo_campaigns"] = plan_check.get("eligible_promo_campaigns") or {}
+            out["plus_trial_eligible"] = bool(plan_check.get("plus_trial_eligible"))
         logger.info(
-            "[单席位] 账号 %s 探测结果：min=%s 支持1席=%s 首月免费=%s 折扣=%s%% 支付价=%s %s（出口 %s/%s）",
+            "[单席位] 账号 %s 探测结果：min=%s 支持1席=%s 首月免费=%s 折扣=%s%% 支付价=%s %s 促销=%s（出口 %s/%s）",
             account.get("email") or account.get("id"),
             minimum, out["supported"], out["free_trial"],
             out["checkout_discount_pct"],
             out["checkout_total_amount"], out["checkout_currency"],
+            list((out.get("eligible_promo_campaigns") or {}).keys()),
             country, currency,
         )
         return out
@@ -721,7 +761,7 @@ def probe_single_seat(account: dict, *, timeout: float = 45.0) -> dict:
 
 
 def format_probe_summary(res: dict | None) -> str:
-    """把单席位 + 结账折扣探测结果格式化成日志摘要。"""
+    """把单席位 + 结账折扣 + 套餐促销探测结果格式化成日志摘要。"""
     res = res or {}
     if not res.get("ok"):
         return f"探测失败：{res.get('error') or '未知错误'}"
@@ -738,9 +778,23 @@ def format_probe_summary(res: dict | None) -> str:
     pct = res.get("checkout_discount_pct")
     label = str(res.get("checkout_discount_label") or "").strip()
     label_suffix = f" [{label}]" if label else ""
+
+    promo_suffix = ""
+    campaigns = res.get("eligible_promo_campaigns")
+    if isinstance(campaigns, dict) and campaigns:
+        promo_parts = []
+        for k, v in campaigns.items():
+            meta = (v.get("metadata") or {}) if isinstance(v, dict) else {}
+            dpct = (meta.get("discount") or {}).get("percentage") if isinstance(meta, dict) else None
+            if dpct is not None and not isinstance(dpct, bool):
+                promo_parts.append(f"{k}({dpct}%)")
+            else:
+                promo_parts.append(str(k))
+        promo_suffix = f" · 套餐促销: {', '.join(promo_parts)}"
+
     if res.get("free_trial") is True:
         sub_part = f"，原价 {sub}{unit}" if sub is not None else ""
-        return f"{seat_part} · 首月免费（支付价 0{unit}，减免 100%{sub_part}）{label_suffix}"
+        return f"{seat_part} · 首月免费（支付价 0{unit}，减免 100%{sub_part}）{label_suffix}{promo_suffix}"
     has_pct = pct is not None and float(pct) > 0
     has_disc = disc is not None and float(disc) > 0
     if has_pct or has_disc:
@@ -753,8 +807,8 @@ def format_probe_summary(res: dict | None) -> str:
             parts.append(f"优惠 -{disc}{unit}")
         if tot is not None:
             parts.append(f"实付 {tot}{unit}")
-        return f"{seat_part} · 有折扣（{'，'.join(parts)}）{label_suffix}"
+        return f"{seat_part} · 有折扣（{'，'.join(parts)}）{label_suffix}{promo_suffix}"
     if res.get("free_trial") is False:
         price_str = f"{tot}{unit}" if tot is not None else "大于 0"
-        return f"{seat_part} · 无折扣（实付 {price_str}）"
-    return seat_part
+        return f"{seat_part} · 无折扣（实付 {price_str}）{promo_suffix}"
+    return f"{seat_part}{promo_suffix}"

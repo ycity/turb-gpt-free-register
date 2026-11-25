@@ -2996,9 +2996,20 @@ def update_account_single_seat(acc_id: int, result: dict | None = None) -> bool:
             row["single_seat_error"] = None
         else:
             row["single_seat_error"] = str(result.get("error") or "")[:300]
+        plan_check_busy = row.get("plan_check_status") in {"queued", "running"}
         row["updated_at"] = _now()
         _save_accounts(rows)
-        return True
+    plan_check = result.get("plan_check")
+    if (
+        not plan_check_busy
+        and isinstance(plan_check, dict)
+        and plan_check.get("ok") is True
+    ):
+        try:
+            update_account_plan_check(acc_id=int(acc_id), result=plan_check)
+        except Exception:  # noqa: BLE001 - 套餐促销回写失败不影响席位探测落库
+            logger.debug("[单席位] 同步回写套餐促销失败: acc_id=%s", acc_id, exc_info=True)
+    return True
 
 
 def recover_interrupted_totp_setups() -> list[dict]:

@@ -380,6 +380,7 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         "plus_trial_duration_period": duration.get("period"),
         "plus_trial_promotion_type_label": plus_meta.get("promotion_type_label"),
         "eligible_promo_campaigns": promo_campaigns,
+        "has_eligible_promotion": item.get("has_eligible_promotion"),
         "eligible_offer_ids": eligible_offer_ids,
         "features_count": len(item.get("features") or []),
         "can_access_with_session": bool(item.get("can_access_with_session")),
